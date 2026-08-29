@@ -1455,13 +1455,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
 export default {
   id: 'oh-my-opencode-slim',
-  /**
-   * Marker for v2 TUI hosts: this package ships a TUI plugin entry (the
-   * `./tui` export → dist/tui2.js, which also serves v1 hosts). v1 hosts
-   * probe only the `server` field and ignore extra keys, so this field is
-   * inert on v1.
-   */
-  tui: true,
   server: OhMyOpenCodeLite,
   setup: createV2Setup(),
 };

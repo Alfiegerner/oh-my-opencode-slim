@@ -183,7 +183,9 @@ function verifyFreshInstall(tarballPath: string) {
       "if (pkg?.id !== 'oh-my-opencode-slim') throw new Error('default export has an unexpected plugin id');",
       "if (typeof pkg.server !== 'function') throw new Error('default export is missing a server plugin factory');",
       "if (typeof pkg.setup !== 'function') throw new Error('default export is missing a v2 setup factory');",
+      "if ('tui' in pkg) throw new Error('server plugin must not expose a tui marker');",
       "console.log('package loads');",
+
       'process.exit(0);',
     ].join('\n');
     console.log('Importing installed package entrypoint...');
