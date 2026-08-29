@@ -13,6 +13,7 @@ import type {
 import {
   deriveFullObjective,
   deriveTaskSessionLabel,
+  guardCompletedStatusText,
   parseTaskIdFromTaskOutput,
   parseTaskLaunchOutput,
   parseTaskStatusOutput,
@@ -350,12 +351,18 @@ export async function handleToolExecuteAfter(
       deps.clearRehydrateTombstone?.(status.taskID);
       normalizeLateCancelledTaskOutput(output, deps.backgroundJobBoard);
       if (exactCallConfirmed) deps.backgroundJobSupervisor?.onLaunch(record);
+      const guarded = guardCompletedStatusText(
+        status.state,
+        status.result,
+        record.resultSummary,
+      );
       const updated = deps.backgroundJobBoard.updateStatus({
         taskID: status.taskID,
-        state: status.state,
+        state: guarded.state,
         expectedGeneration: record.generation,
         timedOut: status.timedOut,
-        resultSummary: status.result,
+        resultSummary: guarded.resultSummary,
+        lastStatusError: guarded.lastStatusError,
       });
       log('[task-session-manager] foreground task status registered', {
         taskID: status.taskID,

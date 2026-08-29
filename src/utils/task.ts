@@ -134,6 +134,35 @@ export function parseTaskStateFromOutput(
   return undefined;
 }
 
+/** Diagnostic applied when a terminal `completed` report carries no text. */
+export const COMPLETED_WITHOUT_TEXT_DIAGNOSTIC =
+  'Task ended without a public text result; completion is not confirmed';
+
+export interface GuardedTaskStatus {
+  state: TaskOutputState;
+  resultSummary?: string;
+  lastStatusError?: string;
+}
+
+export function guardCompletedStatusText(
+  state: TaskOutputState,
+  result: string | undefined,
+  existingResultSummary: string | undefined,
+): GuardedTaskStatus {
+  if (
+    state === 'completed' &&
+    !result?.trim() &&
+    !existingResultSummary?.trim()
+  ) {
+    return {
+      state: 'error',
+      resultSummary: COMPLETED_WITHOUT_TEXT_DIAGNOSTIC,
+      lastStatusError: COMPLETED_WITHOUT_TEXT_DIAGNOSTIC,
+    };
+  }
+  return { state, resultSummary: result };
+}
+
 export function parseTaskResultFromOutput(output: string): string | undefined {
   // Require matching open/close tags via backreference
   const match = /<task_(result|error)>\s*([\s\S]*?)\s*<\/task_\1>/m.exec(

@@ -162,13 +162,12 @@ function verifyFreshInstall(tarballPath: string) {
       cwd: installDir,
     });
 
-    const installedEntry = path.join(
+    const installedPackageDir = path.join(
       installDir,
       'node_modules',
       'oh-my-opencode-slim',
-      'dist',
-      'index.js',
     );
+    const installedEntry = path.join(installedPackageDir, 'dist', 'index.js');
     const installedEntryContent = readFileSync(installedEntry, 'utf8');
     for (const pattern of suspiciousPathPatterns) {
       const match = installedEntryContent.match(pattern);
@@ -189,6 +188,49 @@ function verifyFreshInstall(tarballPath: string) {
     ].join('\n');
     console.log('Importing installed package entrypoint...');
     run('node', ['--input-type=module', '--eval', smokeScript], {
+      cwd: installDir,
+    });
+
+    const runtimeSmokeScript = [
+      "import pkg from 'oh-my-opencode-slim';",
+      'const agents = [];',
+      "const zod = await import('zod');",
+      "if (typeof zod.object !== 'function') throw new Error('zod is not bundled');",
+      'const registration = await pkg.setup({',
+      "  app: { name: 'opencode', version: 'release-smoke' },",
+      '  options: {},',
+      `  location: { directory: ${JSON.stringify(installDir)}, project: { id: 'release-smoke', directory: ${JSON.stringify(installDir)}, canonical: ${JSON.stringify(installDir)} } },`,
+      '  agent: {',
+      '    async transform(callback) {',
+      '      callback({',
+      '        list: () => [],',
+      '        get: () => undefined,',
+      '        default: () => {},',
+      '        update(id, mutate) { agents.push(id); mutate({}); },',
+      '        remove: () => {},',
+      '      });',
+      '      return { dispose() {} };',
+      '    },',
+      '    async reload() {},',
+      '    async list() { return []; },',
+      '  },',
+      '  tool: {',
+      '    async transform() { return { dispose() {} }; },',
+      '    async hook() { return { dispose() {} }; },',
+      '  },',
+      '  command: {',
+      '    async transform() { return { dispose() {} }; },',
+      '    async list() { return []; },',
+      '  },',
+      '  session: { async hook() { return { dispose() {} }; } },',
+      '});',
+      "if (!agents.includes('orchestrator') || !agents.includes('fixer')) throw new Error('v2 agent registration missing expected agents');",
+      'await registration();',
+      "console.log('v2 agent registration works');",
+      'process.exit(0);',
+    ].join('\n');
+    console.log('Verifying installed v2 agent registration...');
+    run('node', ['--input-type=module', '--eval', runtimeSmokeScript], {
       cwd: installDir,
     });
 

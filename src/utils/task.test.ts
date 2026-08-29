@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  COMPLETED_WITHOUT_TEXT_DIAGNOSTIC,
+  guardCompletedStatusText,
   parseTaskIdFromTaskOutput,
   parseTaskLaunchOutput,
   parseTaskResultFromOutput,
@@ -7,6 +9,41 @@ import {
   parseTaskStatusOutput,
   renderRunningTaskPlaceholder,
 } from './task';
+
+describe('guardCompletedStatusText', () => {
+  test('keeps completed only when non-empty result text exists', () => {
+    expect(
+      guardCompletedStatusText('completed', 'final text', undefined),
+    ).toEqual({ state: 'completed', resultSummary: 'final text' });
+  });
+
+  test('downgrades empty completed to error with a diagnostic', () => {
+    const guarded = guardCompletedStatusText('completed', undefined, undefined);
+    expect(guarded.state).toBe('error');
+    expect(guarded.resultSummary).toBe(COMPLETED_WITHOUT_TEXT_DIAGNOSTIC);
+  });
+
+  test('downgrades whitespace-only completed to error', () => {
+    expect(guardCompletedStatusText('completed', '  ', undefined).state).toBe(
+      'error',
+    );
+  });
+
+  test('keeps completed when the board already holds a summary', () => {
+    expect(
+      guardCompletedStatusText('completed', undefined, 'recorded result'),
+    ).toEqual({ state: 'completed', resultSummary: undefined });
+  });
+
+  test('passes non-completed states through unchanged', () => {
+    for (const state of ['running', 'error', 'cancelled'] as const) {
+      expect(guardCompletedStatusText(state, '', undefined)).toEqual({
+        state,
+        resultSummary: '',
+      });
+    }
+  });
+});
 
 describe('renderRunningTaskPlaceholder', () => {
   test('is deterministic and keyed only on the task ID', () => {
