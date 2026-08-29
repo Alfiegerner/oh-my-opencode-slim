@@ -149,7 +149,7 @@ describe('revived run tracker', () => {
     expect(harness.prompt).not.toHaveBeenCalled();
   });
 
-  test('publishes an explicitly empty completed turn but rejects tool-call finishes', async () => {
+  test('keeps terminal-empty output running until stabilization probes are exhausted', async () => {
     let toolCallFinish = true;
     const harness = createHarness(() => ({
       data: [
@@ -178,12 +178,19 @@ describe('revived run tracker', () => {
     expect(harness.board.get('ses_child')?.state).toBe('running');
 
     toolCallFinish = false;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      expect(
+        await harness.tracker.probe(harness.run.taskID, harness.run.generation),
+      ).toBe(false);
+      expect(harness.board.get('ses_child')?.state).toBe('running');
+    }
     expect(
       await harness.tracker.probe(harness.run.taskID, harness.run.generation),
     ).toBe(true);
     expect(harness.board.get('ses_child')).toMatchObject({
-      state: 'completed',
-      resultSummary: '',
+      state: 'error',
+      resultSummary:
+        'Task ended without a public text result; completion is not confirmed',
     });
   });
 
