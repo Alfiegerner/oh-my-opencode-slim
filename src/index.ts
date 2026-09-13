@@ -487,6 +487,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         (parentSessionID
           ? sessionMetadata.getModel(parentSessionID)
           : undefined),
+      sameProviderPolicy: runtime.backgroundJobs.sameProviderPolicy,
+      getSessionModel: (sessionID) => sessionMetadata.getModel(sessionID),
       shouldManageSession: (sessionID) =>
         sessionMetadata.getAgent(sessionID) === 'orchestrator',
       registerSessionAsOrchestrator: (sessionID) => {
