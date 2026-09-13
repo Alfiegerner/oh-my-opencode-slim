@@ -244,6 +244,40 @@ describe('v2 interview bridge', () => {
     ]);
   });
 
+  test('snapshots transcript before downstream part injection', async () => {
+    const bridge = createV2InterviewBridge(createContext());
+    const event = {
+      sessionID: 'ses_snapshot',
+      agent: 'orchestrator',
+      model: {},
+      system: [],
+      tools: {},
+      messages: [
+        {
+          id: 'answer',
+          role: 'user',
+          content: [{ type: 'text', text: 'the answer' }],
+        },
+      ],
+    };
+
+    await bridge.handleContext(event);
+    event.messages[0].content.push({
+      type: 'text',
+      text: 'injected by downstream transform',
+      synthetic: true,
+      metadata: { source: 'bridge-test' },
+    });
+
+    expect(bridge.getTranscript('ses_snapshot')).toEqual([
+      {
+        info: { role: 'user', id: 'answer' },
+        parts: [{ type: 'text', text: 'the answer' }],
+      },
+    ]);
+    bridge.dispose();
+  });
+
   test('projects text events and removes a deleted session', async () => {
     const bridge = createV2InterviewBridge(createContext());
     await bridge.handleContext({
