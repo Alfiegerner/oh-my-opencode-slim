@@ -7,7 +7,14 @@ export { createFilterAvailableSkillsHook } from './filter-available-skills';
 export { ForegroundFallbackManager } from './foreground-fallback';
 export { createJsonErrorRecoveryHook } from './json-error-recovery/hook';
 export { createLoopCommandHook } from './loop-command';
-export { createOrchestratorWakeScheduler } from './orchestrator-wake';
+export {
+  createOrchestratorWakeScheduler,
+  formatStoppedJobDelta,
+  ORCHESTRATOR_CHILDREN_WAKE_TEXT,
+  ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT,
+  ORCHESTRATOR_WAKE_TEXT,
+  ORCHESTRATOR_WAKE_UNCHANGED_CAP,
+} from './orchestrator-wake';
 export { createPhaseReminderHook } from './phase-reminder';
 export { createPostFileToolNudgeHook } from './post-file-tool-nudge';
 export { createReflectCommandHook } from './reflect';

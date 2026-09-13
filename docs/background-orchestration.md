@@ -502,6 +502,11 @@ revive an unreconciled stopped job. After the parent has been woken and the stop
 acknowledged, stale busy cannot flip the job back to running. Only explicit
 terminal task output proves completion, error, or cancellation.
 
+Stopped-job recovery facts are checked again by task ID and run generation
+before a queued recovery wake is delivered. The inline detail queue is bounded;
+when it overflows, the wake carries an explicit overflow signal directing the
+orchestrator to inspect all unreconciled stopped jobs on the board.
+
 Malformed status entries and failed status requests are surfaced as `status
 uncertain`; they never prove that a job stopped or completed and do not confirm
 a pending stop. Each observation is generation-aware, so a delayed response

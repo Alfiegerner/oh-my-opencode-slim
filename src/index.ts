@@ -41,6 +41,7 @@ import {
   createTaskSessionManagerHook,
   createToolLoopGuardHook,
   ForegroundFallbackManager,
+  formatStoppedJobDelta,
   SessionLifecycle,
 } from './hooks';
 import { processImageAttachments } from './hooks/image-hook';
@@ -511,12 +512,36 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         taskSessionManagerHook.hasInputWait(sessionID),
       isFallbackInProgress: (sessionID) =>
         foregroundFallback.isFallbackInProgress(sessionID),
+      isStoppedJobRecoveryCurrent: (taskID, generation) => {
+        const record = backgroundJobCoordinator.get(taskID);
+        return (
+          record?.generation === generation &&
+          record.state === 'stopped' &&
+          record.terminalUnreconciled
+        );
+      },
       coordinator: sessionLifecycle,
     });
     backgroundJobCoordinator.addTerminalOutcomeListener((record) => {
       if (record.state !== 'stopped' || !record.terminalUnreconciled) return;
       orchestratorWakeScheduler.triggerStoppedJobRecovery(
         record.parentSessionID,
+        // Self-contained stop facts: the recovery wake is an
+        // internal-initiator message, so under `checkpoint-compatible` it
+        // cannot create a board snapshot and any retained snapshot predates
+        // this stop (issue #1051).
+        formatStoppedJobDelta({
+          alias: record.alias,
+          taskID: record.taskID,
+          generation: record.generation,
+          state: record.state,
+          reason: record.timedOut
+            ? 'wall-clock deadline exceeded'
+            : record.statusUncertain
+              ? 'runtime status uncertain'
+              : 'stopped without a terminal result',
+        }),
+        `${record.taskID}:${record.generation}`,
       );
     });
 
