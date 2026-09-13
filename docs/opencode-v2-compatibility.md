@@ -187,7 +187,13 @@ degrades that single feature with a log line instead of breaking the load.
       (`src/v2/event-adapter.ts`): additive synthesis only — the raw v2 event
       is always dispatched first (the interview bridge depends on it), then
       synthesized v1 shapes: flat child `session.created` → v1
-      early-registration `{info: {id, parentID, agent?}}`, usage telemetry
+      early-registration `{info: {id, parentID, agent?}}`, flat
+      `session.deleted` → the v1 deletion-cleanup shape carrying **both**
+      id spellings the v1 consumers read (`properties.info.id` for the
+      cache monitor's session eviction, `properties.sessionID` for the
+      task-session-manager's tombstone/board teardown; no `generation` is
+      fabricated, so the event-router's unproven-relaunch deletion fence
+      keeps its strength), usage telemetry
       (`session.usage.updated`/`session.step.ended`) → a deduplicated
       completed-assistant `message.updated` for the cache monitor, the Form
       flow (`form.created`/`form.replied`/`form.cancelled`) → v1
@@ -231,6 +237,7 @@ the rest, and a zero-registration load logs a loud health-check warning.
 | Tool execute hooks (apply-patch recovery, task-session, json-recovery) | ✅ | ✅ `createToolExecuteBridges` with subagent→task normalization | — |
 | Built-in MCPs (context7, gh_grep) auto-registered | ✅ | ✅ `ctx.mcp.transform` | — |
 | webfetch secondary-model summaries | ✅ | ✅ via `ctx.generate.text` | host without `ctx.generate` → summaries unavailable (logged) |
+| Background-job state persistence (tombstones, deletion epochs, alias high-water marks) | ➖ process-local | ✅ via `ctx.storage` | optional domain; absent → pure in-memory fallback, zero behavior change (see [Background job state](#background-job-state-rehydrate-probe-and-persistence)) |
 | Foreground model fallback (rate-limit failover) | ✅ | ✅ shim translates re-prompt into `session.switchModel` + `delivery:"steer"` prompt | — |
 | `/preset` (interactive switcher) | ✅ | ✅ TUI plugin entry (`./tui` → `dist/tui2.js`): sidebar + `/preset` dialog or `/preset <name>` fast path | The layer registers from an `append: "app"` slot render because the host's `keymap.layer` is provider-scoped (calling it from plugin `setup` throws `Keymap.Provider is missing`); the command carries an `id` and `slash.arguments`; host needs `ui.slot` + `keymap.layer`; the interactive picker needs `ui.dialog.select` while `/preset <name>` works without it; feedback uses `ui.toast.show`; config-file `preset` still applies at load |
 | TUI default agent | ✅ orchestrator | ✅ orchestrator — `draft.default("orchestrator")`; the v2 TUI honors `default_agent` and hoists the default to the head of the agent list | — |
@@ -252,7 +259,21 @@ currently break this plugin:
   with the optional `metadata?` key observed on some events).
   The adapter reads `data` first with `properties` as a legacy fallback and
   always writes `properties` on the synthesized v1 shapes, because that is
-  the key the v1 consumers read.
+  the key the v1 consumers read. The interview bridge's event handler
+  (`handleEvent` in `src/v2/interview-bridge.ts`) resolves its payload
+  data-first the same way — reading only `properties` had left its
+  transcript projection and deletion cleanup dead on live v2 for every
+  event (`handleContext` is unaffected; it consumes a different event
+  type).
+- **`session.deleted` is synthesized with a dual id spelling.** v2
+  delivers deletion flat (`{sessionID}`), and the v1 deletion consumers
+  read two different spellings: the cache monitor's session eviction
+  reads `properties.info.id`, while the task-session-manager's
+  deletion handler accepts `properties.sessionID`. The synthesized v1
+  event therefore carries both. Without this synthesis the deletion
+  cleanup (rehydrate tombstone, board teardown, idle-token/input-wait
+  clears) never fired on v2, and deleted runs resurrected as
+  forever-running ghost records on the next request.
 - **Lifecycle keys on `session.execution.*`.** V2 hosts publish durable
   `session.execution.started/succeeded/failed/interrupted` events
   (`{sessionID}`, plus `error` on `.failed` and `reason` on
@@ -374,6 +395,124 @@ hosts without `session.switchModel`, the fallback replay is rejected with
 a clear error instead of silently replaying on the model that just failed
 (other prompt callers, like the orchestrator-wake scheduler, only pin the
 current model and keep steering).
+
+## Background job state: rehydrate probe and persistence
+
+Two mechanisms keep the in-memory background job board honest against the
+host across process and plugin restarts:
+
+### Rehydrate existence probe (`session.get`)
+
+Rehydration re-registers persisted *running* task tool parts so a plugin
+restart does not orphan in-flight background lanes — but a session deleted
+while the plugin was down would resurrect as a forever-running ghost.
+After rehydration registers a task, the task-session-manager transform
+fires a fire-and-forget `client.session.get` probe per newly registered
+taskID:
+
+- **Capability-gated, not host-gated — but v2-effective.** The probe runs
+  whenever the client exposes `session.get`; hosts without it skip
+  silently. The typed NotFound classification only crosses the v2 plugin
+  boundary (the host passes the raw core effect in-process): the v1 SDK
+  wraps 4xx responses as plain `Error` with a `.cause` (or returns an
+  `{error}` tuple when `throwOnError: false`), so on v1 hosts the probe
+  runs but harmlessly never tombstones — the wrapped rejection falls into
+  the transient fail-open path. The probe lives inside the existing
+  task-session-manager transform — no new pipeline step.
+- **NotFound classification is typed, never heuristic.** A rejection
+  tombstones the task only when `err._tag === 'Session.NotFoundError'`
+  (property check; never `instanceof` or message matching — the SDK error
+  class identity is unstable across host builds). Cleanup is
+  generation-freshness-guarded: the board record's generation is captured
+  before the async `get`, and a NotFound that resolves after a legitimate
+  same-ID relaunch (new generation, tombstone cleared) skips all cleanup
+  instead of deleting the live relaunched record. On a fresh hit, the four
+  probe cleanup actions run as one synchronous block — supervisor
+  `onSessionDeleted` first (it needs the record to exist so
+  deadline-exceeded runs finalize their wall-clock timeout; same ordering
+  as the event-router/coordinator deletion paths), then the rehydrate
+  tombstone, board drop, and concurrency `releaseTask` (all idempotent; a
+  missing `releaseTask` would leak an admission slot forever). The
+  canonical full deletion cleanup (input waits, idle tokens, pending-call
+  tracker, `clearParent`, task-context tracker, snapshots) runs via the
+  `session.deleted` event path.
+- **Any other rejection fails open** — the job stays registered and the
+  normal reconciliation paths keep their chance. The probe never rejects
+  unhandled.
+- **A resolved terminal outcome settles the job** through the same
+  `updateStatus` semantics as the idle-reconciliation host-outcome path:
+  `succeeded` requires usable final assistant text (otherwise the
+  textless-completion diagnostics apply, per the #1115 precedent);
+  `failed`/`interrupted` settle as error with the host outcome recorded.
+
+Related injection hardening: a remembered (possibly stale) processed
+completion now skips *cleanly* — the fence check runs before the
+deletion-epoch fail-closed branch in `updateFromInjectedCompletion`, so
+replaying an old completion after a delete + same-ID relaunch can no
+longer poison the fresh generation with `markStatusUncertain`. Unobserved
+completions for a deleted task still fail closed for every provenance
+kind.
+
+### Persistence via `ctx.storage` (v2)
+
+When the v2 host exposes the optional `storage` domain, the plugin
+persists background-job lifecycle state through
+`src/utils/background-job-persistence.ts` (configured in `setup` before
+the v1 factory runs):
+
+- **Tombstones and deletion epochs** are write-through: every in-memory
+  ledger mutation queues a matching persisted update, so the persisted
+  state tracks the ledger (writes are fire-and-forget — a crash between
+  the in-memory mutation and the queue flush loses that persisted entry,
+  an accepted degradation to process-local behavior). Clearing a tombstone
+  on a legitimate relaunch is persisted too — a deleted-then-relaunched
+  task is *not* ghost-skipped after a restart, while its deletion epoch
+  survives for generation fencing (restored epochs keep the epoch counter
+  monotonic).
+- **Alias counters** persist the last-seen counter per
+  `<parentSessionID>:<prefix>`. A post-restart board seeds from these
+  high-water marks, so a new alias never collides with a historical one.
+  The alias→taskID mapping itself is **not** restored — old aliases
+  resolve as not-found after a restart, which is the intended improvement
+  over silently reusing them for unrelated tasks.
+- **Seeding is backend-only.** Without `ctx.storage` (v1 hosts, hosts
+  without the domain) the module is a pure in-memory no-op sink: zero
+  behavior change, fresh boards and ledgers start exactly as
+  process-local as before.
+- **Bounded and serialized.** Persisted tombstones (and their epoch
+  entries) self-cap at the 500 most recent by recorded time; writes for
+  one key are serialized in-process (no concurrent read-modify-write);
+  write failures log and degrade to process-local behavior.
+
+### Diagnostics
+
+Two log lines aid drift diagnosis (both hosts): the task tool's terminal
+output that carries no parsable task id is logged with a ~140-char
+preview (`task output without a task id` — the host-output-drift
+detector), and an idle observation for a *tracked managed child* with no
+running board record logs with a `[task-session-manager] WARN:` prefix
+instead of the routine idle line.
+
+**Secret redaction at the logger.** Every plugin log line — file sink,
+stderr fallback, and the append-failure path — passes through
+shape-based secret redaction at the logger's single compose point
+(`src/utils/redact.ts`): known vendor token prefixes (`sk-`, `gh*`,
+`glpat-`, `xox*`, `AKIA`/`ASIA`), URL credentials
+(`scheme://user:password@` — password only), authorization schemes
+(Bearer/Basic/token), and generic 32+-character opaque runs are masked
+to 4 leading + 2 trailing characters. This is a best-effort barrier
+against *accidental* leaks in short previews, not an adversarial
+guarantee: unprefixed short secrets, secrets containing run-breaking
+characters, and chunked or obfuscated content remain residual gaps,
+while long opaque non-secrets (UUIDs, hashes, long paths) are masked as
+accepted false positives. The parse-miss preview (`task output without
+a task id`) is stricter still: it is **structure-only** — tag and field
+names survive for drift diagnosis, but every value (XML attribute
+values, `key:`/`key=` prose values) is fully replaced with `[masked]`
+before slicing, because parse-miss content is untrusted-by-format and
+values (description fields in particular) carry user-authored text.
+All other log sites rely on the shape-based redaction at the logger
+choke point.
 
 ## Limitations
 

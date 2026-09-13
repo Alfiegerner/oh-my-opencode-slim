@@ -495,6 +495,88 @@ describe('createV2Setup e2e', () => {
     expect(logAfterDispose).not.toContain('ses_after');
   }, 20_000);
 
+  test('event pump synthesizes session.deleted from the live `data` shape into the v1 cleanup path', async () => {
+    const { ctx, events } = makeMockV2Context(projectDir);
+    const cleanup = await createV2Setup()(ctx);
+
+    try {
+      // Live wire shape: payload keyed under `data` (verified live).
+      // Only the SYNTHESIZED dual-spelling session.deleted
+      // reaches the v1 event-router cleanup path — the raw passthrough is
+      // inert there — so this log line is name-specific to the mapping.
+      events.push({
+        id: 'evt_session_deleted',
+        created: 1_788_961_637_000,
+        type: 'session.deleted',
+        durable: { aggregateID: 'ses_gone', seq: 1, version: 1 },
+        data: { sessionID: 'ses_gone' },
+      });
+
+      await settlePump();
+      const logText = readPluginLog();
+      expect(logText).toContain(
+        '[task-session-manager] session.deleted observed',
+      );
+      expect(logText).toContain('ses_gone');
+    } finally {
+      await cleanup();
+    }
+  }, 20_000);
+
+  test('ctx.storage (when present) enables background-job persistence before the v1 factory runs', async () => {
+    const { ctx } = makeMockV2Context(projectDir);
+    // Pre-seeded persisted tombstone: proves the storage activation
+    // loads backend state, and later that a storage-less reactivation
+    // resets it instead of retaining the previous activation.
+    const seeded = new Map<string, unknown>([
+      [
+        'omo/bgj/tombstone/ses_seeded_before_setup',
+        { taskID: 'ses_seeded_before_setup', epoch: 1, recordedAt: 1 },
+      ],
+    ]);
+    (ctx as { storage?: unknown }).storage = {
+      get: async (key: string) => seeded.get(key),
+      set: async () => {},
+      remove: async () => {},
+      scan: async () => ({
+        entries: [...seeded.entries()].map(([key, value]) => ({
+          key,
+          value,
+        })),
+      }),
+    };
+    const cleanup = await createV2Setup()(ctx);
+
+    try {
+      await flushLoggerForTesting();
+      const logText = readPluginLog();
+      expect(logText).toContain(
+        '[v2] background-job persistence enabled via ctx.storage',
+      );
+      const persistence = await import('../utils/background-job-persistence');
+      expect(
+        persistence
+          .persistedBackgroundJobState()
+          .tombstones.has('ses_seeded_before_setup'),
+      ).toBe(true);
+
+      // A storage-less reactivation resets to the documented
+      // process-local fallback instead of retaining this activation's
+      // backend/seed state.
+      const { ctx: bareCtx } = makeMockV2Context(projectDir);
+      await (await createV2Setup()(bareCtx))();
+      expect(persistence.persistedBackgroundJobState().tombstones.size).toBe(0);
+    } finally {
+      // Reset the persistence singleton so later test files in this
+      // process see the pure memory fallback.
+      const { configureBackgroundJobPersistence } = await import(
+        '../utils/background-job-persistence'
+      );
+      configureBackgroundJobPersistence(undefined);
+      await cleanup();
+    }
+  }, 30_000);
+
   test('dispose runs the v1 dispose hook (server.instance.disposed synthesis for wake timers)', async () => {
     const { ctx } = makeMockV2Context(projectDir);
     const cleanup = await createV2Setup()(ctx);
