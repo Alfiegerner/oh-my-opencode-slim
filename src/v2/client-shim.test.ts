@@ -309,7 +309,10 @@ describe('v2 client shim delegation', () => {
     expect(result).toMatchObject({ admitted: true });
   });
 
-  test('internal-initiator synthetic routing keeps switchModel ordering', async () => {
+  test("lifecycle continuation with modelSelection:'inherit' inherits the persisted host selection", async () => {
+    // #1079: a lifecycle pin (with or without variant) is a snapshot.
+    // By delivery time the host may already be on another model/variant;
+    // switchModel would revert the user's selection.
     const seq: Array<{ m: string; i: unknown }> = [];
     const input = buildPluginInput(
       makeCtx({
@@ -337,11 +340,14 @@ describe('v2 client shim delegation', () => {
         model: { providerID: 'anthropic', modelID: 'claude-x' },
         parts: [createInternalAgentTextPart('wake with model pin')],
       },
+      modelSelection: 'inherit',
+      modelVariant: 'high',
     });
-    expect(seq.map((c) => c.m)).toEqual(['switchModel', 'synthetic']);
-    expect(seq[1].i).toMatchObject({
+    expect(seq.map((c) => c.m)).toEqual(['synthetic']);
+    expect(seq[0].i).toMatchObject({
       sessionID: 'ses_1',
       delivery: 'steer',
+      resume: true,
     });
   });
 
@@ -1026,6 +1032,96 @@ describe('v2 client shim promptAsync model-switch hardening (#1125)', () => {
       modelVariant: 'max',
     });
     expect(seq.map((e) => e.m)).toEqual(['prompt']);
+  });
+
+  test('interview-style internal continuation keeps its explicit pin (switchModel runs)', async () => {
+    // Pure-internal body WITHOUT modelSelection:'inherit': the interview
+    // runtime tracks its own model, so the pin is real and must apply
+    // (Greptile P1 on #1195).
+    const seq: Array<{ m: string; i: unknown }> = [];
+    const promptAsync = makePromptAsync({
+      get: async () => ({
+        model: { providerID: 'test', id: 'model-b', variant: 'default' },
+      }),
+      switchModel: async (i: unknown) => {
+        seq.push({ m: 'switchModel', i });
+      },
+      synthetic: async (i: unknown) => {
+        seq.push({ m: 'synthetic', i });
+        return {};
+      },
+      prompt: async (i: unknown) => {
+        seq.push({ m: 'prompt', i });
+        return {};
+      },
+    } as never);
+    await promptAsync({
+      path: { id: 'ses_1' },
+      body: {
+        agent: 'orchestrator',
+        model: { providerID: 'test', modelID: 'model-a' },
+        parts: [createInternalAgentTextPart('interview next question')],
+      },
+      delivery: 'queue',
+      modelVariant: 'high',
+    });
+    expect(seq.map((c) => c.m)).toEqual(['switchModel', 'synthetic']);
+  });
+
+  test('lifecycle inherit without synthetic still skips the stale pin on the degraded prompt path', async () => {
+    const seq: Array<{ m: string; i: unknown }> = [];
+    const promptAsync = makePromptAsync({
+      get: async () => ({
+        model: { providerID: 'test', id: 'model-b' },
+      }),
+      switchModel: async (i: unknown) => {
+        seq.push({ m: 'switchModel', i });
+      },
+      prompt: async (i: unknown) => {
+        seq.push({ m: 'prompt', i });
+        return {};
+      },
+    } as never);
+    await promptAsync({
+      path: { id: 'ses_1' },
+      body: {
+        agent: 'plan',
+        model: { providerID: 'test', modelID: 'model-a' },
+        parts: [createInternalAgentTextPart('wake reminder')],
+      },
+      delivery: 'queue',
+      modelSelection: 'inherit',
+      modelVariant: 'high',
+    });
+    expect(seq.map((c) => c.m)).toEqual(['prompt']);
+  });
+
+  test('required fallback switch still runs for mixed replay bodies', async () => {
+    const seq: Array<{ m: string; i: unknown }> = [];
+    const promptAsync = makePromptAsync({
+      get: async () => ({
+        model: { providerID: 'test', id: 'model-b' },
+      }),
+      switchModel: async (i: unknown) => {
+        seq.push({ m: 'switchModel', i });
+      },
+      prompt: async (i: unknown) => {
+        seq.push({ m: 'prompt', i });
+        return {};
+      },
+    } as never);
+    await promptAsync({
+      path: { id: 'ses_1' },
+      body: {
+        model: { providerID: 'anthropic', modelID: 'claude-fallback' },
+        parts: [
+          { type: 'text', text: 'user replay' },
+          createInternalAgentTextPart('retry reminder'),
+        ],
+      },
+      modelSwitch: 'required',
+    });
+    expect(seq.map((c) => c.m)).toEqual(['switchModel', 'prompt']);
   });
 });
 
