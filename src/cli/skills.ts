@@ -149,9 +149,7 @@ export function resolveEffectiveSkills(
   // Apply explicit token removals before deriving active exclusions. This
   // is what makes removing '!foo' genuinely lift that inherited exclusion.
   const removeSet = new Set(removeList);
-  const baseAfterRemoval = workingBase.filter(
-    (token) => !removeSet.has(token),
-  );
+  const baseAfterRemoval = workingBase.filter((token) => !removeSet.has(token));
 
   // Additions must not override exclusions that remain after removals.
   const excluded = new Set(
@@ -163,9 +161,7 @@ export function resolveEffectiveSkills(
   const list = [
     ...new Set([
       ...baseAfterRemoval,
-      ...addList.filter(
-        (name) => !excluded.has(name) && !removeSet.has(name),
-      ),
+      ...addList.filter((name) => !excluded.has(name) && !removeSet.has(name)),
     ]),
   ];
 
