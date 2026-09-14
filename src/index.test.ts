@@ -490,6 +490,12 @@ describe('plugin TUI agent activity', () => {
     } as never);
 
     try {
+      await chainHooks?.event?.({
+        event: {
+          type: 'session.status',
+          properties: { sessionID: 'grandchild', status: { type: 'busy' } },
+        },
+      } as never);
       await chainHooks?.['chat.message']?.(
         { sessionID: 'grandchild', agent: 'fixer' } as never,
         {} as never,
@@ -535,6 +541,12 @@ describe('plugin TUI agent activity', () => {
     } as never);
 
     try {
+      await retryHooks?.event?.({
+        event: {
+          type: 'session.status',
+          properties: { sessionID: 'orphan-a', status: { type: 'busy' } },
+        },
+      } as never);
       await retryHooks?.['chat.message']?.(
         { sessionID: 'orphan-a', agent: 'fixer' } as never,
         {} as never,
@@ -579,6 +591,12 @@ describe('plugin TUI agent activity', () => {
     } as never);
 
     try {
+      await malformedHooks?.event?.({
+        event: {
+          type: 'session.status',
+          properties: { sessionID: 'broken-a', status: { type: 'busy' } },
+        },
+      } as never);
       await malformedHooks?.['chat.message']?.(
         { sessionID: 'broken-a', agent: 'fixer' } as never,
         {} as never,
