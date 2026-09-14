@@ -60,6 +60,10 @@ Three builds are produced:
 | `./server` | `dist/server/index.js` | `build:v2` | jsdom only (self-contained for v2) |
 | `./tui` | `dist/tui2.js` | `build:tui` | same external set as `build:plugin` (composes the v1 TUI entry; inlines zod) |
 
+The optional `@opentui/*` peers track `@opencode/plugin`'s peer floor
+(`>=0.5.10`; pinned exactly at `0.5.11`) so the v2 TUI entry satisfies
+the stable host's peer range.
+
 v2's plugin resolver tries the `server` subpath first
 (`subpaths: ["server", ""]`), which the exports map resolves directly to
 `dist/server/index.js` — the self-contained v2 server bundle, and also the
@@ -70,13 +74,20 @@ requires it. v1 uses the main entry.
 Upstream npm naming split with the stable line: v2 ships as
 `@opencode/plugin` / `@opencode/client` / `@opencode/sdk` / `@opencode/cli`
 (at `2.0.x`), while `@opencode-ai/plugin` and `@opencode-ai/sdk` are V1-only
-packages (latest `1.18.30`) that will never carry the v2 surface. The plugin
+packages that will never carry the v2 surface. The plugin
 intentionally keeps its v1 runtime pins and hand-mirrors the subset of the v2
 plugin context it consumes in `src/v2/types.ts` — the v1 host must be able to
 load the main build with no v2 package installed. This is a known tradeoff,
 not an oversight: the mirror is refreshed by hand and can drift from
 upstream, so every v2 release bump needs a deliberate diff of
-`src/v2/types.ts` against the new `@opencode/plugin`.
+`src/v2/types.ts` against the new `@opencode/plugin`. That diff now has
+a compile-time tripwire: `src/v2/mirror-conformance.ts` — typechecked
+against the `@opencode/plugin` devDependency, pinned to the audited
+version — fails `bun run typecheck` when either the mirror or the
+pinned official surface drifts (hook-name sets, key payload fields).
+The guard file must stay non-test-suffixed: tsconfig excludes
+test-suffixed files from tsc, so a `.test.ts` guard silently checks
+nothing.
 
 Verified live on OpenCode v2 (all bridges green — health check
 `bridges:11`, +1 on hosts that accept the `session.model.request` hook
@@ -342,10 +353,20 @@ currently break this plugin:
   system/messages, and cache hints ride `ContentPart.cache`, which is
   unchanged. Adoption status: the **compaction hook is adopted** — the
   plugin strips its tagged synthetic parts from the compaction input
-  (new in this release); the `generate` session hook (not the
-  `ctx.generate` text channel the webfetch summaries use), the `title`
-  hook, `permission.rules`, and the new `tabs` methods are not used —
-  deterministic child titles via the title hook are future work.
+  (new in this release); **`permission.rules` is adopted** —
+  plugin-managed child sessions receive exact-match task-policy rules
+  once at creation (`createPermissionRulesBridge` in
+  `src/v2/setup.ts`; exact-match strings only, no wildcards, while
+  upstream matching semantics settle — PRs #48194/#46495/#46871); the
+  `generate` session hook (not the `ctx.generate` text channel the
+  webfetch summaries use), the `title` hook, and the new `tabs`
+  methods are not used.
+  The `title` hook needs no adoption for child sessions: v2 hosts
+  title subagent children deterministically at creation (the
+  `subagent` tool sets `title` from its `description` argument, which
+  the delegation pipeline always supplies) — the earlier
+  "deterministic child titles" future-work item is closed as natively
+  covered; the hook only matters if custom title formats are wanted.
   Upstream is still actively fixing compaction×hook plumbing and
   compaction×cache behavior after v2.0.3, so compaction-hook semantics
   may evolve; the plugin's hook callback is written shape-tolerant
