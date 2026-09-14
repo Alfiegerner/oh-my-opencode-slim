@@ -789,15 +789,15 @@ export function createPermissionRulesBridge(
       }
       return;
     }
-    applied.set(sessionID, true);
-    pruneSessionMap(applied);
     const rules = deriveExactPermissionRules(options.permissionForAgent(agent));
     if (rules.length === 0) {
       // Nothing in the task-policy is expressible as an exact match
       // (e.g. a whole-tool read-only policy): an empty replace would add
       // nothing over the static agent permissions, so skip the host
-      // call. Still marked handled — the policy cannot change between
-      // duplicate events.
+      // call. Marked handled here — an empty derivation is a final
+      // answer that cannot change between duplicate events.
+      applied.set(sessionID, true);
+      pruneSessionMap(applied);
       log(
         '[v2][permission-rules] no exact-match rules derivable for child session',
         { sessionID, agent },
@@ -805,6 +805,13 @@ export function createPermissionRulesBridge(
       return;
     }
     await rulesFn({ sessionID, permissions: rules });
+    // Latch only after the host call resolves: a rejected call leaves
+    // the slot free, so a replayed or duplicate session.created retries
+    // instead of stranding the child on inherited session rules
+    // (review on #1194). Concurrent duplicates at worst re-send the
+    // same replace payload — idempotent on the host side.
+    applied.set(sessionID, true);
+    pruneSessionMap(applied);
     log('[v2][permission-rules] applied exact-match rules to child session', {
       sessionID,
       agent,

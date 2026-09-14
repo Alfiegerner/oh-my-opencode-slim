@@ -250,11 +250,44 @@ describe('createPermissionRulesBridge', () => {
     await expect(
       bridge.observeSessionCreated(makeChildCreatedEvent({})),
     ).resolves.toBeUndefined();
-    // Strictly-once per sessionID: a duplicate event does not retry the
-    // failed call.
+    // Every retry attempt stays fail-soft; the retry itself is covered
+    // by (e-retry).
     await expect(
       bridge.observeSessionCreated(makeChildCreatedEvent({})),
     ).resolves.toBeUndefined();
+  });
+
+  test('(e-retry) a failed application is retried by a duplicate session.created', async () => {
+    // Regression (review on #1194): the applied marker used to be set
+    // before the host call, so a rejected rules() permanently stranded
+    // the child on inherited session rules. Completion must latch only
+    // on success; failure releases the slot for the next event.
+    let attempts = 0;
+    const calls: RulesCall[] = [];
+    const bridge = makeBridge({
+      permission: {
+        rules: async (input) => {
+          attempts += 1;
+          if (attempts === 1) throw new Error('transient host failure');
+          calls.push(input);
+          return {};
+        },
+      },
+    });
+
+    await expect(
+      bridge.observeSessionCreated(makeChildCreatedEvent({})),
+    ).resolves.toBeUndefined();
+    expect(attempts).toBe(1);
+
+    // A duplicate event retries the failed application and succeeds.
+    await bridge.observeSessionCreated(makeChildCreatedEvent({}));
+    expect(attempts).toBe(2);
+    expect(calls).toHaveLength(1);
+
+    // Success latches: further duplicates do not re-apply.
+    await bridge.observeSessionCreated(makeChildCreatedEvent({}));
+    expect(attempts).toBe(2);
   });
 
   test('malformed events resolve without throwing (fail-soft)', async () => {
