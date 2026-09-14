@@ -158,6 +158,16 @@ export interface V2ToolAfterEvent {
 export interface V2Registration {
   dispose(): Promise<void> | void;
 }
+/** v2 permission Rule (OpenCode core's `Permission.Rule`). The host
+ * evaluator matches `action`/`resource` as patterns; OpenCode-core
+ * wildcard/path/precedence semantics are in flux (PRs
+ * #48194/#46495/#46871), so rules emitted by this plugin are ALWAYS
+ * exact-match strings — never `*` or `?` wildcards. */
+export interface V2PermissionRule {
+  action: string;
+  resource: string;
+  effect: 'allow' | 'deny' | 'ask';
+}
 /** v2 mcp transform draft (used after capability probing; RemoteConfig
  * shape see packages/schema/src/mcp.ts — no `enabled`, it uses
  * `disabled?: boolean`; the name is the map key, not in the config). */
@@ -285,6 +295,21 @@ export interface V2Context {
   mcp?: {
     transform(cb: (draft: V2McpDraft) => void): Promise<V2Registration>;
     reload(): Promise<void>;
+  };
+  /** v2 permission domain (runtime-probed optional — hosts before
+   * v2.0.0 expose no permission surface to plugins). Mirrors the
+   * OpenCode-core `PermissionDomain` subset; `rules` itself is optional
+   * and must be probed (typeof check) before use. */
+  readonly permission?: {
+    /** v2 permission.rules — REPLACES the session-scoped rule list for
+     * the session (v2.0.0+, #48351). Children inherit their parent's
+     * session rules at creation; the plugin installs each task child's
+     * own exact-match rules here (see createPermissionRulesBridge in
+     * setup.ts). */
+    rules?(input: {
+      sessionID: string;
+      permissions: V2PermissionRule[];
+    }): Promise<unknown>;
   };
 }
 
