@@ -60,6 +60,24 @@ describe('tui-state persistence', () => {
     expect(third.agentModels.explorer).toBe(GPT.model);
   });
 
+  test('readTuiSnapshotAsync cache is bounded (LRU eviction)', async () => {
+    recordTuiAgentModel(LUNA, tempDir);
+    const first = await readTuiSnapshotAsync(tempDir);
+    expect(first.agentModels.explorer).toBe(LUNA.model);
+
+    // Poll 8 other projects: the first entry must be evicted even though
+    // its file is unchanged (a fresh read returns a new object identity).
+    for (let i = 0; i < 8; i += 1) {
+      const dir = path.join(tempDir, `project-${i}`);
+      recordTuiAgentModel(GPT, dir);
+      await readTuiSnapshotAsync(dir);
+    }
+
+    const reRead = await readTuiSnapshotAsync(tempDir);
+    expect(reRead.agentModels.explorer).toBe(LUNA.model);
+    expect(reRead).not.toBe(first);
+  });
+
   test('persists enabled agent models', () => {
     recordTuiAgentModels(
       {

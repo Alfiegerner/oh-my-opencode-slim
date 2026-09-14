@@ -170,6 +170,9 @@ function readTuiSnapshotStrict(statePath: string): TuiSnapshot | null {
 // dev/ino — mtimeMs+size alone would also be sufficient, but inode
 // identity rules out same-mtime rewrites. Cache misses fall through to
 // a normal read; any stat/read failure bypasses the cache entirely.
+// Bounded LRU: a long-lived daemon polling many projects must not
+// retain a snapshot per visited path.
+const ASYNC_SNAPSHOT_CACHE_MAX = 8;
 const asyncSnapshotCache = new Map<
   string,
   { stat: string; snapshot: TuiSnapshot }
@@ -177,6 +180,21 @@ const asyncSnapshotCache = new Map<
 
 function snapshotStatKey(stat: fs.Stats): string {
   return `${stat.dev}:${stat.ino}:${stat.mtimeMs}:${stat.size}`;
+}
+
+function rememberAsyncSnapshot(
+  statePath: string,
+  statKey: string,
+  snapshot: TuiSnapshot,
+): void {
+  // Map insertion order doubles as the LRU order: re-insert to refresh.
+  asyncSnapshotCache.delete(statePath);
+  asyncSnapshotCache.set(statePath, { stat: statKey, snapshot });
+  while (asyncSnapshotCache.size > ASYNC_SNAPSHOT_CACHE_MAX) {
+    const oldest = asyncSnapshotCache.keys().next().value;
+    if (oldest === undefined) break;
+    asyncSnapshotCache.delete(oldest);
+  }
 }
 
 export async function readTuiSnapshotAsync(
@@ -187,11 +205,16 @@ export async function readTuiSnapshotAsync(
     const stat = await fs.promises.stat(statePath);
     const statKey = snapshotStatKey(stat);
     const cached = asyncSnapshotCache.get(statePath);
-    if (cached && cached.stat === statKey) return cached.snapshot;
+    if (cached && cached.stat === statKey) {
+      // Refresh LRU position on hit.
+      asyncSnapshotCache.delete(statePath);
+      asyncSnapshotCache.set(statePath, cached);
+      return cached.snapshot;
+    }
     const snapshot = parseSnapshot(
       await fs.promises.readFile(statePath, 'utf8'),
     );
-    asyncSnapshotCache.set(statePath, { stat: statKey, snapshot });
+    rememberAsyncSnapshot(statePath, statKey, snapshot);
     return snapshot;
   } catch {
     asyncSnapshotCache.delete(statePath);
