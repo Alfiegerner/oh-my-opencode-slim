@@ -2,6 +2,7 @@ import { type ToolDefinition, tool } from '@opencode-ai/plugin';
 import type { RevivedRunTracker } from '../hooks/task-session-manager/revived-run-tracker';
 import type { BackgroundJobSupervisor } from '../utils/background-job-supervisor';
 import { getClient } from '../utils/opencode-client';
+import { getRuntimeSessionStatusSnapshot } from '../utils/session-runtime-status';
 import {
   assertOrchestrator,
   cancelTrackedExecution,
@@ -95,9 +96,63 @@ export function createTaskReviveTool(
           >
         | undefined;
       try {
+        const observedLiveBusyAt = current.lastLiveBusyAt;
         baselineMessageID = await revivedRunTracker.captureBaseline(
           current.taskID,
         );
+        // captureBaseline awaits network I/O; the record may have changed
+        // while we waited. Revalidate against the live record before
+        // sending anything: never relaunch over a session that is
+        // running again. A live relaunch lease keeps the board record
+        // stopped while a revive is in flight (the busy observation only
+        // advances lastLiveBusyAt), so treat any movement of that
+        // timestamp as fresh activity and refuse.
+        const rechecked = getCurrentReviveJob(
+          options,
+          parentSessionID,
+          requested,
+          captured.taskID,
+          captured.generation,
+        );
+        const freshLiveActivity =
+          rechecked.lastLiveBusyAt !== undefined &&
+          rechecked.lastLiveBusyAt !== observedLiveBusyAt;
+        if (
+          !options.backgroundJobBoard.validateLease(relaunchLease) ||
+          rechecked.state === 'running' ||
+          !isReviveableRetainedJob(rechecked) ||
+          freshLiveActivity
+        ) {
+          throw new Error(
+            `Task ${requested} became active again (${rechecked.state}) before the revive prompt was sent; the prompt was NOT sent and no duplicate was launched. Use task_status to inspect it.`,
+          );
+        }
+        current = rechecked;
+        // Fence the send against independent host-level resumes. The
+        // board record stays stopped under the relaunch lease, so the
+        // host's live status map is the only place an independently
+        // resumed session shows up. On v2 hosts promptAsync degrades to
+        // steering an in-flight run instead of rejecting it, so a busy
+        // or retry entry must refuse here; an unverifiable map refuses
+        // rather than guessing. A verified-absent entry means no active
+        // runner: the session is idle and safe to prompt.
+        const liveSnapshot = await getRuntimeSessionStatusSnapshot(
+          options.input,
+        );
+        const liveStatus = liveSnapshot.statuses.get(current.taskID);
+        if (liveStatus === 'busy' || liveStatus === 'retry') {
+          throw new Error(
+            `Task ${requested} is executing at the host (live status: ${liveStatus}); the revive prompt was NOT sent and no duplicate was launched. Use task_status to inspect it.`,
+          );
+        }
+        if (
+          liveSnapshot.error !== undefined ||
+          liveSnapshot.malformedSessionIDs.has(current.taskID)
+        ) {
+          throw new Error(
+            `Task ${requested} could not be verified against the live session map (${liveSnapshot.error ?? 'malformed entry'}); the revive prompt was NOT sent. Retry task_revive.`,
+          );
+        }
         const session = getClient(options.input).session;
         if (typeof session.promptAsync !== 'function') {
           throw new Error('The host session does not support promptAsync');
@@ -219,6 +274,7 @@ function isReviveableRetainedJob(
   >,
 ): boolean {
   if (job.statusUncertain) return false;
+  if (job.state === 'stopped') return true;
   if (
     job.state === 'completed' ||
     job.state === 'error' ||

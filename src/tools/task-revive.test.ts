@@ -77,6 +77,21 @@ function acknowledgedCompleted(board: BackgroundJobBoard, taskID = 'ses_1') {
   board.markReconciled(taskID);
 }
 
+function stoppedSession(
+  board: BackgroundJobBoard,
+  taskID = 'ses_1',
+  acknowledge = false,
+) {
+  board.registerLaunch({
+    taskID,
+    parentSessionID: 'parent-1',
+    agent: 'explorer',
+    now: 100,
+  });
+  board.markStopped(taskID, 'no native result', 110, undefined, 110);
+  if (acknowledge) board.markReconciled(taskID);
+}
+
 describe('task_revive tool', () => {
   test('uses promptAsync, starts a new board generation, and retains the session', async () => {
     const { board, promptAsync, taskRevive } = createTool();
@@ -204,6 +219,102 @@ describe('task_revive tool', () => {
       generation: 2,
       state: 'running',
     });
+  });
+
+  test('revives a stopped session before and after acknowledgement', async () => {
+    for (const acknowledge of [false, true]) {
+      const { board, promptAsync, taskRevive } = createTool();
+      stoppedSession(board, 'ses_1', acknowledge);
+      expect(board.get('ses_1')).toMatchObject({
+        state: 'stopped',
+        terminalUnreconciled: !acknowledge,
+      });
+
+      const output = await taskRevive.execute(
+        { task_id: 'ses_1', prompt: 'continue from the retained session' },
+        context,
+      );
+
+      expect(promptAsync).toHaveBeenCalledTimes(1);
+      expect(String(output)).toContain('state: running');
+      expect(board.get('ses_1')).toMatchObject({
+        generation: 2,
+        state: 'running',
+      });
+    }
+  });
+
+  test('refuses to relaunch when a late busy revives the generation during baseline capture', async () => {
+    // P1 regression: captureBaseline awaits network I/O. If a live busy
+    // observation arrives while the baseline is in flight, the revive
+    // must NOT send promptAsync over the still-active generation, must
+    // not bump the board generation, and must release the relaunch
+    // lease. With the lease held, the busy observation keeps the record
+    // stopped and only advances lastLiveBusyAt; the revive refuses on
+    // that fresh-activity signal.
+    let resolveBaseline: (id: string | undefined) => void = () => {};
+    const baselineGate = new Promise<string | undefined>((resolve) => {
+      resolveBaseline = resolve;
+    });
+    const deferredTracker = {
+      captureBaseline: () => baselineGate,
+      register: () => {},
+      isTracked: () => false,
+      probe: () => Promise.resolve(true),
+      onTerminal: () => {},
+      dispose: () => {},
+    };
+    const { board, promptAsync, taskRevive } = createTool({
+      revivedRunTracker: deferredTracker as any,
+    });
+    stoppedSession(board);
+
+    const pending = taskRevive.execute(
+      { task_id: 'ses_1', prompt: 'continue' },
+      context,
+    );
+    // Late busy observation lands while captureBaseline is in flight.
+    board.markRunningFromLiveSession('ses_1', 115);
+    resolveBaseline(undefined);
+
+    await expect(pending).rejects.toThrow(/became active again/);
+    expect(promptAsync).toHaveBeenCalledTimes(0);
+    expect(board.get('ses_1')).toMatchObject({
+      state: 'stopped',
+      generation: 1,
+      lastLiveBusyAt: 115,
+    });
+    // The relaunch lease was released: a new acquire on the same
+    // generation succeeds.
+    const reLease = board.acquireRelaunchLease('ses_1', 1);
+    expect(reLease).toBeDefined();
+    if (reLease) board.releaseLease(reLease);
+  });
+
+  test('refuses to relaunch when the host reports the session busy even if the board is stopped', async () => {
+    // P1 regression (host fence): the board record stays stopped under
+    // the relaunch lease, but the session may have resumed
+    // independently at the host. On v2 hosts promptAsync degrades to
+    // steering an in-flight run instead of rejecting it, so a live
+    // busy/retry entry must refuse before the prompt is sent.
+    const { board, promptAsync, status, taskRevive } = createTool({
+      status: async () => ({ data: { ses_1: { type: 'busy' } } }),
+    });
+    stoppedSession(board);
+
+    await expect(
+      taskRevive.execute({ task_id: 'ses_1', prompt: 'continue' }, context),
+    ).rejects.toThrow(/executing at the host/);
+
+    expect(promptAsync).toHaveBeenCalledTimes(0);
+    expect(status).toHaveBeenCalled();
+    expect(board.get('ses_1')).toMatchObject({
+      state: 'stopped',
+      generation: 1,
+    });
+    const reLease = board.acquireRelaunchLease('ses_1', 1);
+    expect(reLease).toBeDefined();
+    if (reLease) board.releaseLease(reLease);
   });
 
   test('rejects an uncertain retained terminal job', async () => {
