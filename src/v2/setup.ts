@@ -54,6 +54,7 @@ import type {
   V2CommandDefinition,
   V2CommandDraft,
   V2Context,
+  V2PermissionRule,
   V2SessionCompactionEvent,
   V2SessionContextEvent,
   V2SessionModelRequestEvent,
@@ -642,6 +643,210 @@ export function createSessionCompactionBridge(
     } catch (err) {
       log('[v2] compaction bridge failed', String(err));
     }
+  };
+}
+
+/** Wildcard characters the OpenCode-core permission evaluator treats
+ * as pattern syntax. Because OpenCode-core matching semantics
+ * (wildcards, paths, precedence) are in flux (PRs
+ * #48194/#46495/#46871), plugin-emitted session rules must be
+ * exact-match strings ONLY — this predicate is the single gate every
+ * emitted action/resource passes through. */
+function containsWildcard(value: string): boolean {
+  return value.includes('*') || value.includes('?');
+}
+
+/** Exact v2 action names for a v1 permission tool key — the action half
+ * of `v1PermKeyToV2` in adapters.ts, mirrored here because that helper
+ * always pairs the action with a `'*'` resource this bridge must never
+ * emit. Keys containing wildcards yield no actions: an exact-match rule
+ * cannot express them. */
+function exactActionsForV1Key(key: string): string[] {
+  if (containsWildcard(key)) return [];
+  if (key === 'task') return ['subagent'];
+  if (key === 'bash') return ['execute', 'bash'];
+  return [key];
+}
+
+/**
+ * Derive exact-match v2 permission rules from a v1 agent permission map
+ * (the child agent's task-policy — the same map `adaptPermissions`
+ * consumes for static agent registration).
+ *
+ * Only entries that can be expressed WITHOUT wildcards survive:
+ * - the string shorthand and whole-tool string effects (e.g.
+ *   `edit: 'deny'`) apply to every resource, so emitting them would
+ *   require a `'*'` resource — skipped;
+ * - the `'*'` catch-all key is skipped by the action gate;
+ * - nested `{tool: {pattern: effect}}` entries emit
+ *   `{action, resource: pattern, effect}` only when `pattern` is
+ *   wildcard-free (e.g. `skill: {codemap: 'allow'}`,
+ *   `bash: {'git push': 'ask'}`).
+ *
+ * The result is defense-in-depth: the child's static agent-level
+ * permissions (from `applyAgentToDraft`) keep governing everything the
+ * exact-match ruleset cannot express.
+ */
+export function deriveExactPermissionRules(perm: unknown): V2PermissionRule[] {
+  const rules: V2PermissionRule[] = [];
+  if (!perm || typeof perm !== 'object' || Array.isArray(perm)) return rules;
+  for (const [tool, value] of Object.entries(perm as Record<string, unknown>)) {
+    // Only nested pattern maps carry an exact resource; string values
+    // are whole-tool effects (see the doc note above).
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    for (const [pattern, effect] of Object.entries(
+      value as Record<string, unknown>,
+    )) {
+      if (effect !== 'allow' && effect !== 'deny' && effect !== 'ask') {
+        continue;
+      }
+      if (containsWildcard(pattern)) continue;
+      for (const action of exactActionsForV1Key(tool)) {
+        if (containsWildcard(action)) continue; // structural invariant
+        rules.push({ action, resource: pattern, effect });
+      }
+    }
+  }
+  return rules;
+}
+
+/**
+ * One-time degradation notice for hosts without `ctx.permission.rules`
+ * (before v2.0.0). Same contract as the client-shim notices established
+ * by commit 2bf290ad: ONE deterministic warning per plugin process
+ * (module-level latch; fixed text, no timestamps or per-call ids) so a
+ * missing host capability is observable in the plugin log without
+ * per-child noise. Never fakes success — the rules are simply not
+ * applied and the static agent permissions keep governing the child.
+ */
+const PERMISSION_RULES_UNAVAILABLE_WARNING =
+  '[v2][permission-rules] ctx.permission.rules unavailable on this host ' +
+  'build; child session permission rules are not applied';
+let permissionRulesUnavailableWarned = false;
+
+export function __resetPermissionRulesWarningForTesting(): void {
+  permissionRulesUnavailableWarned = false;
+}
+
+/** Deps for the per-session permission rules bridge. */
+export interface V2PermissionRulesOptions {
+  /** Task-policy lookup: the v1 permission map governing a child agent
+   * (from the resolved agent configs). */
+  permissionForAgent: (agent: string) => unknown;
+  /** Plugin-defined agent ids — the plugin-managed child gate. A child
+   * whose agent is not in this set was not spawned by the plugin's task
+   * pipeline and must never have its session rules replaced. */
+  pluginAgents: ReadonlySet<string>;
+  /** Injectable degradation sink (tests observe the one-time warning
+   * without mocking the logger). */
+  onUnavailable?: () => void;
+}
+
+/**
+ * Per-session permission rules bridge (`ctx.permission.rules`, v2.0.0+
+ * #48351; capability-probed, fail-soft).
+ *
+ * v2 children inherit their parent's session-scoped rules at creation
+ * and were previously governed ONLY by the static agent-level permission
+ * list mapped at agent-transform time (`adaptPermissions`). This bridge
+ * observes the RAW v2 `session.created` event from the setup event pump
+ * and, for each plugin-managed child session (parentID present AND the
+ * child's agent is plugin-defined — the v2-local equivalent of the
+ * event-router's `shouldManageSession(parent)` gate, since session agent
+ * metadata lives inside the v1 factory), installs the child agent's
+ * task-policy as session-scoped exact-match rules exactly once per
+ * sessionID (duplicate event delivery is idempotent).
+ *
+ * Because `rules` REPLACES the whole session-scoped list, root sessions
+ * and foreign-agent children are never touched. Hosts without the
+ * capability degrade with the one-time warning above. Failures are
+ * logged, never thrown into the event pump.
+ */
+export function createPermissionRulesBridge(
+  permission: V2Context['permission'],
+  options: V2PermissionRulesOptions,
+): {
+  /** Observe one raw v2 event; applies rules when it is a
+   * plugin-managed child `session.created`. Never throws. */
+  observeSessionCreated(event: Record<string, unknown>): Promise<void>;
+} {
+  /** sessionIDs whose rules application was handled (strictly once per
+   * child; FIFO-bounded like every per-session bridge map). */
+  const applied = new Map<string, true>();
+
+  async function applyChildSessionRules(
+    sessionID: string,
+    agent: string,
+  ): Promise<void> {
+    const rulesFn = permission?.rules;
+    if (typeof rulesFn !== 'function') {
+      if (!permissionRulesUnavailableWarned) {
+        permissionRulesUnavailableWarned = true;
+        (
+          options.onUnavailable ??
+          (() => log(PERMISSION_RULES_UNAVAILABLE_WARNING))
+        )();
+      }
+      return;
+    }
+    const rules = deriveExactPermissionRules(options.permissionForAgent(agent));
+    if (rules.length === 0) {
+      // Nothing in the task-policy is expressible as an exact match
+      // (e.g. a whole-tool read-only policy): an empty replace would add
+      // nothing over the static agent permissions, so skip the host
+      // call. Marked handled here — an empty derivation is a final
+      // answer that cannot change between duplicate events.
+      applied.set(sessionID, true);
+      pruneSessionMap(applied);
+      log(
+        '[v2][permission-rules] no exact-match rules derivable for child session',
+        { sessionID, agent },
+      );
+      return;
+    }
+    await rulesFn({ sessionID, permissions: rules });
+    // Latch only after the host call resolves: a rejected call leaves
+    // the slot free, so a replayed or duplicate session.created retries
+    // instead of stranding the child on inherited session rules
+    // (review on #1194). Concurrent duplicates at worst re-send the
+    // same replace payload — idempotent on the host side.
+    applied.set(sessionID, true);
+    pruneSessionMap(applied);
+    log('[v2][permission-rules] applied exact-match rules to child session', {
+      sessionID,
+      agent,
+      count: rules.length,
+    });
+  }
+
+  return {
+    async observeSessionCreated(event) {
+      try {
+        if (!isRecord(event) || event.type !== 'session.created') return;
+        // Same payload resolution as the event adapter: live hosts carry
+        // the payload under `data`; `properties` is the legacy spelling.
+        const payload = isRecord(event.data)
+          ? event.data
+          : isRecord(event.properties)
+            ? event.properties
+            : {};
+        const sessionID = payload.sessionID;
+        const parentID = payload.parentID;
+        const agent = payload.agent;
+        if (typeof sessionID !== 'string' || !sessionID) return;
+        // Root sessions never qualify — `rules` REPLACES the session's
+        // scoped list, so an unrelated session must not be touched.
+        if (typeof parentID !== 'string' || !parentID) return;
+        if (applied.has(sessionID)) return;
+        if (typeof agent !== 'string' || !options.pluginAgents.has(agent)) {
+          return;
+        }
+        await applyChildSessionRules(sessionID, agent);
+      } catch (err) {
+        // Fail-soft: the event pump must keep flowing.
+        log('[v2][permission-rules] bridge failed', String(err));
+      }
+    },
   };
 }
 
@@ -1540,6 +1745,19 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         | ((i: { event: Record<string, unknown> }) => Promise<void>)
         | undefined;
       if (eventHook || interviewBridge) {
+        // ── Per-session permission rules (ctx.permission.rules, v2.0.0+) ──
+        // Plugin-managed child sessions get their agent's task-policy
+        // installed as session-scoped exact-match rules at creation.
+        // Fail-soft inside the bridge; the v1 event dispatch below never
+        // depends on it (capability-absent hosts degrade with a one-time
+        // deterministic warning).
+        const permissionRulesBridge = createPermissionRulesBridge(
+          ctx.permission,
+          {
+            permissionForAgent: (agent) => resolvedAgents?.[agent]?.permission,
+            pluginAgents: new Set(Object.keys(resolvedAgents ?? {})),
+          },
+        );
         const iter = ctx.event.subscribe();
         const eventIterator = iter[Symbol.asyncIterator]();
         let eventStopped = false;
@@ -1553,6 +1771,10 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
                 // loop iterates raw + synthesized v1 shapes (idle,
                 // early-registration created, message.updated telemetry).
                 await interviewBridge.handleEvent(next.value);
+                // Child-session permission tightening sees the same RAW
+                // event (before v1-shape synthesis) so it is independent
+                // of v1 event-hook presence.
+                await permissionRulesBridge.observeSessionCreated(next.value);
                 if (eventHook) {
                   for (const ev of mapV2EventToV1(next.value)) {
                     await eventHook({ event: ev });

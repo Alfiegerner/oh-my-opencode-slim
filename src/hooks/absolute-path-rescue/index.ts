@@ -43,7 +43,10 @@ interface ToolExecuteBeforeOutput {
   };
 }
 
-type PathOperations = Pick<typeof path, 'isAbsolute' | 'join' | 'resolve' | 'sep'>;
+type PathOperations = Pick<
+  typeof path,
+  'isAbsolute' | 'join' | 'resolve' | 'sep'
+>;
 
 interface RescueOptions {
   pathOperations?: PathOperations;

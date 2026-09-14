@@ -631,7 +631,6 @@ describe('plugin TUI agent activity', () => {
       await malformedHooks?.dispose?.();
     }
   });
-
   test('chat.message does not light a spinner without session.status busy', async () => {
     await hooks?.['chat.message']?.(
       { sessionID: 'orch', agent: 'orchestrator' } as never,
