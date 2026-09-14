@@ -160,7 +160,7 @@ export function resolveEffectiveSkills(
       .map((token) => token.slice(1)),
   );
 
-  let list = [
+  const list = [
     ...new Set([
       ...baseAfterRemoval,
       ...addList.filter(
