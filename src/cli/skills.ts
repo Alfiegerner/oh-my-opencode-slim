@@ -1,3 +1,4 @@
+import { AGENT_ALIASES } from '../config/constants';
 import { CUSTOM_SKILLS } from './custom-skills';
 
 /**
@@ -30,15 +31,16 @@ export const PERMISSION_ONLY_SKILLS: PermissionOnlySkill[] = [
  * Names of the skills an agent is granted by default when no explicit
  * `skills` list is configured: bundled custom skills plus
  * externally-managed skills whose `allowedAgents` includes `'*'` or the
- * agent name. Order follows the registries: CUSTOM_SKILLS first, then
- * PERMISSION_ONLY_SKILLS.
+ * canonical agent name. Order follows the registries: CUSTOM_SKILLS first,
+ * then PERMISSION_ONLY_SKILLS.
  */
 export function getDefaultGrantedSkillNames(agentName: string): string[] {
+  const canonicalAgentName = AGENT_ALIASES[agentName] ?? agentName;
   const names: string[] = [];
   for (const skill of [...CUSTOM_SKILLS, ...PERMISSION_ONLY_SKILLS]) {
     if (
       skill.allowedAgents.includes('*') ||
-      skill.allowedAgents.includes(agentName)
+      skill.allowedAgents.includes(canonicalAgentName)
     ) {
       names.push(skill.name);
     }
@@ -106,17 +108,15 @@ export function getSkillPermissionsForAgent(
  *    grants (orchestrator defaults to allow-all, so its working base is
  *    `['*']`), so `skills_add` alone keeps the defaults and appends, and
  *    `skills_remove` alone prunes from the defaults.
- * 2. The working base and `add` are concatenated and deduped (first
- *    occurrence wins). Additions matching an exclusion (`'!name'`) token
- *    in the base are dropped, because the resolver applies tokens in order
- *    and a later plain grant would override the inherited deny. Then
- *    removal entries are filtered out.
- * 3. Removals operate on final skill tokens, never expanding `'*'`: a
- *    plain name removes that name token, and a `'!name'` entry removes
- *    the exclusion token itself (lifting an existing exclusion). If the
- *    result contains `'*'`, a plain-name removal is granted implicitly by
- *    the wildcard, so it is made explicit by appending the existing
- *    `'!name'` exclusion token - unless that exclusion is already present.
+ * 2. Explicit token removals are applied to the working base first. This
+ *    lets `skills_remove: ['!name']` lift an inherited exclusion before
+ *    additions are evaluated.
+ * 3. Remaining exclusion (`'!name'`) tokens prevent `skills_add` from
+ *    re-granting the excluded skill. Plain-name removals also suppress an
+ *    addition of the same name, so removal wins over addition.
+ * 4. If the result contains `'*'`, a plain-name removal is granted
+ *    implicitly by the wildcard, so it is made explicit by appending the
+ *    existing `'!name'` exclusion token - unless already present.
  *
  * The returned token list is consumed by the existing skill permission
  * resolver (`getSkillPermissionsForAgent`), which continues to interpret
@@ -146,24 +146,28 @@ export function resolveEffectiveSkills(
       ? ['*']
       : getDefaultGrantedSkillNames(agentName));
 
-  // Exclusion tokens in the base list deny those skills, and the resolver
-  // applies tokens in order, so a later plain grant would overwrite the
-  // earlier deny. Additions must not override an inherited exclusion;
-  // lifting one is the explicit job of a '!name' removal entry.
+  // Apply explicit token removals before deriving active exclusions. This
+  // is what makes removing '!foo' genuinely lift that inherited exclusion.
+  const removeSet = new Set(removeList);
+  const baseAfterRemoval = workingBase.filter(
+    (token) => !removeSet.has(token),
+  );
+
+  // Additions must not override exclusions that remain after removals.
   const excluded = new Set(
-    workingBase
+    baseAfterRemoval
       .filter((token) => token.startsWith('!'))
       .map((token) => token.slice(1)),
   );
 
-  // Removals operate on final skill tokens: a plain name removes that
-  // name, and a '!name' entry removes the exclusion token itself (lifting
-  // an existing exclusion). The wildcard is never expanded here.
-  const removeSet = new Set(removeList);
   let list = [
-    ...new Set([...workingBase, ...addList.filter((a) => !excluded.has(a))]),
+    ...new Set([
+      ...baseAfterRemoval,
+      ...addList.filter(
+        (name) => !excluded.has(name) && !removeSet.has(name),
+      ),
+    ]),
   ];
-  list = list.filter((skill) => !removeSet.has(skill));
 
   // A plain-name removal that the list grants implicitly via '*' must be
   // made explicit with the existing '!name' exclusion token, unless the
