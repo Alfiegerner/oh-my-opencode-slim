@@ -7,19 +7,14 @@ import {
 describe('skills_add / skills_remove review regressions', () => {
   test('lifting an inherited exclusion allows the same skill to be added', () => {
     expect(
-      resolveEffectiveSkills(
-        'oracle',
-        ['a', '!foo'],
-        ['foo'],
-        ['!foo'],
-      ),
+      resolveEffectiveSkills('oracle', ['a', '!foo'], ['foo'], ['!foo']),
     ).toEqual(['a', 'foo']);
   });
 
   test('plain-name removal still wins over adding the same skill', () => {
-    expect(
-      resolveEffectiveSkills('oracle', ['a'], ['foo'], ['foo']),
-    ).toEqual(['a']);
+    expect(resolveEffectiveSkills('oracle', ['a'], ['foo'], ['foo'])).toEqual([
+      'a',
+    ]);
   });
 
   test('legacy agent aliases resolve the same default grants as canonical names', () => {
