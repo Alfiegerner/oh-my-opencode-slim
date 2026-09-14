@@ -3,6 +3,19 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
+/**
+ * Per-session metadata projection for the clickable sidebar. Entries only
+ * exist for sessions present in `activeSessions`; they never activate a
+ * session by themselves. The key is always the full sessionID — never an
+ * alias — and the parent link lives exclusively in `sessionParents`.
+ */
+export interface TuiSessionDetails {
+  alias?: string;
+  /** providerID/modelID observed for this specific session. */
+  model?: string;
+  status?: 'busy' | 'retry';
+}
+
 export interface TuiSnapshot {
   version: 1;
   updatedAt: number;
@@ -23,6 +36,8 @@ export interface TuiSnapshot {
    * cannot scope the sidebar; the session tree can.
    */
   sessionParents: Record<string, string>;
+  /** Per-active-session details (alias/model/status) for the sidebar. */
+  sessionDetails: Record<string, TuiSessionDetails>;
 }
 
 const STATE_DIR = 'oh-my-opencode-slim';
@@ -71,6 +86,7 @@ function emptySnapshot(): TuiSnapshot {
     activeSessions: {},
     activityPids: {},
     sessionParents: {},
+    sessionDetails: {},
   };
 }
 
@@ -92,6 +108,25 @@ function parsePidRecord(value: unknown): Record<string, number> {
   return out;
 }
 
+function parseSessionDetails(
+  value: unknown,
+): Record<string, TuiSessionDetails> {
+  if (value === null || typeof value !== 'object') return {};
+  const out: Record<string, TuiSessionDetails> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (entry === null || typeof entry !== 'object') continue;
+    const rec = entry as { alias?: unknown; model?: unknown; status?: unknown };
+    const details: TuiSessionDetails = {};
+    if (typeof rec.alias === 'string') details.alias = rec.alias;
+    if (typeof rec.model === 'string') details.model = rec.model;
+    if (rec.status === 'busy' || rec.status === 'retry') {
+      details.status = rec.status;
+    }
+    if (Object.keys(details).length > 0) out[key] = details;
+  }
+  return out;
+}
+
 function parseSnapshot(value: string): TuiSnapshot {
   const parsed = JSON.parse(value) as Partial<TuiSnapshot> | undefined;
   if (parsed?.version !== 1) return emptySnapshot();
@@ -105,6 +140,7 @@ function parseSnapshot(value: string): TuiSnapshot {
     activeSessions: parsed.activeSessions ?? {},
     activityPids: parsePidRecord(parsed.activityPids),
     sessionParents: parseStringRecord(parsed.sessionParents),
+    sessionDetails: parseSessionDetails(parsed.sessionDetails),
   };
 }
 
@@ -129,14 +165,36 @@ function readTuiSnapshotStrict(statePath: string): TuiSnapshot | null {
   }
 }
 
+// Stat-based read cache for the polling TUI refresh (1/s per window).
+// Writers publish via tmp+rename, so a changed write always has a new
+// dev/ino — mtimeMs+size alone would also be sufficient, but inode
+// identity rules out same-mtime rewrites. Cache misses fall through to
+// a normal read; any stat/read failure bypasses the cache entirely.
+const asyncSnapshotCache = new Map<
+  string,
+  { stat: string; snapshot: TuiSnapshot }
+>();
+
+function snapshotStatKey(stat: fs.Stats): string {
+  return `${stat.dev}:${stat.ino}:${stat.mtimeMs}:${stat.size}`;
+}
+
 export async function readTuiSnapshotAsync(
   projectDir: string,
 ): Promise<TuiSnapshot> {
+  const statePath = getTuiStatePath(projectDir);
   try {
-    return parseSnapshot(
-      await fs.promises.readFile(getTuiStatePath(projectDir), 'utf8'),
+    const stat = await fs.promises.stat(statePath);
+    const statKey = snapshotStatKey(stat);
+    const cached = asyncSnapshotCache.get(statePath);
+    if (cached && cached.stat === statKey) return cached.snapshot;
+    const snapshot = parseSnapshot(
+      await fs.promises.readFile(statePath, 'utf8'),
     );
+    asyncSnapshotCache.set(statePath, { stat: statKey, snapshot });
+    return snapshot;
   } catch {
+    asyncSnapshotCache.delete(statePath);
     return emptySnapshot();
   }
 }
@@ -288,16 +346,23 @@ function cloneSnapshot(snapshot: TuiSnapshot): TuiSnapshot {
     activeSessions: { ...snapshot.activeSessions },
     activityPids: { ...snapshot.activityPids },
     sessionParents: { ...snapshot.sessionParents },
+    sessionDetails: Object.fromEntries(
+      Object.entries(snapshot.sessionDetails).map(([key, details]) => [
+        key,
+        { ...details },
+      ]),
+    ),
   };
 }
 
-function snapshotSectionsEqual(a: TuiSnapshot, b: TuiSnapshot): boolean {
+export function snapshotSectionsEqual(a: TuiSnapshot, b: TuiSnapshot): boolean {
   return (
     JSON.stringify(a.agentModels) === JSON.stringify(b.agentModels) &&
     JSON.stringify(a.agentVariants) === JSON.stringify(b.agentVariants) &&
     JSON.stringify(a.activeSessions) === JSON.stringify(b.activeSessions) &&
     JSON.stringify(a.activityPids) === JSON.stringify(b.activityPids) &&
-    JSON.stringify(a.sessionParents) === JSON.stringify(b.sessionParents)
+    JSON.stringify(a.sessionParents) === JSON.stringify(b.sessionParents) &&
+    JSON.stringify(a.sessionDetails) === JSON.stringify(b.sessionDetails)
   );
 }
 
@@ -408,7 +473,12 @@ export function recordTuiAgentModel(
 
 export function recordTuiAgentActivity(
   input:
-    | { sessionID: string; agentName: string; active: true }
+    | {
+        sessionID: string;
+        agentName: string;
+        active: true;
+        details?: TuiSessionDetails;
+      }
     | { sessionID: string; active: false },
   projectDir: string,
 ): void {
@@ -416,25 +486,83 @@ export function recordTuiAgentActivity(
     if (input.active) {
       snapshot.activeSessions[input.sessionID] = input.agentName;
       snapshot.activityPids[input.sessionID] = process.pid;
+      if (input.details && Object.keys(input.details).length > 0) {
+        const current = snapshot.sessionDetails[input.sessionID] ?? {};
+        snapshot.sessionDetails[input.sessionID] = {
+          ...current,
+          ...input.details,
+        };
+      }
     } else {
       delete snapshot.activeSessions[input.sessionID];
       delete snapshot.activityPids[input.sessionID];
+      delete snapshot.sessionDetails[input.sessionID];
     }
   });
 }
 
-// Startup cleanup: drop crash residue (dead recorder pid), legacy entries
-// written before ownership existed, and entries from this very process
-// (fresh start owns nothing yet). Keep live activities owned by other
-// windows sharing the project directory (#1147); their sidebar visibility
-// is scoped by session tree at render time, not by process.
+/**
+ * Update per-session sidebar details (alias/model/status) for an ACTIVE
+ * session only. A late detail update after idle must never resurrect an
+ * activity entry — the whole update is dropped when the session is gone
+ * from `activeSessions` at commit time (under the same lock).
+ */
+export function updateTuiSessionDetails(
+  sessionID: string,
+  details: TuiSessionDetails,
+  projectDir: string,
+): void {
+  updateSnapshot(projectDir, (snapshot) => {
+    if (snapshot.activeSessions[sessionID] === undefined) return;
+    const current = snapshot.sessionDetails[sessionID] ?? {};
+    snapshot.sessionDetails[sessionID] = { ...current, ...details };
+  });
+}
+
+/**
+ * Retract only the alias of an active session (e.g. its board record was
+ * dropped). Model/status survive; the session stays visible in the
+ * sidebar under its abbreviated sessionID until it goes idle.
+ */
+export function clearTuiSessionAlias(
+  sessionID: string,
+  projectDir: string,
+): void {
+  updateSnapshot(projectDir, (snapshot) => {
+    if (snapshot.activeSessions[sessionID] === undefined) return;
+    const current = snapshot.sessionDetails[sessionID];
+    if (current === undefined || current.alias === undefined) return;
+    const next: TuiSessionDetails = { ...current };
+    delete next.alias;
+    if (Object.keys(next).length === 0) {
+      delete snapshot.sessionDetails[sessionID];
+    } else {
+      snapshot.sessionDetails[sessionID] = next;
+    }
+  });
+}
+
+// Startup cleanup: drop crash residue (dead recorder pid) and legacy
+// entries written before ownership existed. Keep live activities even
+// when they belong to this PID — a second plugin init in the same
+// process must not wipe the first instance's in-flight sessions.
+// Per-instance cleanup is `recordTuiAgentActivity(active: false)` on
+// dispose, not this sweep. Sidebar visibility is still scoped by
+// session tree at render time (#1147).
 export function clearTuiAgentActivities(projectDir: string): void {
   updateSnapshot(projectDir, (snapshot) => {
     for (const sessionID of Object.keys(snapshot.activeSessions)) {
       const pid = snapshot.activityPids[sessionID];
-      if (pid === undefined || pid === process.pid || !isProcessRunning(pid)) {
+      if (pid === undefined || !isProcessRunning(pid)) {
         delete snapshot.activeSessions[sessionID];
         delete snapshot.activityPids[sessionID];
+        delete snapshot.sessionDetails[sessionID];
+      }
+    }
+    // Consistency sweep: details never outlive their activity entry.
+    for (const sessionID of Object.keys(snapshot.sessionDetails)) {
+      if (snapshot.activeSessions[sessionID] === undefined) {
+        delete snapshot.sessionDetails[sessionID];
       }
     }
   });

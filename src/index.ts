@@ -77,11 +77,13 @@ import {
 } from './tools/task-activity';
 import {
   clearTuiAgentActivities,
+  clearTuiSessionAlias,
   readTuiSnapshot,
   recordTuiAgentActivity,
   recordTuiAgentModel,
   recordTuiAgentModels,
   recordTuiSessionParent,
+  updateTuiSessionDetails,
 } from './tui-state';
 import {
   BackgroundJobBoard,
@@ -234,8 +236,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       sessionMetadata,
     );
   // Busy/retry arrived before the session's agent was known. chat.message
-  // latches the agent and flushes these so the spinner still starts.
-  const pendingTuiBusySessions = new Set<string>();
+  // latches the agent and flushes these so the spinner still starts. The
+  // observed status is kept so the flushed activation records the right
+  // sidebar detail (busy vs retry).
+  const pendingTuiBusySessions = new Map<string, 'busy' | 'retry'>();
   const tuiActivityDirectory = (sessionID: string): string => {
     return sessionMetadata.getDirectory(sessionID) ?? ctx.directory;
   };
@@ -245,9 +249,31 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   // child→parent links; roots are never stored per-activity, so a
   // late-learned link re-roots everything consistently. Process identity
   // cannot scope this because v2 daemons are shared across windows.
-  const markTuiAgentActive = (sessionID: string, agentName: string): void => {
+  const markTuiAgentActive = (
+    sessionID: string,
+    agentName: string,
+    status?: 'busy' | 'retry',
+  ): void => {
     const directory = tuiActivityDirectory(sessionID);
-    recordTuiAgentActivity({ sessionID, agentName, active: true }, directory);
+    // Alias from an already-registered board record (launch may have
+    // arrived before or after busy; both orders converge here or via the
+    // coordinator's identity listener).
+    const alias = backgroundJobBoard?.get(sessionID)?.alias;
+    const model = sessionMetadata.getModel(sessionID);
+    const details = {
+      ...(alias ? { alias } : {}),
+      ...(model ? { model } : {}),
+      ...(status ? { status } : {}),
+    };
+    recordTuiAgentActivity(
+      {
+        sessionID,
+        agentName,
+        active: true,
+        ...(Object.keys(details).length > 0 ? { details } : {}),
+      },
+      directory,
+    );
     ownedTuiActivitySessions.set(sessionID, directory);
     void hydrateTuiSessionParent(sessionID, directory);
   };
@@ -507,6 +533,28 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     const backgroundJobCoordinator = new BackgroundJobCoordinator(
       backgroundJobBoard,
     );
+    // Project launch identity (alias↔session) into TUI state so the
+    // clickable sidebar can label active subagent sessions. Best-effort:
+    // a failed tui-state write must never fail a launch.
+    backgroundJobCoordinator.addLaunchIdentityListener((event) => {
+      const directory = tuiActivityDirectory(event.taskID);
+      if (event.kind === 'registered') {
+        if (event.parentSessionID && event.parentSessionID !== event.taskID) {
+          recordTuiSessionParent(
+            event.taskID,
+            event.parentSessionID,
+            directory,
+          );
+        }
+        updateTuiSessionDetails(
+          event.taskID,
+          { alias: event.alias },
+          directory,
+        );
+      } else {
+        clearTuiSessionAlias(event.taskID, directory);
+      }
+    });
     backgroundJobSupervisor = new BackgroundJobSupervisor({
       backgroundJobStore: backgroundJobCoordinator,
       wallClockTimeoutMs: runtime.backgroundJobs.wallClockTimeoutMs,
@@ -1289,9 +1337,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           const agentName = sessionMetadata.getAgent(eventSessionID);
           if (agentName) {
             pendingTuiBusySessions.delete(eventSessionID);
-            markTuiAgentActive(eventSessionID, agentName);
+            markTuiAgentActive(eventSessionID, agentName, statusType);
           } else {
-            pendingTuiBusySessions.add(eventSessionID);
+            pendingTuiBusySessions.set(eventSessionID, statusType);
           }
         } else if (
           event.type === 'session.idle' ||
@@ -1333,6 +1381,20 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           if (!internalAdmission) {
             sessionMetadata.setModel(info.sessionID, model);
           }
+          // Per-session sidebar detail: the model actually observed for
+          // this session (two same-agent sessions may differ). Published
+          // regardless of admission origin: the executing model is a
+          // runtime fact, not selection tracking.
+          updateTuiSessionDetails(
+            info.sessionID,
+            { model },
+            tuiActivityDirectory(info.sessionID),
+          );
+          // Managed background-task sessions are identified by their session
+          // ID. If the model serving one changed (fallback re-prompt, runtime
+          // switch), migrate the admission accounting so provider/model caps
+          // keep tracking the model actually in use. No-op for other
+          // sessions and idempotent when the model is unchanged.
           backgroundTaskConcurrency.migrateTask(info.sessionID, model);
         }
         if (typeof info?.agent === 'string' && providerID && modelID) {
@@ -1634,8 +1696,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           pendingTuiBusySessions.has(input.sessionID) ||
           ownedTuiActivitySessions.has(input.sessionID)
         ) {
+          const pendingStatus = pendingTuiBusySessions.get(input.sessionID);
           pendingTuiBusySessions.delete(input.sessionID);
-          markTuiAgentActive(input.sessionID, agent);
+          markTuiAgentActive(input.sessionID, agent, pendingStatus);
         }
         companionManager.onSessionStatus({
           sessionId: input.sessionID,
@@ -1660,6 +1723,14 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         if (!internalAdmission) {
           sessionMetadata.setModel(input.sessionID, model);
         }
+        // v2 synthesizes message.updated without provider/model; publish
+        // the observed model here so sessionDetails is not empty for the
+        // entire run. Only-if-active: idle sessions are not resurrected.
+        updateTuiSessionDetails(
+          input.sessionID,
+          { model },
+          tuiActivityDirectory(input.sessionID),
+        );
         backgroundTaskConcurrency.migrateTask(input.sessionID, model);
       }
       taskSessionManagerHook.observeChatMessage(input, output);
