@@ -562,7 +562,7 @@ describe('plugin TUI agent activity', () => {
   test('does not cache a malformed parentID as a confirmed root', async () => {
     let attempts = 0;
     const sessionApi = {
-      async get(input: { path: { id: string } }) {
+      async get(_input: { path: { id: string } }) {
         attempts += 1;
         if (attempts === 1) {
           // Malformed non-string parent: contract violation, not a root.
@@ -599,6 +599,7 @@ describe('plugin TUI agent activity', () => {
     } finally {
       await malformedHooks?.dispose?.();
     }
+  });
   test('chat.message does not light a spinner without session.status busy', async () => {
     await hooks?.['chat.message']?.(
       { sessionID: 'orch', agent: 'orchestrator' } as never,
