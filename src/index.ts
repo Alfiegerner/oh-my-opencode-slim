@@ -1239,6 +1239,21 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
 
     event: async (input) => {
+      // Token-stream deltas fire on every reasoning/text chunk. Slim
+      // has no work for them except the multiplexer activity heartbeat
+      // that keeps a child pane from looking idle mid-stream. Skip the
+      // rest of the fan-out. v2 names: session.next.{text,reasoning}.delta.
+      const streamEventType = (input.event as { type?: string } | undefined)
+        ?.type;
+      if (
+        streamEventType === 'message.part.delta' ||
+        streamEventType === 'session.next.text.delta' ||
+        streamEventType === 'session.next.reasoning.delta'
+      ) {
+        await multiplexerSessionManager.onSessionStatus(input.event as never);
+        return;
+      }
+
       await cacheMonitor.event(input);
 
       const event = input.event as {

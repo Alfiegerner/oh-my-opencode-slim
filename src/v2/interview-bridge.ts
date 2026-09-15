@@ -206,15 +206,27 @@ export function createV2InterviewBridge(
     });
   }
 
-  async function handleContext(event: V2SessionContextEvent): Promise<void> {
-    const messages = toInterviewMessages(event);
-    transcripts.set(event.sessionID, messages);
+  function isManagedInterviewSession(sessionID: string): boolean {
+    return (
+      transcripts.has(sessionID) ||
+      Boolean(
+        (dashboardManager?.service ?? service).getActiveInterviewId(sessionID),
+      )
+    );
+  }
 
+  async function handleContext(event: V2SessionContextEvent): Promise<void> {
     const trailing = event.messages.at(-1);
-    if (trailing?.role !== 'user') return;
-    const text = textFromContent(trailing.content);
+    const text =
+      trailing?.role === 'user' ? textFromContent(trailing.content) : '';
     const match = text.match(MARKER_PATTERN);
-    if (!match) return;
+    const managed = isManagedInterviewSession(event.sessionID);
+    if (!match && !managed) return;
+
+    // Capture the current view before executing /interview so resume and
+    // creation can read the history. Ordinary sessions never enter here.
+    transcripts.set(event.sessionID, toInterviewMessages(event));
+    if (!match || trailing?.role !== 'user') return;
 
     const output = {
       parts: [] as Array<{
@@ -281,18 +293,22 @@ export function createV2InterviewBridge(
       ((properties.info as { id?: string } | undefined)?.id ?? '');
     if (!sessionID) return;
 
+    const managed = isManagedInterviewSession(sessionID);
     if (type === 'session.next.text.started') {
+      if (!managed) return;
       activeText.set(sessionID, '');
       beginText(sessionID);
       return;
     }
     if (type === 'session.next.text.delta') {
+      if (!managed) return;
       const text = `${activeText.get(sessionID) ?? ''}${typeof properties.delta === 'string' ? properties.delta : ''}`;
       activeText.set(sessionID, text);
       appendText(sessionID, text);
       return;
     }
     if (type === 'session.next.text.ended') {
+      if (!managed) return;
       const text =
         typeof properties.text === 'string'
           ? properties.text

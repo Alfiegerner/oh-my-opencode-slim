@@ -240,6 +240,32 @@ describe('runtime status reconciliation', () => {
     reconciler.dispose();
   });
 
+  test('routine schedule() during an in-flight lookup does not force an immediate extra pass', async () => {
+    const firstResponse = deferred<unknown>();
+    let lookupCount = 0;
+    const status = mock(() => {
+      lookupCount += 1;
+      if (lookupCount === 1) return firstResponse.promise;
+      return Promise.resolve({ data: { 'child-1': { type: 'busy' } } });
+    });
+    const { board, reconciler } = createReconciler(status);
+
+    const firstReconciliation = reconciler.reconcile();
+    await Promise.resolve();
+    for (let index = 0; index < 20; index += 1) {
+      reconciler.schedule();
+    }
+    firstResponse.resolve({ data: { 'child-1': { type: 'busy' } } });
+    await firstReconciliation;
+
+    expect(status).toHaveBeenCalledTimes(1);
+    expect(board.get('child-1')).toMatchObject({
+      state: 'running',
+      statusUncertain: false,
+    });
+    reconciler.dispose();
+  });
+
   test('does not apply an old status response to a relaunched generation', async () => {
     const response = deferred<unknown>();
     const { board, reconciler } = createReconciler(() => response.promise);

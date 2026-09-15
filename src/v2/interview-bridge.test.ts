@@ -245,7 +245,10 @@ describe('v2 interview bridge', () => {
   });
 
   test('snapshots transcript before downstream part injection', async () => {
-    const bridge = createV2InterviewBridge(createContext());
+    const directory = `.tmp-v2-interview-snap-${Date.now()}`;
+    const bridge = createV2InterviewBridge(createContext(), {
+      outputFolder: directory,
+    } as never);
     const event = {
       sessionID: 'ses_snapshot',
       agent: 'orchestrator',
@@ -256,30 +259,38 @@ describe('v2 interview bridge', () => {
         {
           id: 'answer',
           role: 'user',
-          content: [{ type: 'text', text: 'the answer' }],
+          content: [{ type: 'text', text: markerText('the answer') }],
         },
       ],
     };
 
     await bridge.handleContext(event);
+    const captured = bridge.getTranscript('ses_snapshot');
     event.messages[0].content.push({
       type: 'text',
       text: 'injected by downstream transform',
       synthetic: true,
       metadata: { source: 'bridge-test' },
-    });
+    } as { type: string; text: string });
 
-    expect(bridge.getTranscript('ses_snapshot')).toEqual([
-      {
-        info: { role: 'user', id: 'answer' },
-        parts: [{ type: 'text', text: 'the answer' }],
-      },
-    ]);
+    expect(captured[0]?.parts?.[0]?.text).toContain('the answer');
+    expect(
+      captured[0]?.parts?.some(
+        (part) => part.text === 'injected by downstream transform',
+      ),
+    ).toBe(false);
     bridge.dispose();
+    await fs.rm(`${process.cwd()}/${directory}`, {
+      recursive: true,
+      force: true,
+    });
   });
 
   test('projects text events and removes a deleted session', async () => {
-    const bridge = createV2InterviewBridge(createContext());
+    const directory = `.tmp-v2-interview-text-${Date.now()}`;
+    const bridge = createV2InterviewBridge(createContext(), {
+      outputFolder: directory,
+    } as never);
     await bridge.handleContext({
       sessionID: 'ses_text',
       agent: 'orchestrator',
@@ -290,7 +301,7 @@ describe('v2 interview bridge', () => {
         {
           id: 'u',
           role: 'user',
-          content: [{ type: 'text', text: 'hello' }],
+          content: [{ type: 'text', text: markerText('hello') }],
         },
       ],
     });
@@ -316,12 +327,19 @@ describe('v2 interview bridge', () => {
     });
     expect(bridge.getTranscript('ses_text')).toEqual([]);
     bridge.dispose();
+    await fs.rm(`${process.cwd()}/${directory}`, {
+      recursive: true,
+      force: true,
+    });
   });
 
   test('resolves sessionID from live `data`-keyed events (text + deletion)', async () => {
     // Live v2 hosts key the event payload under `data`; reading only
     // `event.properties` left handleEvent dead on live v2 for ALL events.
-    const bridge = createV2InterviewBridge(createContext());
+    const directory = `.tmp-v2-interview-live-${Date.now()}`;
+    const bridge = createV2InterviewBridge(createContext(), {
+      outputFolder: directory,
+    } as never);
     await bridge.handleContext({
       sessionID: 'ses_live',
       agent: 'orchestrator',
@@ -332,7 +350,7 @@ describe('v2 interview bridge', () => {
         {
           id: 'u',
           role: 'user',
-          content: [{ type: 'text', text: 'hello' }],
+          content: [{ type: 'text', text: markerText('hello') }],
         },
       ],
     });
@@ -353,6 +371,38 @@ describe('v2 interview bridge', () => {
       data: { sessionID: 'ses_live' },
     });
     expect(bridge.getTranscript('ses_live')).toEqual([]);
+    bridge.dispose();
+    await fs.rm(`${process.cwd()}/${directory}`, {
+      recursive: true,
+      force: true,
+    });
+  });
+
+  test('ignores text streams for sessions that are not interviews', async () => {
+    const bridge = createV2InterviewBridge(createContext());
+    await bridge.handleContext({
+      sessionID: 'ses_plain',
+      agent: 'orchestrator',
+      model: {},
+      system: [],
+      tools: {},
+      messages: [
+        {
+          id: 'u',
+          role: 'user',
+          content: [{ type: 'text', text: 'hello' }],
+        },
+      ],
+    });
+    await bridge.handleEvent({
+      type: 'session.next.text.started',
+      properties: { sessionID: 'ses_plain' },
+    });
+    await bridge.handleEvent({
+      type: 'session.next.text.delta',
+      properties: { sessionID: 'ses_plain', delta: 'ignored' },
+    });
+    expect(bridge.getTranscript('ses_plain')).toEqual([]);
     bridge.dispose();
   });
 
