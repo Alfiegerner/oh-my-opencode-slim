@@ -921,7 +921,6 @@ describe('plugin TUI agent activity', () => {
       /^ora-\d+$/,
     );
   });
-
 });
 
 describe('background task admission model resolution', () => {
