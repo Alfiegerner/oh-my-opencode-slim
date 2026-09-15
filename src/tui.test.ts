@@ -17,6 +17,7 @@ import {
   isRefreshCurrent,
   readCompactSidebar,
   readConfigInvalid,
+  resolveSidebarSlotOrder,
   splitSidebarModelId,
   syncTmuxPaneRegistration,
   default as tuiPlugin,
@@ -838,6 +839,134 @@ describe('dual-contract plugin module', () => {
       expect(cleanup).toBeUndefined();
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('resolveSidebarSlotOrder', () => {
+  const NAME = 'oh-my-opencode-slim';
+
+  test('index 0 lands at 110, right after the host context section', () => {
+    expect(resolveSidebarSlotOrder([`file:///w/${NAME}`], NAME)).toBe(110);
+  });
+
+  test('later indexes map to later bands of 100', () => {
+    expect(
+      resolveSidebarSlotOrder(
+        ['@cortexkit/opencode-magic-context@0.42.4', `file:///w/${NAME}`],
+        NAME,
+      ),
+    ).toBe(210);
+  });
+
+  test('falls back to 900 when the list is missing or not an array', () => {
+    expect(resolveSidebarSlotOrder(undefined, NAME)).toBe(900);
+    expect(resolveSidebarSlotOrder(null, NAME)).toBe(900);
+    expect(resolveSidebarSlotOrder('not-a-list', NAME)).toBe(900);
+  });
+
+  test('falls back to 900 when the spec is absent from the list', () => {
+    expect(
+      resolveSidebarSlotOrder(['@cortexkit/opencode-magic-context'], NAME),
+    ).toBe(900);
+  });
+
+  test('matches npm specs with versions', () => {
+    expect(
+      resolveSidebarSlotOrder(['other-plugin', `${NAME}@2.2.20`], NAME),
+    ).toBe(210);
+  });
+
+  test('matches [spec, options] tuple entries the installer generates', () => {
+    expect(
+      resolveSidebarSlotOrder(
+        [
+          ['@cortexkit/opencode-magic-context@0.42.4', {}],
+          [`file:///home/raxxor/workspace/${NAME}`, { flag: true }],
+        ],
+        NAME,
+      ),
+    ).toBe(210);
+  });
+
+  test('does not match a scoped package sharing the basename', () => {
+    expect(resolveSidebarSlotOrder([`@other/${NAME}`, 'unrelated'], NAME)).toBe(
+      900,
+    );
+  });
+
+  test('file:// specs with a trailing slash still match', () => {
+    expect(resolveSidebarSlotOrder([`file:///w/${NAME}/`], NAME)).toBe(110);
+  });
+
+  test('non-string and malformed entries are skipped without shifting index', () => {
+    expect(
+      resolveSidebarSlotOrder(
+        [{ not: 'a spec' }, 42, [''], `file:///w/${NAME}`],
+        NAME,
+      ),
+    ).toBe(410);
+  });
+
+  test('v1 registration wires tuiConfig.plugin into the slot order', async () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-tui-v1-'));
+    try {
+      const captured: { order?: number }[] = [];
+      await tuiPlugin.tui(
+        {
+          state: { path: { directory: projectDir } },
+          route: { current: { name: 'home' } },
+          lifecycle: { onDispose: () => () => {} },
+          renderer: { requestRender: () => {} },
+          slots: {
+            register: (plugin: { order?: number }) => {
+              captured.push({ order: plugin.order });
+              return 'test-slot';
+            },
+          },
+          tuiConfig: {
+            plugin: [
+              '@cortexkit/opencode-magic-context@0.42.4',
+              'file:///home/raxxor/workspace/oh-my-opencode-slim',
+            ],
+          },
+          theme: { current: {} },
+        } as unknown as Parameters<typeof tuiPlugin.tui>[0],
+        {},
+        { version: 'test' } as Parameters<typeof tuiPlugin.tui>[2],
+      );
+
+      expect(captured[0]?.order).toBe(210);
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  test('v1 registration falls back to 900 without tuiConfig', async () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-tui-v1-'));
+    try {
+      const captured: { order?: number }[] = [];
+      await tuiPlugin.tui(
+        {
+          state: { path: { directory: projectDir } },
+          route: { current: { name: 'home' } },
+          lifecycle: { onDispose: () => () => {} },
+          renderer: { requestRender: () => {} },
+          slots: {
+            register: (plugin: { order?: number }) => {
+              captured.push({ order: plugin.order });
+              return 'test-slot';
+            },
+          },
+          theme: { current: {} },
+        } as unknown as Parameters<typeof tuiPlugin.tui>[0],
+        {},
+        { version: 'test' } as Parameters<typeof tuiPlugin.tui>[2],
+      );
+
+      expect(captured[0]?.order).toBe(900);
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
     }
   });
 });
