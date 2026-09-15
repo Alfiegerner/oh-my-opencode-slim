@@ -291,7 +291,13 @@ export function createRevivedRunTracker(options: {
             .resolveSelection(run.parentSessionID)
             .catch((): undefined => undefined)
         : undefined;
-      if (disposed || runs.get(run.taskID) !== run) return;
+      if (disposed || runs.get(run.taskID) !== run || run.notification.sent) {
+        return;
+      }
+      // Revalidate AFTER the selection await: a late success from a
+      // previous attempt may have marked this notification sent while the
+      // retry was pending here — sending again would duplicate the
+      // terminal result (Oracle r2 P1.2).
       const latestBeforeSend = options.backgroundJobBoard.get(run.taskID);
       if (
         !latestBeforeSend ||
@@ -351,6 +357,19 @@ export function createRevivedRunTracker(options: {
               parts: [createInternalAgentTextPart(text)],
             },
           }),
+        // Late settlement after the local timeout: a SUCCESS means the
+        // host DID accept the notification — mark it delivered and cancel
+        // the pending retry so the same terminal result is never sent to
+        // the parent twice. A late FAILURE keeps the retry scheduled.
+        (outcome) => {
+          if (!outcome.ok) return;
+          if (disposed || runs.get(run.taskID) !== run) return;
+          run.notification.sent = true;
+          if (run.notification.retryTimer) {
+            clearTimeout(run.notification.retryTimer);
+            run.notification.retryTimer = undefined;
+          }
+        },
       );
       const error = responseError(response);
       if (error !== undefined) throw new Error(stringifyError(error));
@@ -440,6 +459,7 @@ async function awaitNotificationTransport<T>(
   backgroundJobBoard: BackgroundJobStore,
   lease: BackgroundJobLease,
   operation: () => Promise<T>,
+  onLateSettlement?: (outcome: { ok: boolean }) => void,
 ): Promise<T> {
   let settled = false;
   let timedOut = false;
@@ -449,12 +469,23 @@ async function awaitNotificationTransport<T>(
     .then(
       (value) => {
         settled = true;
-        if (timedOut) backgroundJobBoard.releaseLease(lease);
+        if (timedOut) {
+          backgroundJobBoard.releaseLease(lease);
+          // A resolved promise is NOT delivery: the SDK can resolve with
+          // an `{ error }` envelope when throwOnError is off. Classify
+          // with the same check the normal path uses (Oracle r2 P1.1).
+          onLateSettlement?.({
+            ok: responseError(value) === undefined,
+          });
+        }
         return value;
       },
       (error: unknown) => {
         settled = true;
-        if (timedOut) backgroundJobBoard.releaseLease(lease);
+        if (timedOut) {
+          backgroundJobBoard.releaseLease(lease);
+          onLateSettlement?.({ ok: false });
+        }
         throw error;
       },
     );

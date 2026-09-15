@@ -322,7 +322,11 @@ export function createSessionContextHandler(
       try {
         const sysStrings = event.system.map((s) => s.text ?? '');
         await deps.systemTransform(
-          { sessionID: event.sessionID },
+          // Forward the request-scoped agent so the transform can tell a
+          // real orchestrator request from an auxiliary (title/compaction)
+          // request running in the same session — v1 hosts lack this and
+          // fall back to a structural heuristic.
+          { sessionID: event.sessionID, agent: event.agent },
           { system: sysStrings },
         );
         event.system = sysStrings.map((text) => ({
