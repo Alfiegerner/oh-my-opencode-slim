@@ -23,6 +23,7 @@ import {
   readTuiSnapshot,
   readTuiSnapshotAsync,
   resolveTuiSnapshotRoot,
+  snapshotSectionsEqual,
   type TuiSnapshot,
 } from './tui-state';
 import { isPluginDisabledByEnv } from './utils/env';
@@ -51,7 +52,14 @@ const ACTIVITY_FRAMES = [
   '⠏',
 ] as const;
 
-type Child = JSX.Element | string | number | null | undefined | false;
+type Child =
+  | JSX.Element
+  | string
+  | number
+  | null
+  | undefined
+  | false
+  | (() => string);
 
 async function readPackageVersion(): Promise<string | undefined> {
   try {
@@ -400,6 +408,186 @@ export function getActiveSidebarAgentNames(
   return names;
 }
 
+/** One clickable sidebar destination: an active subagent session. */
+export interface SidebarSessionTarget {
+  sessionID: string;
+  agentName: string;
+  alias?: string;
+  model?: string;
+  status?: 'busy' | 'retry';
+}
+
+export interface SidebarAgentTargets {
+  agentName: string;
+  sessions: SidebarSessionTarget[];
+}
+
+/**
+ * Group the active subagent sessions of the visible conversation by agent
+ * for the clickable sidebar. Mirrors the scoping of
+ * getActiveSidebarAgentNames (#1147) with two refinements:
+ * - Only sessions with a known parent link are offered as destinations:
+ *   a root session running an agent directly (e.g. a top-level chat with
+ *   agent=oracle) is not a subagent of this conversation.
+ * - Without a visible route session there is no conversation to scope to;
+ *   return no targets rather than exposing cross-conversation navigation.
+ * Stable ordering: by alias (numeric suffix aware, ora-2 < ora-10), then
+ * by sessionID.
+ */
+export function getSidebarAgentTargets(
+  snapshot: TuiSnapshot,
+  visibleRootID?: string,
+): SidebarAgentTargets[] {
+  if (visibleRootID === undefined) return [];
+  const root = resolveTuiSnapshotRoot(snapshot, visibleRootID);
+  const byAgent = new Map<string, SidebarSessionTarget[]>();
+  for (const [sessionID, agentName] of Object.entries(
+    snapshot.activeSessions,
+  )) {
+    const parent = snapshot.sessionParents[sessionID];
+    if (parent === undefined) continue; // not a known subagent
+    if (resolveTuiSnapshotRoot(snapshot, sessionID) !== root) continue;
+    const details = snapshot.sessionDetails[sessionID];
+    const list = byAgent.get(agentName) ?? [];
+    list.push({
+      sessionID,
+      agentName,
+      alias: details?.alias,
+      model: details?.model,
+      status: details?.status,
+    });
+    byAgent.set(agentName, list);
+  }
+  return [...byAgent.entries()].map(([agentName, sessions]) => ({
+    agentName,
+    sessions: disambiguateDuplicateAliases(
+      sessions.sort(compareSidebarTargets),
+    ),
+  }));
+}
+
+/** When two sessions share an alias (nested branches), append a short id. */
+function disambiguateDuplicateAliases(
+  sessions: SidebarSessionTarget[],
+): SidebarSessionTarget[] {
+  const counts = new Map<string, number>();
+  for (const session of sessions) {
+    if (session.alias === undefined) continue;
+    counts.set(session.alias, (counts.get(session.alias) ?? 0) + 1);
+  }
+  return sessions.map((session) => {
+    if (session.alias === undefined) return session;
+    if ((counts.get(session.alias) ?? 0) < 2) return session;
+    return {
+      ...session,
+      alias: `${session.alias} ${shortSessionID(session.sessionID)}`,
+    };
+  });
+}
+
+function compareSidebarTargets(
+  a: SidebarSessionTarget,
+  b: SidebarSessionTarget,
+): number {
+  if (a.alias !== undefined && b.alias !== undefined && a.alias !== b.alias) {
+    return compareAliasNumeric(a.alias, b.alias);
+  }
+  if (a.alias !== undefined && b.alias === undefined) return -1;
+  if (a.alias === undefined && b.alias !== undefined) return 1;
+  return a.sessionID < b.sessionID ? -1 : a.sessionID > b.sessionID ? 1 : 0;
+}
+
+/** Natural sort for alias counters: ora-2 sorts before ora-10. */
+export function compareAliasNumeric(a: string, b: string): number {
+  const ma = /^(.*?)(\d+)$/.exec(a);
+  const mb = /^(.*?)(\d+)$/.exec(b);
+  if (ma && mb && ma[1] === mb[1]) {
+    return Number.parseInt(ma[2], 10) - Number.parseInt(mb[2], 10);
+  }
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** Short distinctive id fallback when a session has no board alias. */
+export function shortSessionID(sessionID: string): string {
+  return sessionID.length > 8 ? sessionID.slice(-8) : sessionID;
+}
+
+/**
+ * Per-window sidebar interaction state. `navigate` is feature-detected at
+ * startup: without it the sidebar renders informatively (no handlers).
+ * Expansion state is local to this window and never persisted.
+ */
+export interface SidebarInteraction {
+  navigate?: (sessionID: string) => void;
+  expandedAgents: () => ReadonlySet<string>;
+  toggleAgent: (agentName: string) => void;
+  /** Reset expansion when the project directory or visible root changes. */
+  syncScope: (directory: string, rootID: string | undefined) => void;
+  /** True when this TUI has a non-empty text selection (skip click). */
+  hasSelectedText?: () => boolean;
+}
+
+export function createSidebarInteraction(
+  navigate: ((sessionID: string) => void) | undefined,
+  hasSelectedText?: () => boolean,
+): SidebarInteraction {
+  const [expanded, setExpanded] = createSignal<ReadonlySet<string>>(new Set());
+  let lastDirectory: string | undefined;
+  let lastRootID: string | undefined;
+  return {
+    navigate,
+    hasSelectedText,
+    expandedAgents: expanded,
+    toggleAgent: (agentName: string) => {
+      setExpanded((prev: ReadonlySet<string>) => {
+        const next = new Set<string>(prev);
+        if (next.has(agentName)) next.delete(agentName);
+        else next.add(agentName);
+        return next;
+      });
+    },
+    syncScope: (directory, rootID) => {
+      if (
+        lastDirectory !== undefined &&
+        (lastDirectory !== directory || lastRootID !== rootID)
+      ) {
+        setExpanded(new Set<string>());
+      }
+      lastDirectory = directory;
+      lastRootID = rootID;
+    },
+  };
+}
+
+/** Build a guarded navigation callback from a raw route navigate fn. */
+export function makeRouteNavigator(
+  owner: object | undefined,
+  methodName: 'navigate',
+  v2Shape: boolean,
+): ((sessionID: string) => void) | undefined {
+  if (owner === undefined) return undefined;
+  const raw = (owner as Record<string, unknown>)[methodName];
+  if (typeof raw !== 'function') return undefined;
+  return (sessionID) => {
+    try {
+      if (v2Shape) {
+        (raw as (route: { type: string; sessionID: string }) => void).call(
+          owner,
+          { type: 'session', sessionID },
+        );
+      } else {
+        (raw as (name: string, params?: Record<string, unknown>) => void).call(
+          owner,
+          'session',
+          { sessionID },
+        );
+      }
+    } catch {
+      // Navigation is best-effort; never break the sidebar on a host error.
+    }
+  };
+}
+
 export function getSidebarActivityIndicator(
   active: boolean,
   now = Date.now(),
@@ -413,19 +601,202 @@ interface AgentRowTheme {
   accent: unknown;
   text: unknown;
   textMuted: unknown;
+  background?: unknown;
+  backgroundElement?: unknown;
+  success?: unknown;
+  warning?: unknown;
+  hover?: unknown;
+}
+
+const STATUS_ACTIVE_COLOR = '#22c55e';
+const STATUS_RETRY_COLOR = '#f59e0b';
+const STATUS_COLUMN_WIDTH = 8;
+
+function hasPrimarySelection(hasSelectedText?: () => boolean): boolean {
+  try {
+    return hasSelectedText?.() === true;
+  } catch {
+    return false;
+  }
+}
+
+function shouldActivateRow(
+  event: { button?: number } | undefined,
+  hasSelectedText?: () => boolean,
+): boolean {
+  if (event?.button !== undefined && event.button !== 0) return false;
+  return !hasPrimarySelection(hasSelectedText);
+}
+
+export function selectionGuard(renderer: {
+  getSelection?: () => unknown;
+}): () => boolean {
+  return () => {
+    const selection = renderer.getSelection?.();
+    if (selection === null || selection === undefined) return false;
+    if (typeof selection !== 'object') return false;
+    const getSelectedText = (selection as { getSelectedText?: unknown })
+      .getSelectedText;
+    if (typeof getSelectedText !== 'function') return false;
+    const text = (getSelectedText as () => unknown).call(selection);
+    return typeof text === 'string' && text.length > 0;
+  };
+}
+
+export function resolveHoverBackground(theme: {
+  background?: unknown;
+  backgroundElement?: unknown;
+  text?: unknown;
+  hover?: unknown;
+}): unknown {
+  if (theme.hover !== undefined && theme.hover !== null) return theme.hover;
+  if (
+    theme.backgroundElement !== undefined &&
+    theme.backgroundElement !== null
+  ) {
+    return theme.backgroundElement;
+  }
+  try {
+    const bg = parseColor((theme.background ?? '#111111') as ColorInput);
+    const fg = parseColor((theme.text ?? '#ffffff') as ColorInput);
+    return RGBA.fromValues(
+      bg.r * 0.82 + fg.r * 0.18,
+      bg.g * 0.82 + fg.g * 0.18,
+      bg.b * 0.82 + fg.b * 0.18,
+      bg.a,
+    );
+  } catch {
+    return '#2a2a2a';
+  }
+}
+
+type HoverPaintTarget = {
+  node: { bg?: unknown; backgroundColor?: unknown };
+  hasBg: boolean;
+  hasBackgroundColor: boolean;
+  bg: unknown;
+  backgroundColor: unknown;
+};
+
+type HoverRowRenderable = {
+  backgroundColor?: unknown;
+  bg?: unknown;
+  getChildren?: () => unknown[];
+  screenX: number;
+  screenY: number;
+  width: number;
+  height: number;
+};
+
+function collectHoverPaintTargets(
+  node: unknown,
+  acc: HoverPaintTarget[],
+): void {
+  if (!node || typeof node !== 'object') return;
+  const rec = node as HoverRowRenderable;
+  const hasBg = 'bg' in rec;
+  const hasBackgroundColor = 'backgroundColor' in rec;
+  if (hasBg || hasBackgroundColor) {
+    acc.push({
+      node: rec,
+      hasBg,
+      hasBackgroundColor,
+      bg: rec.bg,
+      backgroundColor: rec.backgroundColor,
+    });
+  }
+  const children = rec.getChildren?.();
+  if (!Array.isArray(children)) return;
+  for (const child of children) collectHoverPaintTargets(child, acc);
+}
+
+function isPointerInsideRow(
+  row: HoverRowRenderable,
+  event?: { x?: number; y?: number },
+): boolean {
+  if (event?.x === undefined || event?.y === undefined) return false;
+  return (
+    event.x >= row.screenX &&
+    event.x < row.screenX + row.width &&
+    event.y >= row.screenY &&
+    event.y < row.screenY + row.height
+  );
+}
+
+/**
+ * Mutate a stable row's background in place. Must not read a Solid
+ * signal: rebuilding the row between press and release drops the click.
+ *
+ * OpenTUI hit-tests the leaf (usually the text child). `out`/`over` then
+ * bubble. Ignore `out` while the pointer is still inside this row so
+ * moving between alias/model/status does not flicker, and paint both the
+ * box fill and descendant text `bg` so the whole line lights up.
+ */
+function decorateInteractiveRow(
+  node: JSX.Element,
+  opts: {
+    hoverBackground: unknown;
+    onActivate?: () => void;
+    hasSelectedText?: () => boolean;
+  },
+): JSX.Element {
+  const row = node as unknown as HoverRowRenderable;
+  const painted: HoverPaintTarget[] = [];
+  collectHoverPaintTargets(row, painted);
+
+  const applyHover = (active: boolean): void => {
+    for (const target of painted) {
+      if (target.hasBackgroundColor) {
+        target.node.backgroundColor = active
+          ? opts.hoverBackground
+          : target.backgroundColor;
+      }
+      if (target.hasBg) {
+        target.node.bg = active ? opts.hoverBackground : target.bg;
+      }
+    }
+  };
+
+  setProp(node as never, 'onMouseOver', () => {
+    applyHover(true);
+  });
+  setProp(node as never, 'onMouseOut', (event?: { x?: number; y?: number }) => {
+    if (isPointerInsideRow(row, event)) return;
+    applyHover(false);
+  });
+  if (opts.onActivate) {
+    setProp(node as never, 'onMouseUp', (event?: { button?: number }) => {
+      if (!shouldActivateRow(event, opts.hasSelectedText)) return;
+      opts.onActivate?.();
+    });
+  }
+  return node;
+}
+
+function sessionStatusView(
+  status: SidebarSessionTarget['status'],
+  theme: AgentRowTheme,
+): { label: string; color: unknown } {
+  if (status === 'retry') {
+    return { label: 'retrying', color: theme.warning ?? STATUS_RETRY_COLOR };
+  }
+  return { label: 'active', color: theme.success ?? STATUS_ACTIVE_COLOR };
 }
 
 function activityIndicator(
   active: boolean,
-  now: number,
+  now: () => number,
   theme: AgentRowTheme,
 ): JSX.Element {
+  // Nested reactive leaf: only this glyph re-renders on the 100 ms
+  // animation tick. Rebuilding the clickable parent on every frame
+  // would drop the mouse target between press and release.
   return text(
     {
       fg: active ? (theme.accent ?? theme.text) : theme.textMuted,
       width: 2,
     },
-    [getSidebarActivityIndicator(active, now)],
+    active ? [() => getSidebarActivityIndicator(true, now())] : [' '],
   );
 }
 
@@ -434,17 +805,30 @@ function agentRow(
   model: string,
   variant: string | undefined,
   active: boolean,
-  now: number,
+  now: () => number,
   theme: AgentRowTheme,
+  sessionCount?: number,
+  expanded = false,
+  onClick?: () => void,
+  hoverBackground?: unknown,
+  hasSelectedText?: () => boolean,
 ): JSX.Element {
   const modelParts = splitSidebarModelId(model);
   const detailRows: JSX.Element[] = [];
 
   function detailRow(fieldLabel: string, value: string) {
-    return box({ width: '100%', flexDirection: 'row', paddingLeft: 2 }, [
-      text({ fg: theme.textMuted, width: 9 }, [fieldLabel]),
-      text({ fg: theme.textMuted }, [value]),
-    ]);
+    return box(
+      {
+        width: '100%',
+        flexDirection: 'row',
+        paddingLeft: 2,
+        shouldFill: false,
+      },
+      [
+        text({ fg: theme.textMuted, width: 9 }, [fieldLabel]),
+        text({ fg: theme.textMuted }, [value]),
+      ],
+    );
   }
 
   if (modelParts.provider) {
@@ -455,13 +839,38 @@ function agentRow(
     detailRows.push(detailRow('variant', variant));
   }
 
-  return box({ width: '100%', flexDirection: 'column', marginBottom: 1 }, [
-    box({ width: '100%', flexDirection: 'row' }, [
+  const header = box(
+    {
+      width: '100%',
+      flexDirection: 'row',
+      shouldFill: true,
+    },
+    [
       text({ fg: theme.textMuted, width: 14 }, [label]),
       activityIndicator(active, now, theme),
-    ]),
-    ...detailRows,
-  ]);
+      ...(sessionCount !== undefined && sessionCount > 1
+        ? [
+            text({ fg: theme.textMuted, width: 4 }, [expanded ? ' ▴' : ' ▾']),
+            text({ fg: theme.textMuted }, [`${sessionCount}`]),
+          ]
+        : []),
+    ],
+  );
+  decorateInteractiveRow(header, {
+    hoverBackground: hoverBackground ?? resolveHoverBackground(theme),
+    onActivate: onClick,
+    hasSelectedText,
+  });
+
+  return box(
+    {
+      width: '100%',
+      flexDirection: 'column',
+      marginBottom: 1,
+      shouldFill: false,
+    },
+    [header, ...detailRows],
+  );
 }
 
 function compactAgentRow(
@@ -469,21 +878,35 @@ function compactAgentRow(
   model: string,
   _variant: string | undefined,
   active: boolean,
-  now: number,
+  now: () => number,
   theme: AgentRowTheme,
+  sessionCount?: number,
+  expanded = false,
+  onClick?: () => void,
+  hoverBackground?: unknown,
+  hasSelectedText?: () => boolean,
 ): JSX.Element {
   const modelName = splitSidebarModelId(model).model;
-  return box(
+  const row = box(
     {
       width: '100%',
       flexDirection: 'row',
       justifyContent: 'space-between',
+      shouldFill: true,
     },
     [
-      box({ width: 16, flexShrink: 0, flexDirection: 'row' }, [
-        text({ fg: theme.textMuted, width: 14 }, [label]),
-        activityIndicator(active, now, theme),
-      ]),
+      box(
+        {
+          width: 16,
+          flexShrink: 0,
+          flexDirection: 'row',
+          shouldFill: false,
+        },
+        [
+          text({ fg: theme.textMuted, width: 14 }, [label]),
+          activityIndicator(active, now, theme),
+        ],
+      ),
       text(
         {
           fg: theme.textMuted,
@@ -491,10 +914,81 @@ function compactAgentRow(
           truncate: true,
           flexShrink: 1,
         },
-        [modelName],
+        [
+          sessionCount !== undefined && sessionCount > 1
+            ? `${expanded ? '▴' : '▾'}${sessionCount} ${modelName}`
+            : modelName,
+        ],
       ),
     ],
   );
+  return decorateInteractiveRow(row, {
+    hoverBackground: hoverBackground ?? resolveHoverBackground(theme),
+    onActivate: onClick,
+    hasSelectedText,
+  });
+}
+
+/**
+ * One expanded subagent destination: `ora-1  model  status`.
+ * Hover mutates this box in place so the click target survives ticks.
+ */
+function sessionTargetRow(
+  target: SidebarSessionTarget,
+  theme: AgentRowTheme,
+  onActivate: () => void,
+  hoverBackground: unknown,
+  hasSelectedText?: () => boolean,
+): JSX.Element {
+  const label = target.alias ?? shortSessionID(target.sessionID);
+  const status = sessionStatusView(target.status, theme);
+  const modelName = target.model
+    ? splitSidebarModelId(target.model).model
+    : '—';
+  const row = box(
+    {
+      width: '100%',
+      flexDirection: 'row',
+      paddingLeft: 2,
+      columnGap: 1,
+      shouldFill: true,
+    },
+    [
+      text(
+        {
+          fg: theme.textMuted,
+          flexShrink: 0,
+          wrapMode: 'none',
+        },
+        [label],
+      ),
+      text(
+        {
+          fg: theme.textMuted,
+          wrapMode: 'none',
+          truncate: true,
+          flexGrow: 1,
+          flexShrink: 1,
+          minWidth: 0,
+        },
+        [modelName],
+      ),
+      text(
+        {
+          fg: status.color,
+          width: STATUS_COLUMN_WIDTH,
+          flexShrink: 0,
+          wrapMode: 'none',
+        },
+        [status.label],
+      ),
+    ],
+  );
+  return decorateInteractiveRow(row, {
+    hoverBackground,
+    onActivate,
+    hasSelectedText,
+  });
 }
 
 export function getContrastForeground(
@@ -561,14 +1055,27 @@ function renderSidebar(
     borderActive: unknown;
     text: unknown;
     textMuted: unknown;
+    backgroundElement?: unknown;
+    success?: unknown;
+    warning?: unknown;
+    hover?: unknown;
   },
   configInvalid: boolean,
   compactSidebar: boolean,
-  now = Date.now(),
+  now: () => number = Date.now,
   visibleRootID?: string,
+  interaction?: SidebarInteraction,
 ): JSX.Element {
   const configStatusRow = buildConfigStatusRow(configInvalid, theme);
   const activeAgents = getActiveSidebarAgentNames(snapshot, visibleRootID);
+  const targetsByAgent = new Map(
+    getSidebarAgentTargets(snapshot, visibleRootID).map((group) => [
+      group.agentName,
+      group.sessions,
+    ]),
+  );
+  const expandedAgents = interaction?.expandedAgents() ?? new Set<string>();
+  const hoverBackground = resolveHoverBackground(theme);
   return box(
     {
       width: '100%',
@@ -611,14 +1118,66 @@ function renderSidebar(
       box({ width: '100%', marginTop: 1 }, [
         text({ fg: theme.text }, ['Agents']),
       ]),
-      ...getSidebarAgentNames(snapshot).map((agentName) => {
+      ...getSidebarAgentNames(snapshot).flatMap((agentName) => {
         const model = snapshot.agentModels[agentName] ?? 'pending';
         const variant = snapshot.agentVariants[agentName];
         const active = activeAgents.has(agentName);
-        if (compactSidebar) {
-          return compactAgentRow(agentName, model, variant, active, now, theme);
-        }
-        return agentRow(agentName, model, variant, active, now, theme);
+        const sessions = targetsByAgent.get(agentName) ?? [];
+        // Rows only become interactive when this window can navigate AND
+        // the agent has live subagent sessions in this conversation.
+        const clickable =
+          interaction?.navigate !== undefined && sessions.length > 0;
+        const expanded =
+          clickable && sessions.length > 1 && expandedAgents.has(agentName);
+        const onAgentClick = clickable
+          ? () => {
+              if (sessions.length === 1) {
+                interaction?.navigate?.(sessions[0].sessionID);
+              } else {
+                interaction?.toggleAgent(agentName);
+              }
+            }
+          : undefined;
+        const agentRowEl = compactSidebar
+          ? compactAgentRow(
+              agentName,
+              model,
+              variant,
+              active,
+              now,
+              theme,
+              clickable ? sessions.length : undefined,
+              expanded,
+              onAgentClick,
+              hoverBackground,
+              interaction?.hasSelectedText,
+            )
+          : agentRow(
+              agentName,
+              model,
+              variant,
+              active,
+              now,
+              theme,
+              clickable ? sessions.length : undefined,
+              expanded,
+              onAgentClick,
+              hoverBackground,
+              interaction?.hasSelectedText,
+            );
+        if (!expanded) return [agentRowEl];
+        return [
+          agentRowEl,
+          ...sessions.map((target) =>
+            sessionTargetRow(
+              target,
+              theme,
+              () => interaction?.navigate?.(target.sessionID),
+              hoverBackground,
+              interaction?.hasSelectedText,
+            ),
+          ),
+        ];
       }),
     ],
   );
@@ -733,6 +1292,9 @@ interface V2TuiThemeTokens {
   text: { default: unknown; subdued: unknown };
   background: { default: unknown };
   border: { default: unknown };
+  /** Optional semantic tokens; v2 hosts may omit them. */
+  success?: unknown;
+  warning?: unknown;
 }
 
 interface V2TuiSlotClaim {
@@ -747,11 +1309,15 @@ interface V2TuiSlotClaim {
 interface V2TuiContext {
   location?: { directory: string };
   client?: unknown;
-  renderer: { requestRender: () => void };
+  renderer: { requestRender: () => void; getSelection?: () => unknown };
   theme: V2TuiThemeTokens;
   ui: {
     slot: (claim: V2TuiSlotClaim) => () => void;
-    router: { current: () => { type?: string; sessionID?: string } };
+    router: {
+      current: () => { type?: string; sessionID?: string };
+      /** Optional navigation capability; absent on hosts that don't expose it. */
+      navigate?: (route: { type: string; sessionID: string }) => void;
+    };
   };
 }
 
@@ -762,6 +1328,8 @@ function v2ThemeView(theme: V2TuiThemeTokens): {
   borderActive: unknown;
   text: unknown;
   textMuted: unknown;
+  success?: unknown;
+  warning?: unknown;
 } {
   return {
     accent: undefined,
@@ -769,6 +1337,8 @@ function v2ThemeView(theme: V2TuiThemeTokens): {
     borderActive: theme.border.default,
     text: theme.text.default,
     textMuted: theme.text.subdued,
+    ...(theme.success !== undefined ? { success: theme.success } : {}),
+    ...(theme.warning !== undefined ? { warning: theme.warning } : {}),
   };
 }
 
@@ -799,7 +1369,8 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
     syncTmuxPaneRegistration(ctx.ui.router.current(), tmuxRegistration);
     let nextSnapshot = await readTuiSnapshotAsync(currentDirectory);
     if (disposed) return;
-    if (currentDirectory !== configDirectory) {
+    const directoryChanged = currentDirectory !== configDirectory;
+    if (directoryChanged) {
       configDirectory = currentDirectory;
       ({ configInvalid, compactSidebar } = readConfigState(configDirectory));
     }
@@ -816,6 +1387,9 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
         ctx.location?.directory ?? process.cwd(),
       )
     ) {
+      return;
+    }
+    if (!directoryChanged && snapshotSectionsEqual(nextSnapshot, snapshot())) {
       return;
     }
     setSnapshot(nextSnapshot);
@@ -837,20 +1411,36 @@ async function setup(ctx: V2TuiContext): Promise<undefined | (() => void)> {
 
   const visibleSession = () => resolveRouteSessionId(ctx.ui.router.current());
 
+  // Clickable sidebar: navigation is optional on v2 hosts (feature-detected
+  // at startup); without it the sidebar renders informatively.
+  const interaction = createSidebarInteraction(
+    makeRouteNavigator(ctx.ui.router, 'navigate', true),
+    selectionGuard(ctx.renderer),
+  );
+
   const disposeSlot = ctx.ui.slot({
     append: 'sidebar.content',
     render: () =>
-      reactiveElement(() =>
-        renderSidebar(
-          snapshot(),
+      reactiveElement(() => {
+        const visible = visibleSession();
+        const currentSnapshot = snapshot();
+        interaction.syncScope(
+          configDirectory,
+          visible === undefined
+            ? undefined
+            : resolveTuiSnapshotRoot(currentSnapshot, visible),
+        );
+        return renderSidebar(
+          currentSnapshot,
           version,
           v2ThemeView(ctx.theme),
           configInvalid,
           compactSidebar,
-          animationNow(),
-          visibleSession(),
-        ),
-      ),
+          animationNow,
+          visible,
+          interaction,
+        );
+      }),
   });
 
   return () => {
@@ -920,7 +1510,8 @@ const plugin: TuiDualContractModule = {
       const currentDirectory = getTuiDirectory(api);
       syncTmuxPaneRegistration(api.route.current, tmuxRegistration);
       let nextSnapshot = await readTuiSnapshotAsync(currentDirectory);
-      if (currentDirectory !== configDirectory) {
+      const directoryChanged = currentDirectory !== configDirectory;
+      if (directoryChanged) {
         configDirectory = currentDirectory;
         ({ configInvalid, compactSidebar } = readConfigState(configDirectory));
       }
@@ -931,6 +1522,12 @@ const plugin: TuiDualContractModule = {
         remoteCache,
       );
       if (!isRefreshCurrent(currentDirectory, getTuiDirectory(api))) return;
+      if (
+        !directoryChanged &&
+        snapshotSectionsEqual(nextSnapshot, snapshot())
+      ) {
+        return;
+      }
       setSnapshot(nextSnapshot);
       api.renderer.requestRender();
     };
@@ -956,21 +1553,36 @@ const plugin: TuiDualContractModule = {
       clearTmuxPaneRegistration(tmuxRegistration);
     });
 
+    // Clickable sidebar: v1 hosts always expose api.route.navigate.
+    const interaction = createSidebarInteraction(
+      makeRouteNavigator(api.route, 'navigate', false),
+      selectionGuard(api.renderer),
+    );
+
     api.slots.register({
       order: resolveSidebarSlotOrder(api.tuiConfig?.plugin, PLUGIN_NAME),
       slots: {
         sidebar_content() {
-          return reactiveElement(() =>
-            renderSidebar(
-              snapshot(),
+          return reactiveElement(() => {
+            const visible = resolveRouteSessionId(api.route.current);
+            const currentSnapshot = snapshot();
+            interaction.syncScope(
+              configDirectory,
+              visible === undefined
+                ? undefined
+                : resolveTuiSnapshotRoot(currentSnapshot, visible),
+            );
+            return renderSidebar(
+              currentSnapshot,
               version,
               api.theme.current,
               configInvalid,
               compactSidebar,
-              animationNow(),
-              resolveRouteSessionId(api.route.current),
-            ),
-          );
+              animationNow,
+              visible,
+              interaction,
+            );
+          });
         },
       },
     });

@@ -4,13 +4,16 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   clearTuiAgentActivities,
+  clearTuiSessionAlias,
   getTuiStatePath,
   readTuiSnapshot,
+  readTuiSnapshotAsync,
   recordTuiAgentActivity,
   recordTuiAgentModel,
   recordTuiAgentModels,
   recordTuiSessionParent,
   resolveTuiSessionRoot,
+  updateTuiSessionDetails,
 } from './tui-state';
 
 let previousXdgDataHome: string | undefined;
@@ -40,6 +43,41 @@ function recordLuna(): void {
 }
 
 describe('tui-state persistence', () => {
+  test('readTuiSnapshotAsync caches by stat and invalidates on write', async () => {
+    recordTuiAgentModel(LUNA, tempDir);
+    const first = await readTuiSnapshotAsync(tempDir);
+    expect(first.agentModels.explorer).toBe(LUNA.model);
+
+    // Same stat (dev:ino:mtimeMs:size) → cached snapshot object identity.
+    const second = await readTuiSnapshotAsync(tempDir);
+    expect(second).toBe(first);
+
+    // A real write publishes via tmp+rename (new inode) → cache miss and
+    // the updated content is observed by the next poll.
+    recordTuiAgentModel(GPT, tempDir);
+    const third = await readTuiSnapshotAsync(tempDir);
+    expect(third).not.toBe(first);
+    expect(third.agentModels.explorer).toBe(GPT.model);
+  });
+
+  test('readTuiSnapshotAsync cache is bounded (LRU eviction)', async () => {
+    recordTuiAgentModel(LUNA, tempDir);
+    const first = await readTuiSnapshotAsync(tempDir);
+    expect(first.agentModels.explorer).toBe(LUNA.model);
+
+    // Poll 8 other projects: the first entry must be evicted even though
+    // its file is unchanged (a fresh read returns a new object identity).
+    for (let i = 0; i < 8; i += 1) {
+      const dir = path.join(tempDir, `project-${i}`);
+      recordTuiAgentModel(GPT, dir);
+      await readTuiSnapshotAsync(dir);
+    }
+
+    const reRead = await readTuiSnapshotAsync(tempDir);
+    expect(reRead.agentModels.explorer).toBe(LUNA.model);
+    expect(reRead).not.toBe(first);
+  });
+
   test('persists enabled agent models', () => {
     recordTuiAgentModels(
       {
@@ -353,20 +391,26 @@ describe('tui-state persistence', () => {
     }
   });
 
-  test('clears persisted activity while preserving model state', () => {
+  test('startup sweep keeps live own-PID activity and still drops dead residue', () => {
     recordTuiAgentModels(
       { agentModels: { explorer: 'openai/gpt-5.6-luna' } },
       tempDir,
     );
     recordTuiAgentActivity(
-      { sessionID: 'explorer-a', agentName: 'explorer', active: true },
+      {
+        sessionID: 'explorer-a',
+        agentName: 'explorer',
+        active: true,
+        details: { alias: 'exp-1' },
+      },
       tempDir,
     );
 
     clearTuiAgentActivities(tempDir);
 
     const snapshot = readTuiSnapshot(tempDir);
-    expect(snapshot.activeSessions).toEqual({});
+    expect(snapshot.activeSessions).toEqual({ 'explorer-a': 'explorer' });
+    expect(snapshot.sessionDetails['explorer-a']?.alias).toBe('exp-1');
     expect(snapshot.agentModels).toEqual({
       explorer: 'openai/gpt-5.6-luna',
     });
@@ -594,5 +638,151 @@ describe('tui-state persistence', () => {
     expect(
       fs.readdirSync(stateDir).filter((name) => name.endsWith('.tmp')),
     ).toEqual([]);
+  });
+});
+
+describe('sessionDetails (clickable sidebar projection)', () => {
+  test('activation with details round-trips alias/model/status', () => {
+    recordTuiAgentActivity(
+      {
+        sessionID: 'ora-1-ses',
+        agentName: 'oracle',
+        active: true,
+        details: { alias: 'ora-1', model: 'openai/gpt-5.6', status: 'busy' },
+      },
+      tempDir,
+    );
+    expect(readTuiSnapshot(tempDir).sessionDetails).toEqual({
+      'ora-1-ses': { alias: 'ora-1', model: 'openai/gpt-5.6', status: 'busy' },
+    });
+  });
+
+  test('deactivation removes details together with the activity', () => {
+    recordTuiAgentActivity(
+      {
+        sessionID: 'ora-1-ses',
+        agentName: 'oracle',
+        active: true,
+        details: { alias: 'ora-1' },
+      },
+      tempDir,
+    );
+    recordTuiAgentActivity({ sessionID: 'ora-1-ses', active: false }, tempDir);
+    const snapshot = readTuiSnapshot(tempDir);
+    expect(snapshot.activeSessions).toEqual({});
+    expect(snapshot.sessionDetails).toEqual({});
+  });
+
+  test('detail updates only apply to active sessions (no resurrection)', () => {
+    // Idle first: a late detail update must not recreate the entry.
+    recordTuiAgentActivity({ sessionID: 'gone', active: false }, tempDir);
+    updateTuiSessionDetails('gone', { alias: 'ora-9' }, tempDir);
+    expect(readTuiSnapshot(tempDir).sessionDetails).toEqual({});
+
+    // Active session: updates merge into existing details.
+    recordTuiAgentActivity(
+      { sessionID: 'live', agentName: 'oracle', active: true },
+      tempDir,
+    );
+    updateTuiSessionDetails('live', { alias: 'ora-1' }, tempDir);
+    updateTuiSessionDetails('live', { model: 'openai/gpt-5.6' }, tempDir);
+    expect(readTuiSnapshot(tempDir).sessionDetails).toEqual({
+      live: { alias: 'ora-1', model: 'openai/gpt-5.6' },
+    });
+  });
+
+  test('clearTuiSessionAlias retracts only the alias, keeping model/status', () => {
+    recordTuiAgentActivity(
+      {
+        sessionID: 'live',
+        agentName: 'oracle',
+        active: true,
+        details: { alias: 'ora-1', model: 'openai/gpt-5.6', status: 'busy' },
+      },
+      tempDir,
+    );
+    clearTuiSessionAlias('live', tempDir);
+    expect(readTuiSnapshot(tempDir).sessionDetails).toEqual({
+      live: { model: 'openai/gpt-5.6', status: 'busy' },
+    });
+    // Alias-less entry with no other fields is removed entirely.
+    recordTuiAgentActivity(
+      {
+        sessionID: 'bare',
+        agentName: 'fixer',
+        active: true,
+        details: { alias: 'fix-1' },
+      },
+      tempDir,
+    );
+    clearTuiSessionAlias('bare', tempDir);
+    expect(readTuiSnapshot(tempDir).sessionDetails.bare).toBeUndefined();
+  });
+
+  test('orphaned details are swept by clearTuiAgentActivities', () => {
+    // Simulate a live foreign recorder (PID 1 is always running and is
+    // never this process) plus an orphaned details entry with no activity.
+    const statePath = getTuiStatePath(tempDir);
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    fs.writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        updatedAt: 1,
+        activeSessions: { 'live-foreign': 'oracle' },
+        activityPids: { 'live-foreign': 1 },
+        sessionDetails: {
+          'live-foreign': { alias: 'ora-7' },
+          orphan: { alias: 'ora-8' },
+        },
+      })}\n`,
+    );
+
+    clearTuiAgentActivities(tempDir);
+    const after = readTuiSnapshot(tempDir);
+    expect(after.activeSessions).toEqual({ 'live-foreign': 'oracle' });
+    expect(after.sessionDetails).toEqual({
+      'live-foreign': { alias: 'ora-7' },
+    });
+  });
+
+  test('parser drops malformed detail entries without losing valid ones', () => {
+    const statePath = getTuiStatePath(tempDir);
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    fs.writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        updatedAt: 1,
+        sessionDetails: {
+          good: { alias: 'ora-1', status: 'busy' },
+          badStatus: { alias: 'ora-2', status: 'weird' },
+          nonObject: 'nope',
+          nullEntry: null,
+          empty: {},
+        },
+      })}\n`,
+    );
+    const parsed = readTuiSnapshot(tempDir);
+    expect(parsed.sessionDetails).toEqual({
+      good: { alias: 'ora-1', status: 'busy' },
+      badStatus: { alias: 'ora-2' },
+    });
+  });
+
+  test('legacy snapshot without sessionDetails parses with an empty section', () => {
+    const statePath = getTuiStatePath(tempDir);
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    fs.writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        updatedAt: 1,
+        agentModels: { oracle: 'openai/gpt-5.6' },
+      })}\n`,
+    );
+    const parsed = readTuiSnapshot(tempDir);
+    expect(parsed.sessionDetails).toEqual({});
+    expect(parsed.agentModels).toEqual({ oracle: 'openai/gpt-5.6' });
   });
 });
