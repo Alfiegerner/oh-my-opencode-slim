@@ -13,6 +13,9 @@ function createTool(overrides?: {
   abort?: () => Promise<unknown>;
   status?: () => Promise<unknown>;
   shouldManageSession?: (sessionID: string) => boolean;
+  verifyAbortMs?: number;
+  abortRetryIntervalMs?: number;
+  stableStoppedMs?: number;
 }) {
   const board = new BackgroundJobBoard();
   const abort = mock(overrides?.abort ?? (async () => ({})));
@@ -27,9 +30,9 @@ function createTool(overrides?: {
     input: { directory: '/test/project' } as any,
     backgroundJobBoard: board,
     shouldManageSession: overrides?.shouldManageSession ?? (() => true),
-    verifyAbortMs: 10,
-    abortRetryIntervalMs: 0,
-    stableStoppedMs: 0,
+    verifyAbortMs: overrides?.verifyAbortMs ?? 10,
+    abortRetryIntervalMs: overrides?.abortRetryIntervalMs ?? 0,
+    stableStoppedMs: overrides?.stableStoppedMs ?? 0,
   });
   return { board, abort, status, deleteSession, taskCancel: tools.task_cancel };
 }
@@ -152,6 +155,68 @@ describe('task_cancel tool', () => {
     expect(parseTaskStatusOutput(String(unverified))).toMatchObject({
       taskID: 'ses_1',
       state: 'running',
+    });
+  });
+
+  test('a valid status map without an entry confirms quiescence after abort (activity-map contract)', async () => {
+    // False-stop incident follow-up: the host's status map REMOVES a
+    // session's entry when it goes idle, so "map received correctly, no
+    // entry for this session" is quiescence evidence — the old verify
+    // loop threw "did not stay stopped: unknown" on it.
+    const { board, taskCancel } = createTool({
+      status: async () => ({ data: {} }), // valid map, no ses_1 entry
+    });
+    board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+    });
+
+    const output = await taskCancel.execute(
+      { task_id: 'ses_1', reason: 'obsolete' },
+      context,
+    );
+
+    expect(parseTaskStatusOutput(String(output))).toMatchObject({
+      taskID: 'ses_1',
+      state: 'cancelled',
+    });
+  });
+
+  test('busy between absences restarts the quiescence stability window', async () => {
+    // Deterministic reset proof: alternating
+    // absence/busy lookups never let the stability window mature —
+    // without the reset, the stale quiet timestamp from the FIRST
+    // absence would confirm once verifyAbortMs elapses. With the reset,
+    // every busy observation restarts the window and the cancel ends
+    // uncertain-running instead of falsely cancelled.
+    let lookups = 0;
+    const { board, taskCancel } = createTool({
+      verifyAbortMs: 150,
+      abortRetryIntervalMs: 0,
+      stableStoppedMs: 60,
+      status: async () => {
+        lookups += 1;
+        return lookups % 2 === 0
+          ? { data: { ses_1: { type: 'busy' } } }
+          : { data: {} };
+      },
+    });
+    board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+    });
+
+    const output = await taskCancel.execute(
+      { task_id: 'ses_1', reason: 'obsolete' },
+      context,
+    );
+
+    expect(String(output)).toContain('state: running');
+    expect(board.get('ses_1')).toMatchObject({
+      state: 'running',
+      statusUncertain: true,
     });
   });
 

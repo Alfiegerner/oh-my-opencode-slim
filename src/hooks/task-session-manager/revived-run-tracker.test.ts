@@ -9,6 +9,7 @@ function createHarness(
   assertBound = false,
   options: {
     stabilizationProbeDelayMs?: number;
+    handoffExpiryMs?: number;
     resolveSelection?: (sessionID: string) => Promise<{
       agent?: string;
       model?: { providerID: string; modelID: string };
@@ -890,5 +891,245 @@ describe('revived run tracker', () => {
     await clock.settle();
 
     expect(harness.prompt).toHaveBeenCalledTimes(1);
+  });
+
+  test('a pending probe replaced by another same-generation registration does not terminalize', async () => {
+    let resolveMessages: ((value: unknown) => void) | undefined;
+    const harness = createHarness(
+      () =>
+        new Promise((resolve) => {
+          resolveMessages = resolve;
+        }),
+    );
+    harness.tracker.register({
+      taskID: harness.run.taskID,
+      generation: harness.run.generation,
+      parentSessionID: 'parent',
+      baselineMessageID: 'baseline-1',
+      description: 'first fallback',
+    });
+    const firstProbe = harness.tracker.probe(
+      harness.run.taskID,
+      harness.run.generation,
+    );
+    harness.tracker.register({
+      taskID: harness.run.taskID,
+      generation: harness.run.generation,
+      parentSessionID: 'parent',
+      baselineMessageID: 'baseline-2',
+      description: 'second fallback',
+    });
+    resolveMessages?.({
+      data: [
+        { info: { id: 'baseline-1', role: 'user' }, parts: [] },
+        {
+          info: {
+            id: 'assistant-1',
+            role: 'assistant',
+            time: { completed: 2 },
+          },
+          parts: [{ type: 'text', text: 'stale first-run answer' }],
+        },
+      ],
+    });
+    expect(await firstProbe).toBe(false);
+    expect(harness.board.get('ses_child')?.state).toBe('running');
+    expect(harness.prompt).not.toHaveBeenCalled();
+  });
+
+  test('handoff: prepare defers, admit enrolls and probes immediately', async () => {
+    // A fallback re-prompt whose result is ALREADY persisted must be
+    // delivered on admission — no idle event will fire again.
+    const harness = createHarness(
+      completedTranscript(() => true),
+      undefined,
+      false,
+      {
+        stabilizationProbeDelayMs: 0,
+      },
+    );
+    const gen = harness.run.generation;
+
+    expect(harness.tracker.isObservationPending('ses_child', gen)).toBe(false);
+    expect(
+      harness.tracker.prepareObservation({
+        taskID: 'ses_child',
+        generation: gen,
+        parentSessionID: 'parent',
+        baselineMessageID: 'baseline',
+        description: 'inspect the change',
+      }),
+    ).toBe(true);
+    expect(harness.tracker.isObservationPending('ses_child', gen)).toBe(true);
+
+    expect(harness.tracker.admitObservation('ses_child', gen)).toBe(true);
+    expect(harness.tracker.isTracked('ses_child', gen)).toBe(true);
+    expect(harness.tracker.isObservationPending('ses_child', gen)).toBe(false);
+
+    await flushNotify();
+    expect(harness.board.get('ses_child')?.state).toBe('completed');
+    expect(harness.board.get('ses_child')?.resultSummary).toBe('new result');
+    expect(harness.prompt).toHaveBeenCalledTimes(1);
+  });
+
+  test('handoff: reject withdraws the preparation without enrolling', () => {
+    const harness = createHarness(completedTranscript(() => false));
+    const gen = harness.run.generation;
+    harness.tracker.prepareObservation({
+      taskID: 'ses_child',
+      generation: gen,
+      parentSessionID: 'parent',
+      baselineMessageID: 'baseline',
+      description: 'inspect the change',
+    });
+
+    harness.tracker.rejectObservation('ses_child', gen);
+
+    expect(harness.tracker.isObservationPending('ses_child', gen)).toBe(false);
+    expect(harness.tracker.isTracked('ses_child', gen)).toBe(false);
+  });
+
+  test('handoff: promotion keeps fencing the gate and a late admit delivers without reinstalling', async () => {
+    // Expiry converts the preparation into the owning run, but the
+    // ADMISSION is still unresolved — the gate must stay deferred
+    // (no absent→stopped while the re-prompt may yet start). The late
+    // acceptance then resolves it: probe runs and the already persisted
+    // result is delivered exactly once, without resetting the installed
+    // owner's identity.
+    let probeCount = 0;
+    const harness = createHarness(
+      () => {
+        probeCount += 1;
+        return completedTranscript(() => probeCount > 1)();
+      },
+      undefined,
+      false,
+      { handoffExpiryMs: 40, stabilizationProbeDelayMs: 0 },
+    );
+    const gen = harness.run.generation;
+
+    expect(
+      harness.tracker.prepareObservation({
+        taskID: 'ses_child',
+        generation: gen,
+        parentSessionID: 'parent',
+        baselineMessageID: 'baseline',
+        description: 'inspect the change',
+      }),
+    ).toBe(true);
+
+    // First expiry promotes; the unresolved-admission bound is a second
+    // window of the same length. Assert the fenced promoted state in
+    // between, then admit before that bound lifts.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(harness.tracker.isTracked('ses_child', gen)).toBe(true);
+    expect(harness.tracker.isObservationPending('ses_child', gen)).toBe(true);
+    expect(harness.board.get('ses_child')?.state).toBe('running');
+
+    // The late acceptance resolves it and fires the delivering probe.
+    expect(harness.tracker.admitObservation('ses_child', gen)).toBe(true);
+    expect(harness.tracker.isObservationPending('ses_child', gen)).toBe(false);
+    await flushNotify();
+    expect(harness.board.get('ses_child')?.state).toBe('completed');
+    expect(harness.board.get('ses_child')?.resultSummary).toBe('new result');
+    expect(harness.prompt).toHaveBeenCalledTimes(1);
+  });
+
+  test('handoff: unresolved transport failure converts the preparation into the owner', () => {
+    // A transport failure without a response does not prove refusal —
+    // ownership converts instead of being dropped.
+    const harness = createHarness(completedTranscript(() => false));
+    const gen = harness.run.generation;
+    harness.tracker.prepareObservation({
+      taskID: 'ses_child',
+      generation: gen,
+      parentSessionID: 'parent',
+      baselineMessageID: 'baseline',
+      description: 'inspect the change',
+    });
+
+    expect(harness.tracker.settleObservationUnresolved('ses_child', gen)).toBe(
+      true,
+    );
+    // Owner installed, admission still unresolved → gate still fenced.
+    expect(harness.tracker.isTracked('ses_child', gen)).toBe(true);
+    expect(harness.tracker.isObservationPending('ses_child', gen)).toBe(true);
+
+    // A subsequent explicit host refusal releases it.
+    harness.tracker.rejectObservation('ses_child', gen);
+    expect(harness.tracker.isObservationPending('ses_child', gen)).toBe(false);
+  });
+
+  test('handoff: unresolved admission lifts the fence after a bound without dropping the owner', async () => {
+    const harness = createHarness(
+      completedTranscript(() => false),
+      undefined,
+      false,
+      { handoffExpiryMs: 5, stabilizationProbeDelayMs: 0 },
+    );
+    const gen = harness.run.generation;
+    harness.tracker.prepareObservation({
+      taskID: 'ses_child',
+      generation: gen,
+      parentSessionID: 'parent',
+      baselineMessageID: 'baseline',
+      description: 'inspect the change',
+    });
+
+    expect(harness.tracker.settleObservationUnresolved('ses_child', gen)).toBe(
+      true,
+    );
+    expect(harness.tracker.isObservationPending('ses_child', gen)).toBe(true);
+    expect(harness.tracker.isTracked('ses_child', gen)).toBe(true);
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(harness.tracker.isObservationPending('ses_child', gen)).toBe(false);
+    expect(harness.tracker.isTracked('ses_child', gen)).toBe(true);
+  });
+
+  test('handoff: prepare refuses a stale generation', () => {
+    const harness = createHarness(completedTranscript(() => false));
+    const gen = harness.run.generation;
+
+    expect(
+      harness.tracker.prepareObservation({
+        taskID: 'ses_child',
+        generation: gen + 1,
+        parentSessionID: 'parent',
+        description: 'stale attempt',
+      }),
+    ).toBe(false);
+    expect(harness.tracker.isObservationPending('ses_child', gen + 1)).toBe(
+      false,
+    );
+  });
+
+  test('revision changes on re-registration even with an identical baseline', () => {
+    // Baseline value alone is not an observation identity — two
+    // fallback observations can both carry undefined (or the same)
+    // baseline; the monotonic revision fences them.
+    const harness = createHarness(completedTranscript(() => false));
+    const gen = harness.run.generation;
+    harness.tracker.register({
+      taskID: 'ses_child',
+      generation: gen,
+      parentSessionID: 'parent',
+      baselineMessageID: 'baseline',
+      description: 'first',
+    });
+    const first = harness.tracker.revisionFor('ses_child', gen);
+    expect(typeof first).toBe('number');
+
+    harness.tracker.register({
+      taskID: 'ses_child',
+      generation: gen,
+      parentSessionID: 'parent',
+      baselineMessageID: 'baseline',
+      description: 'second',
+    });
+    expect(harness.tracker.revisionFor('ses_child', gen)).not.toBe(first);
+
+    // Stale generations never resolve a revision.
+    expect(harness.tracker.revisionFor('ses_child', gen + 1)).toBeUndefined();
   });
 });

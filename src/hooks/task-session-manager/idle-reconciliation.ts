@@ -5,8 +5,11 @@ import {
   isHostTerminalOutcome,
 } from '../../utils/task';
 import type { RevivedRunTracker } from './revived-run-tracker';
+import type { StopEvidenceGate } from './stop-confirmation';
 import {
+  DEFAULT_EVIDENCE_READ_TIMEOUT_MS,
   observeNonBusyRuntime,
+  raceEvidenceDeadline,
   STOP_CONFIRMATION_GRACE_MS,
 } from './stop-confirmation';
 
@@ -30,6 +33,10 @@ export function createIdleReconciler(options: {
   onErrorTerminalize?: (sessionID: string) => void;
   idleReconcileDelayMs: number;
   stopConfirmationGraceMs?: number;
+  /** Deadline for the tracker-probe and outcome-probe awaits on the
+   * quiescent path: a hung read must not park the stop confirmation
+   * indefinitely. */
+  evidenceReadTimeoutMs?: number;
   isFallbackInProgress?: (sessionID: string) => boolean;
   hasInputWait: (sessionID: string) => boolean;
   getIdleSessionToken: (sessionID: string) => symbol;
@@ -52,6 +59,10 @@ export function createIdleReconciler(options: {
   ) => Promise<{ outcome?: string; resultText?: string } | undefined>;
   /** Stabilization retries for a succeeded-but-textless outcome. */
   outcomeStabilization?: { probes: number; intervalMs: number };
+  /** Transcript-backed stop gate: consulted before publishing `stopped`
+   * so a quiescent job whose transcript already holds the terminal
+   * result settles completed/error instead (false-stop incident). */
+  stopEvidenceGate?: StopEvidenceGate;
 }) {
   const idleReconcileTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const childIdleReconcileTimers = new Map<
@@ -66,6 +77,23 @@ export function createIdleReconciler(options: {
     string,
     ReturnType<typeof setTimeout>
   >();
+
+  function confirmViaGate(generation: number, onRetry?: () => void) {
+    const gate = options.stopEvidenceGate;
+    if (!gate) return undefined;
+    return (confirmation: {
+      taskID: string;
+      observedAt: number;
+      idleObservedAt: number;
+      lastStatusError: string;
+    }) =>
+      gate.confirm({
+        ...confirmation,
+        generation,
+        taskContextTracker: options.taskContextTracker,
+        onRetry,
+      });
+  }
 
   function scheduleIdleReconciliation(parentSessionID: string): void {
     if (
@@ -112,14 +140,18 @@ export function createIdleReconciler(options: {
       }
 
       if (options.revivedRunTracker?.isTracked(sessionID, observedGeneration)) {
-        const terminalPublished = await options.revivedRunTracker.probe(
-          sessionID,
-          observedGeneration,
+        // Bounded wait: the tracker probe performs its own transcript
+        // read; on a hung transport the idle path must still reach the
+        // gate instead of parking here. The probe's identity fencing
+        // handles late settlement.
+        const terminalPublished = await raceEvidenceDeadline(
+          options.revivedRunTracker.probe(sessionID, observedGeneration),
+          options.evidenceReadTimeoutMs ?? DEFAULT_EVIDENCE_READ_TIMEOUT_MS,
         );
-        if (terminalPublished) return;
+        if (terminalPublished === true) return;
       }
 
-      const updated = observeNonBusyRuntime({
+      const updated = await observeNonBusyRuntime({
         backgroundJobBoard: options.backgroundJobBoard,
         taskID: sessionID,
         observedAt: idleObservedAt,
@@ -128,6 +160,14 @@ export function createIdleReconciler(options: {
         lastStatusError:
           'Runtime session is idle; task termination is unconfirmed.',
         taskContextTracker: options.taskContextTracker,
+        idleObservedAt,
+        confirmStop: confirmViaGate(observedGeneration, () => {
+          scheduleQuiescentStopConfirmation(
+            sessionID,
+            observedGeneration,
+            idleObservedAt,
+          );
+        }),
       });
       if (updated?.state === 'stopped') {
         log('[task-session-manager] confirmed runtime-stopped job from idle', {
@@ -147,17 +187,43 @@ export function createIdleReconciler(options: {
       // rejected per the incident #1115 precedent (never reconcile a
       // completed job without a usable answer).
       if (options.readSessionOutcome) {
+        // Observation-identity fence for THIS publisher: the outcome
+        // query is a terminal publication path the stop gate and the
+        // tracker probe do not cover. A fallback handoff armed while
+        // the query is pending substitutes the observation — this
+        // episode's outcome must not publish, and a re-registration
+        // (revision change) must not be crossed either.
+        const revisionAtStart = options.revivedRunTracker?.revisionFor(
+          sessionID,
+          observedGeneration,
+        );
         const guardsIntact = (): boolean => {
           const latest = options.backgroundJobBoard.get(sessionID);
-          return (
-            latest !== undefined &&
-            latest.state === 'running' &&
-            latest.generation === observedGeneration &&
-            !(
-              latest.lastLiveBusyAt !== undefined &&
-              latest.lastLiveBusyAt > idleObservedAt
+          if (
+            latest?.state !== 'running' ||
+            latest.generation !== observedGeneration
+          ) {
+            return false;
+          }
+          if (
+            latest.lastLiveBusyAt !== undefined &&
+            latest.lastLiveBusyAt > idleObservedAt
+          ) {
+            return false;
+          }
+          if (
+            options.revivedRunTracker?.isObservationPending(
+              sessionID,
+              observedGeneration,
             )
+          ) {
+            return false;
+          }
+          const revisionNow = options.revivedRunTracker?.revisionFor(
+            sessionID,
+            observedGeneration,
           );
+          return revisionNow === revisionAtStart;
         };
         const stabilization = options.outcomeStabilization ?? {
           probes: DEFAULT_OUTCOME_STABILIZATION_PROBES,
@@ -172,7 +238,12 @@ export function createIdleReconciler(options: {
         ) {
           if (attempt > 0) await delay(stabilization.intervalMs);
           try {
-            const probe = await options.readSessionOutcome(sessionID);
+            // Bounded read: a hung outcome probe must not park the
+            // quiescent confirmation indefinitely.
+            const probe = await raceEvidenceDeadline(
+              options.readSessionOutcome(sessionID),
+              options.evidenceReadTimeoutMs ?? DEFAULT_EVIDENCE_READ_TIMEOUT_MS,
+            );
             outcome = probe?.outcome;
             resultText = probe?.resultText;
           } catch (error) {
@@ -251,7 +322,7 @@ export function createIdleReconciler(options: {
     if (quiescentConfirmTimers.has(sessionID)) return;
     const graceMs =
       options.stopConfirmationGraceMs ?? STOP_CONFIRMATION_GRACE_MS;
-    const timer = setTimeout(() => {
+    const timer = setTimeout(async () => {
       quiescentConfirmTimers.delete(sessionID);
       if (options.isFallbackInProgress?.(sessionID)) return;
       const job = options.backgroundJobBoard.get(sessionID);
@@ -264,7 +335,7 @@ export function createIdleReconciler(options: {
       ) {
         return;
       }
-      const updated = observeNonBusyRuntime({
+      const updated = await observeNonBusyRuntime({
         backgroundJobBoard: options.backgroundJobBoard,
         taskID: sessionID,
         observedAt: idleObservedAt + graceMs + 1,
@@ -273,6 +344,14 @@ export function createIdleReconciler(options: {
         lastStatusError:
           'Runtime session is idle; task termination is unconfirmed.',
         taskContextTracker: options.taskContextTracker,
+        idleObservedAt,
+        confirmStop: confirmViaGate(observedGeneration, () => {
+          scheduleQuiescentStopConfirmation(
+            sessionID,
+            observedGeneration,
+            idleObservedAt,
+          );
+        }),
       });
       if (updated?.state === 'stopped') {
         log(

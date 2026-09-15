@@ -110,6 +110,8 @@ interface LooseMessage {
   parts?: unknown[];
 }
 
+export type TranscriptMessage = LooseMessage;
+
 export function extractChildTerminalEvidence(
   response: unknown,
   options: ChildTranscriptOptions = {},
@@ -147,10 +149,40 @@ export function extractChildTerminalEvidence(
     if (targetIndex < 0) return { kind: 'no-assistant' };
   }
 
-  const last = messages[targetIndex];
-  if (last.info?.role !== 'assistant') return { kind: 'no-assistant' };
+  return classifyAssistantTurnEvidence(
+    messages,
+    targetIndex,
+    baselineIndex,
+    options.requireCompletionTime ?? true,
+  );
+}
 
-  const requireCompletionTime = options.requireCompletionTime ?? true;
+/**
+ * Single source of truth for classifying ONE assistant turn as the
+ * terminal evidence of a run: pending finish states, completion time,
+ * segment-wide pending tool calls, terminal error precedence, and
+ * usable text. Both the revived-run tracker probe and the stop gate's
+ * evidence classifier delegate here so their terminality contracts
+ * cannot diverge (a second independent classifier had already dropped
+ * the pending-tool rule).
+ */
+export function classifyAssistantTurnEvidence(
+  messages: TranscriptMessage[],
+  targetIndex: number,
+  baselineIndex: number,
+  requireCompletionTime = true,
+): ChildTerminalEvidence {
+  const last = messages[targetIndex];
+  if (!last || last.info?.role !== 'assistant') return { kind: 'no-assistant' };
+
+  // Terminal error precedence: an assistant turn that carries a
+  // terminal error is an error EVEN when a residual `finish` value
+  // (e.g. 'tool-calls'/'unknown') survived the failure — the error is
+  // the outcome, the finish flag is leftover state.
+  if (last.info?.error !== undefined && last.info?.error !== null) {
+    return { kind: 'error', errorText: stringifyError(last.info.error) };
+  }
+
   const finish = last.info?.finish;
   if (finish === 'tool-calls' || finish === 'unknown') {
     return { kind: 'pending' };
@@ -175,10 +207,6 @@ export function extractChildTerminalEvidence(
     }),
   );
   if (hasPendingToolCall) return { kind: 'pending' };
-
-  if (last.info?.error !== undefined && last.info?.error !== null) {
-    return { kind: 'error', errorText: stringifyError(last.info.error) };
-  }
 
   const text = (Array.isArray(last.parts) ? last.parts : [])
     .filter(
