@@ -42,10 +42,12 @@ function structuredErrorMessage(error: unknown): string | undefined {
   const data = error.data;
   if (isRecordLike(data)) {
     const inner = data.message;
-    if (typeof inner === 'string' && inner.length > 0) return inner;
+    // Whitespace-only strings must not bypass the generic fallback
+    // (an empty board summary is worse than "Session error").
+    if (typeof inner === 'string' && inner.trim().length > 0) return inner;
   }
   const direct = error.message;
-  if (typeof direct === 'string' && direct.length > 0) return direct;
+  if (typeof direct === 'string' && direct.trim().length > 0) return direct;
   return undefined;
 }
 

@@ -4793,6 +4793,40 @@ describe('task-session-manager hook', () => {
     expect(board.get('child-1')?.resultSummary).toBe('Internal server error');
   });
 
+  test('child session.error with whitespace-only data.message falls back to top-level message', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      shouldManageSession: () => false,
+    });
+
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'designer',
+      description: 'design ui',
+    });
+    board.updateStatus({ taskID: 'child-1', state: 'running' });
+
+    // A whitespace-only nested message must not bypass the fallback and
+    // leave an empty board summary (Greptile PR #1202 review).
+    await hook.event({
+      event: {
+        type: 'session.error',
+        properties: {
+          sessionID: 'child-1',
+          error: {
+            name: 'AI_APICallError',
+            message: 'Internal server error',
+            data: { message: '   ' },
+          },
+        },
+      },
+    });
+
+    expect(board.get('child-1')?.resultSummary).toBe('Internal server error');
+  });
+
   test('managed session.error preserves serialized NamedError detail (data.message)', async () => {
     const board = new BackgroundJobBoard();
     const { hook } = createHook({
