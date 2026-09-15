@@ -899,6 +899,10 @@ describe('resolveSidebarSlotOrder', () => {
     expect(resolveSidebarSlotOrder([`file:///w/${NAME}/`], NAME)).toBe(110);
   });
 
+  test('plain absolute local paths match by basename', () => {
+    expect(resolveSidebarSlotOrder([`/workspace/${NAME}`], NAME)).toBe(110);
+  });
+
   test('non-string and malformed entries are skipped without shifting index', () => {
     expect(
       resolveSidebarSlotOrder(

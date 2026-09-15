@@ -711,6 +711,10 @@ export function resolveSidebarSlotOrder(
       const stripped = spec.replace(/^file:\/\//, '');
       return stripped === pluginName || path.basename(stripped) === pluginName;
     }
+    if (path.isAbsolute(spec)) {
+      // Plain local path, as the installer writes for source installs.
+      return path.basename(spec) === pluginName;
+    }
     // npm spec: strip a trailing @version (never contains a slash). A
     // scoped package (@scope/name) is a different package and must not
     // match by basename.
