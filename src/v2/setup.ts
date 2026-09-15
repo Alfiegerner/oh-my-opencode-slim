@@ -1767,10 +1767,21 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
               const next = await eventIterator.next();
               if (next.done) break;
               try {
-                // interviewBridge keeps the RAW v2 event; the v1 eventHook
-                // loop iterates raw + synthesized v1 shapes (idle,
-                // early-registration created, message.updated telemetry).
+                // Token-stream deltas: the interview bridge already
+                // gates to managed sessions. Skip permission rules and
+                // v1 synthesis; still deliver the raw event so the
+                // multiplexer heartbeat in the v1 event hook can run.
+                const rawType =
+                  typeof next.value?.type === 'string' ? next.value.type : '';
+                const isStreamDelta =
+                  rawType === 'session.next.text.delta' ||
+                  rawType === 'session.next.reasoning.delta' ||
+                  rawType === 'message.part.delta';
                 await interviewBridge.handleEvent(next.value);
+                if (isStreamDelta) {
+                  if (eventHook) await eventHook({ event: next.value });
+                  continue;
+                }
                 // Child-session permission tightening sees the same RAW
                 // event (before v1-shape synthesis) so it is independent
                 // of v1 event-hook presence.

@@ -58,10 +58,10 @@ export function createRuntimeStatusReconciler(options: {
   function schedule(): void {
     if (disposed) return;
     if (!reconciliationSupported()) return;
-    if (activeReconcile) {
-      rerunRequested = true;
-      return;
-    }
+    // Routine schedule() from the event hook must not force an immediate
+    // extra pass while a lookup is in flight: token-stream deltas would
+    // otherwise collapse the 5s cadence into consecutive host polls.
+    if (activeReconcile) return;
     if (timer) return;
     if (!options.backgroundJobBoard.hasRunningJobs()) {
       return;

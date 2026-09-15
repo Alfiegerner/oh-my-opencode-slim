@@ -708,6 +708,36 @@ describe('plugin TUI agent activity', () => {
       root: 'fixer',
     });
   });
+
+  test('message.part.delta does not write TUI activity or session model', async () => {
+    await hooks?.['chat.message']?.(
+      {
+        sessionID: 'stream-1',
+        agent: 'orchestrator',
+        model: { providerID: 'openai', modelID: 'gpt-4o' },
+      } as never,
+      {} as never,
+    );
+    const before = readTuiSnapshot(projectDir);
+
+    await hooks?.event?.({
+      event: {
+        type: 'message.part.delta',
+        properties: {
+          sessionID: 'stream-1',
+          messageID: 'msg-1',
+          partID: 'part-1',
+          field: 'text',
+          delta: 'a'.repeat(200),
+        },
+      },
+    } as never);
+
+    const after = readTuiSnapshot(projectDir);
+    expect(after.activeSessions).toEqual(before.activeSessions);
+    expect(after.agentModels).toEqual(before.agentModels);
+    expect(after.updatedAt).toBe(before.updatedAt);
+  });
 });
 
 describe('background task admission model resolution', () => {
