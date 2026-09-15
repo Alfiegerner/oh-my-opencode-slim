@@ -25,6 +25,36 @@ import type { RevivedRunTracker } from './revived-run-tracker';
 
 type BackgroundJobRecord = NonNullable<ReturnType<BackgroundJobStore['get']>>;
 
+/**
+ * Extract a human-readable message from a serialized session error.
+ *
+ * The core publishes session errors through NamedError.toObject(), whose
+ * wire shape is `{ name: string; data: ... }` — the message lives in
+ * `data.message` (APIError, ProviderAuthError, ...), not at the top
+ * level. Reading only `error.message` yields undefined for every
+ * serialized NamedError and the board fell back to the generic
+ * "Session error" even when the detail existed two levels down (#1200
+ * diagnostics). Plain `{ message }` shapes are still honored for
+ * non-NamedError payloads.
+ */
+function structuredErrorMessage(error: unknown): string | undefined {
+  if (!isRecordLike(error)) return undefined;
+  const data = error.data;
+  if (isRecordLike(data)) {
+    const inner = data.message;
+    // Whitespace-only strings must not bypass the generic fallback
+    // (an empty board summary is worse than "Session error").
+    if (typeof inner === 'string' && inner.trim().length > 0) return inner;
+  }
+  const direct = error.message;
+  if (typeof direct === 'string' && direct.trim().length > 0) return direct;
+  return undefined;
+}
+
+function isRecordLike(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
 interface SessionEventGenerationFence {
   generation: number;
   /** A new generation must see a live activity fence before lifecycle events. */
@@ -605,8 +635,7 @@ export async function handleEvent(
             state: 'error',
             expectedGeneration: observation?.generation,
             resultSummary:
-              (props?.error as { message?: string } | undefined)?.message ??
-              'Session error',
+              structuredErrorMessage(props?.error) ?? 'Session error',
           });
           if (updated) deps.revivedRunTracker?.onTerminal(updated);
         }
@@ -639,8 +668,7 @@ export async function handleEvent(
           state: 'error',
           expectedGeneration: observation?.generation,
           resultSummary:
-            (props?.error as { message?: string } | undefined)?.message ??
-            'Session error',
+            structuredErrorMessage(props?.error) ?? 'Session error',
         });
         if (updated) deps.revivedRunTracker?.onTerminal(updated);
       }

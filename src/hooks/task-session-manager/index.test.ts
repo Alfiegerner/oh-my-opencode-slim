@@ -4658,6 +4658,209 @@ describe('task-session-manager hook', () => {
     expect(job?.resultSummary).toBe('Internal server error');
   });
 
+  test('child session.error preserves serialized NamedError detail (data.message)', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      shouldManageSession: () => false,
+    });
+
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'audit the diff',
+    });
+    board.updateStatus({ taskID: 'child-1', state: 'running' });
+
+    // The core publishes session errors via NamedError.toObject():
+    // `{ name, data }` with the message inside data (APIError,
+    // ProviderAuthError, ...). A top-level-only read loses it (#1200).
+    await hook.event({
+      event: {
+        type: 'session.error',
+        properties: {
+          sessionID: 'child-1',
+          error: {
+            name: 'APIError',
+            data: {
+              message: 'stream stall timeout',
+              isRetryable: true,
+            },
+          },
+        },
+      },
+    });
+
+    const job = board.get('child-1');
+    expect(job?.state).toBe('error');
+    expect(job?.resultSummary).toBe('stream stall timeout');
+  });
+
+  test('child session.error without any message falls back to generic summary', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      shouldManageSession: () => false,
+    });
+
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'designer',
+      description: 'design ui',
+    });
+    board.updateStatus({ taskID: 'child-1', state: 'running' });
+
+    await hook.event({
+      event: {
+        type: 'session.error',
+        properties: {
+          sessionID: 'child-1',
+          error: { name: 'APIError', data: { isRetryable: false } },
+        },
+      },
+    });
+
+    const job = board.get('child-1');
+    expect(job?.state).toBe('error');
+    expect(job?.resultSummary).toBe('Session error');
+  });
+
+  test('child session.error prefers data.message over top-level message', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      shouldManageSession: () => false,
+    });
+
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'audit the diff',
+    });
+    board.updateStatus({ taskID: 'child-1', state: 'running' });
+
+    await hook.event({
+      event: {
+        type: 'session.error',
+        properties: {
+          sessionID: 'child-1',
+          error: {
+            name: 'APIError',
+            message: 'Instance name (generic)',
+            data: { message: 'stream stall timeout', isRetryable: true },
+          },
+        },
+      },
+    });
+
+    // NamedError instances carry their class name as the top-level
+    // message; the human-readable detail is data.message.
+    expect(board.get('child-1')?.resultSummary).toBe('stream stall timeout');
+  });
+
+  test('child session.error with empty data.message falls back to top-level message', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      shouldManageSession: () => false,
+    });
+
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'designer',
+      description: 'design ui',
+    });
+    board.updateStatus({ taskID: 'child-1', state: 'running' });
+
+    await hook.event({
+      event: {
+        type: 'session.error',
+        properties: {
+          sessionID: 'child-1',
+          error: {
+            name: 'AI_APICallError',
+            message: 'Internal server error',
+            data: { message: '' },
+          },
+        },
+      },
+    });
+
+    expect(board.get('child-1')?.resultSummary).toBe('Internal server error');
+  });
+
+  test('child session.error with whitespace-only data.message falls back to top-level message', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      shouldManageSession: () => false,
+    });
+
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'designer',
+      description: 'design ui',
+    });
+    board.updateStatus({ taskID: 'child-1', state: 'running' });
+
+    // A whitespace-only nested message must not bypass the fallback and
+    // leave an empty board summary (Greptile PR #1202 review).
+    await hook.event({
+      event: {
+        type: 'session.error',
+        properties: {
+          sessionID: 'child-1',
+          error: {
+            name: 'AI_APICallError',
+            message: 'Internal server error',
+            data: { message: '   ' },
+          },
+        },
+      },
+    });
+
+    expect(board.get('child-1')?.resultSummary).toBe('Internal server error');
+  });
+
+  test('managed session.error preserves serialized NamedError detail (data.message)', async () => {
+    const board = new BackgroundJobBoard();
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      // No chain / chain exhausted / fallback disabled → error is final.
+      willAttemptFallback: () => false,
+    });
+
+    board.registerLaunch({
+      taskID: 'parent-1',
+      parentSessionID: 'root-1',
+      agent: 'orchestrator',
+      description: 'background session',
+    });
+    board.updateStatus({ taskID: 'parent-1', state: 'running' });
+
+    await hook.event({
+      event: {
+        type: 'session.error',
+        properties: {
+          sessionID: 'parent-1',
+          error: {
+            name: 'ProviderAuthError',
+            data: { providerID: 'acme', message: 'Invalid API key' },
+          },
+        },
+      },
+    });
+
+    const job = board.get('parent-1');
+    expect(job?.state).toBe('error');
+    expect(job?.resultSummary).toBe('Invalid API key');
+  });
+
   test('child session.error during fallback is not recorded on board', async () => {
     const board = new BackgroundJobBoard();
     // isFallbackInProgress is currently always-false for real children
