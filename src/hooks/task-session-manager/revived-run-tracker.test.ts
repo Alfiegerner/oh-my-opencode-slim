@@ -674,4 +674,221 @@ describe('revived run tracker', () => {
     harness.tracker.onTerminal(cancelled);
     expect(harness.tracker.isTracked(next.taskID, next.generation)).toBe(true);
   });
+
+  // Controlled clock for the transport-timeout scenarios below: capture
+  // timer registrations so the 10s transport timeout can be fired without
+  // waiting, and track clearTimeout so a cancelled retry is provable.
+  function installCapturedTimers() {
+    const timers = new Map<number, { delay: number; callback: () => void }>();
+    const cleared = new Set<number>();
+    let nextId = 0;
+    globalThis.setTimeout = ((callback: () => void, delay = 0) => {
+      const id = ++nextId;
+      timers.set(id, { delay, callback });
+      return id;
+    }) as typeof setTimeout;
+    globalThis.clearTimeout = ((id: number) => {
+      cleared.add(id);
+      timers.delete(id);
+    }) as typeof clearTimeout;
+    const settle = async () => {
+      for (let i = 0; i < 15; i += 1) await Promise.resolve();
+    };
+    const fire = (delay: number) => {
+      for (const [id, timer] of [...timers.entries()]) {
+        if (timer.delay !== delay) continue;
+        timers.delete(id);
+        timer.callback();
+        return id;
+      }
+      return undefined;
+    };
+    const soleSurviving = (delay: number) =>
+      [...timers.values()].find((timer) => timer.delay === delay);
+    return { timers, cleared, settle, fire, soleSurviving };
+  }
+
+  test('late transport success after timeout marks sent and cancels the retry', async () => {
+    const clock = installCapturedTimers();
+    let resolvePrompt: ((value: unknown) => void) | undefined;
+    const prompt = mock(
+      () =>
+        new Promise((resolve) => {
+          resolvePrompt = resolve;
+        }),
+    );
+    const harness = createHarness(() => ({ data: [] }), prompt);
+    harness.tracker.register({
+      taskID: harness.run.taskID,
+      generation: harness.run.generation,
+      parentSessionID: 'parent',
+      description: 'inspect the change',
+    });
+    const terminal = harness.board.updateStatus({
+      taskID: harness.run.taskID,
+      expectedGeneration: harness.run.generation,
+      state: 'completed',
+      resultSummary: 'done',
+    });
+    if (!terminal) throw new Error('missing terminal record');
+    harness.tracker.onTerminal(terminal);
+    await clock.settle();
+    expect(harness.prompt).toHaveBeenCalledTimes(1);
+
+    // Local 10s transport timeout fires while promptAsync is still pending.
+    clock.fire(10_000);
+    await clock.settle();
+    const retryTimer = clock.soleSurviving(0);
+    expect(retryTimer).toBeDefined();
+
+    // The original transport settles successfully AFTER the timeout.
+    resolvePrompt?.({});
+    await clock.settle();
+
+    expect(harness.prompt).toHaveBeenCalledTimes(1);
+    expect([...clock.timers.values()]).not.toContain(retryTimer);
+  });
+
+  test('late transport failure after timeout keeps the retry path', async () => {
+    const clock = installCapturedTimers();
+    let rejectPrompt: ((reason: unknown) => void) | undefined;
+    const prompt = mock(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectPrompt = reject;
+        }),
+    );
+    const harness = createHarness(() => ({ data: [] }), prompt);
+    harness.tracker.register({
+      taskID: harness.run.taskID,
+      generation: harness.run.generation,
+      parentSessionID: 'parent',
+      description: 'inspect the change',
+    });
+    const terminal = harness.board.updateStatus({
+      taskID: harness.run.taskID,
+      expectedGeneration: harness.run.generation,
+      state: 'completed',
+      resultSummary: 'done',
+    });
+    if (!terminal) throw new Error('missing terminal record');
+    harness.tracker.onTerminal(terminal);
+    await clock.settle();
+
+    clock.fire(10_000);
+    await clock.settle();
+    expect(clock.soleSurviving(0)).toBeDefined();
+
+    // The original transport fails after the timeout: the retry must stay
+    // armed and deliver the notification on the next attempt.
+    rejectPrompt?.(new Error('host unavailable'));
+    await clock.settle();
+    expect(clock.soleSurviving(0)).toBeDefined();
+
+    clock.fire(0);
+    await clock.settle();
+    expect(harness.prompt).toHaveBeenCalledTimes(2);
+  });
+
+  test('late transport error envelope after timeout is not delivery', async () => {
+    const clock = installCapturedTimers();
+    let resolvePrompt: ((value: unknown) => void) | undefined;
+    const prompt = mock(
+      () =>
+        new Promise((resolve) => {
+          resolvePrompt = resolve;
+        }),
+    );
+    const harness = createHarness(() => ({ data: [] }), prompt);
+    harness.tracker.register({
+      taskID: harness.run.taskID,
+      generation: harness.run.generation,
+      parentSessionID: 'parent',
+      description: 'inspect the change',
+    });
+    const terminal = harness.board.updateStatus({
+      taskID: harness.run.taskID,
+      expectedGeneration: harness.run.generation,
+      state: 'completed',
+      resultSummary: 'done',
+    });
+    if (!terminal) throw new Error('missing terminal record');
+    harness.tracker.onTerminal(terminal);
+    await clock.settle();
+    expect(harness.prompt).toHaveBeenCalledTimes(1);
+
+    clock.fire(10_000);
+    await clock.settle();
+
+    // The transport PROMISE resolves, but with a host error envelope —
+    // a resolved SDK call without throwOnError is not a delivered
+    // notification. The retry must stay armed.
+    resolvePrompt?.({ error: { message: 'host rejected' } });
+    await clock.settle();
+    expect(clock.soleSurviving(0)).toBeDefined();
+
+    clock.fire(0);
+    await clock.settle();
+    expect(harness.prompt).toHaveBeenCalledTimes(2);
+  });
+
+  test('late success while a retry waits on selection prevents a second send', async () => {
+    const clock = installCapturedTimers();
+    let resolvePrompt: ((value: unknown) => void) | undefined;
+    const prompt = mock(
+      () =>
+        new Promise((resolve) => {
+          resolvePrompt = resolve;
+        }),
+    );
+    // First selection resolves immediately (attempt 1 sends); the second
+    // call (retry) blocks until released, modeling a slow host read.
+    let selectionCalls = 0;
+    let releaseSecondSelection: (() => void) | undefined;
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecondSelection = resolve;
+    });
+    const harness = createHarness(() => ({ data: [] }), prompt, false, {
+      resolveSelection: async () => {
+        selectionCalls += 1;
+        if (selectionCalls >= 2) await secondGate;
+        return { agent: 'plan', provenance: 'host-persisted' };
+      },
+    });
+    harness.tracker.register({
+      taskID: harness.run.taskID,
+      generation: harness.run.generation,
+      parentSessionID: 'parent',
+      description: 'inspect the change',
+    });
+    const terminal = harness.board.updateStatus({
+      taskID: harness.run.taskID,
+      expectedGeneration: harness.run.generation,
+      state: 'completed',
+      resultSummary: 'done',
+    });
+    if (!terminal) throw new Error('missing terminal record');
+    harness.tracker.onTerminal(terminal);
+    await clock.settle();
+    expect(harness.prompt).toHaveBeenCalledTimes(1);
+
+    // Local timeout: retry armed and fired; the retry passes its entry
+    // guard (sent is still false) and parks on the selection await.
+    clock.fire(10_000);
+    await clock.settle();
+    clock.fire(0);
+    await clock.settle();
+    expect(selectionCalls).toBeGreaterThanOrEqual(2);
+
+    // The ORIGINAL transport settles successfully after everything: the
+    // notification is delivered, sent is marked, and the parked retry
+    // must not acquire the lease or send again.
+    resolvePrompt?.({});
+    await clock.settle();
+    releaseSecondSelection?.();
+    await clock.settle();
+    await clock.settle();
+
+    expect(harness.prompt).toHaveBeenCalledTimes(1);
+  });
 });

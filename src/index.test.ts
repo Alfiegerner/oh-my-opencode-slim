@@ -1289,6 +1289,140 @@ describe('plugin config model inheritance', () => {
   });
 });
 
+describe('system.transform orchestrator injection', () => {
+  let originalEnv: typeof process.env;
+  const configDirs: string[] = [];
+
+  beforeEach(() => {
+    originalEnv = { ...process.env };
+  });
+
+  afterEach(async () => {
+    process.env = originalEnv;
+    while (configDirs.length > 0) {
+      const configDir = configDirs.pop();
+      if (configDir) {
+        await rm(configDir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  async function loadPluginWithOrchestratorSession(
+    config: Record<string, unknown> = {},
+  ) {
+    const configDir = await mkdtemp('/tmp/oh-my-system-transform-');
+    configDirs.push(configDir);
+    await Bun.write(
+      `${configDir}/oh-my-opencode-slim.json`,
+      JSON.stringify(config),
+    );
+    process.env = {
+      ...originalEnv,
+      OPENCODE_CONFIG_DIR: configDir,
+      XDG_DATA_HOME: `${configDir}/data`,
+      XDG_CACHE_HOME: `${configDir}/cache`,
+      OPENCODE_LOG_DIR: `${configDir}/logs`,
+    };
+    const client = createPluginClient(async () => ({}));
+    const hooks = await plugin({
+      client,
+      directory: configDir,
+      worktree: configDir,
+      serverUrl: new URL('http://127.0.0.1:4096'),
+    } as never);
+    // Session tracked as orchestrator (how chat.message records it).
+    await hooks['chat.message']?.(
+      {
+        sessionID: 'ses-orc',
+        agent: 'orchestrator',
+        model: { providerID: 'test', modelID: 'm' },
+      } as never,
+      {} as never,
+    );
+    return hooks;
+  }
+
+  const ENV_BLOCK = [
+    'You are powered by the model named test/m.',
+    '<env>',
+    '  Working directory: /tmp',
+    '</env>',
+  ].join('\n');
+
+  test('does not duplicate a custom orchestrator prompt already present', async () => {
+    // Configure a REAL custom replacement without default-prompt markers:
+    // the effective prompt is this string, and the dedup must key on it.
+    const customPrompt = 'Mi prompt custom sin marcadores.';
+    const hooks = await loadPluginWithOrchestratorSession({
+      agents: { orchestrator: { prompt: customPrompt } },
+    });
+    try {
+      const system = [`${ENV_BLOCK}\n\n${customPrompt}`];
+      await hooks['experimental.chat.system.transform']?.(
+        { sessionID: 'ses-orc' } as never,
+        { system } as never,
+      );
+      // Exactly one copy of the effective prompt (split = parts + 1) and
+      // no default-prompt content appended after it.
+      expect(system[0]?.split(customPrompt).length).toBe(2);
+      expect(system[0]).toBe(`${ENV_BLOCK}\n\n${customPrompt}`);
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('skips auxiliary requests (title/compaction) in an orchestrator session', async () => {
+    const hooks = await loadPluginWithOrchestratorSession();
+    try {
+      // Title/compaction requests carry their own short system and no
+      // environment block.
+      const system = [
+        'You are a title generator. You output ONLY a thread title.',
+      ];
+      await hooks['experimental.chat.system.transform']?.(
+        { sessionID: 'ses-orc' } as never,
+        { system } as never,
+      );
+      expect(system[0]).not.toContain('<Role>');
+      expect(system[0]).toBe(
+        'You are a title generator. You output ONLY a thread title.',
+      );
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('injects on a main chat request in an orchestrator session', async () => {
+    const hooks = await loadPluginWithOrchestratorSession();
+    try {
+      const system = [ENV_BLOCK];
+      await hooks['experimental.chat.system.transform']?.(
+        { sessionID: 'ses-orc' } as never,
+        { system } as never,
+      );
+      expect(system[0]).toContain('<Role>');
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('request-scoped agent overrides session tracking', async () => {
+    const hooks = await loadPluginWithOrchestratorSession();
+    try {
+      // v2 bridge forwards the request agent: an auxiliary request says
+      // its real agent even though the session is tracked as orchestrator.
+      const system = [ENV_BLOCK];
+      await hooks['experimental.chat.system.transform']?.(
+        { sessionID: 'ses-orc', agent: 'title' } as never,
+        { system } as never,
+      );
+      expect(system[0]).not.toContain('<Role>');
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+});
+
 describe('multiplexer host gating', () => {
   let originalEnv: typeof process.env;
 

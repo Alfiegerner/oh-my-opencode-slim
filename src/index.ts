@@ -102,7 +102,10 @@ import {
   createSessionSelectionReader,
   resolveCurrentSelection,
 } from './utils/session-selection';
-import { collapseSystemInPlace } from './utils/system-collapse';
+import {
+  collapseSystemInPlace,
+  looksLikeMainChatRequest,
+} from './utils/system-collapse';
 import { createV2Setup } from './v2';
 import {
   isInternalAdmission,
@@ -1676,39 +1679,56 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // agentDefs (which has custom replacement or append prompts applied)
     // instead of rebuilding the default.
     'experimental.chat.system.transform': async (
-      input: { sessionID?: string },
+      input: { sessionID?: string; agent?: unknown },
       output: { system: string[] },
     ): Promise<void> => {
-      const agentName = input.sessionID
+      // Request-scoped agent when the host provides one (the v2 context
+      // bridge forwards `event.agent`). v1 hosts only pass sessionID, so
+      // there we fall back to the session's tracked agent — which is the
+      // SESSION agent, not the request agent: auxiliary LLM requests
+      // (title generation, compaction) run in the same session under
+      // their own agent and must not receive orchestrator instructions.
+      const requestAgent =
+        typeof input.agent === 'string' && input.agent
+          ? input.agent
+          : undefined;
+      const sessionAgent = input.sessionID
         ? sessionMetadata.getAgent(input.sessionID)
         : undefined;
-      if (agentName === 'orchestrator') {
-        const alreadyInjected = output.system.some(
-          (s) =>
-            typeof s === 'string' &&
-            s.includes('<Role>') &&
-            s.includes('orchestrator'),
+      const isOrchestratorRequest =
+        requestAgent !== undefined
+          ? requestAgent === 'orchestrator'
+          : sessionAgent === 'orchestrator' &&
+            looksLikeMainChatRequest(output.system);
+      if (isOrchestratorRequest) {
+        const orchestratorDef = agentDefs.find(
+          (a) => a.name === 'orchestrator',
         );
-        if (!alreadyInjected) {
+        const orchestratorPrompt =
+          typeof orchestratorDef?.config?.prompt === 'string'
+            ? orchestratorDef.config.prompt
+            : buildOrchestratorPrompt(
+                runtime.disabledAgents,
+                undefined,
+                true,
+                true,
+                hostFlavor,
+              );
+        // Dedup by the EFFECTIVE prompt, not by default-prompt markers:
+        // a custom replacement without `<Role>` previously slipped past
+        // the marker check and was appended twice (P + host + P).
+        const alreadyInjected =
+          !!orchestratorPrompt &&
+          output.system.some(
+            (s) => typeof s === 'string' && s.includes(orchestratorPrompt),
+          );
+        if (!alreadyInjected && orchestratorPrompt) {
           // Place the orchestrator prompt after AGENTS.md so the user's
           // behavioral rules (language, code conventions, etc.) retain
           // their intended priority. AGENTS.md is injected by OpenCode
           // core into system[0]; prepending the orchestrator prompt before
           // it buries user-defined rules under thousands of lines of
           // orchestration instructions.
-          const orchestratorDef = agentDefs.find(
-            (a) => a.name === 'orchestrator',
-          );
-          const orchestratorPrompt =
-            typeof orchestratorDef?.config?.prompt === 'string'
-              ? orchestratorDef.config.prompt
-              : buildOrchestratorPrompt(
-                  runtime.disabledAgents,
-                  undefined,
-                  true,
-                  true,
-                  hostFlavor,
-                );
           output.system[0] = `${output.system[0] || ''}\n\n${orchestratorPrompt}`;
         }
       }
