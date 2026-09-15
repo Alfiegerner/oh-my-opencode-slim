@@ -1004,7 +1004,7 @@ describe('revived run tracker', () => {
       },
       undefined,
       false,
-      { handoffExpiryMs: 5, stabilizationProbeDelayMs: 0 },
+      { handoffExpiryMs: 40, stabilizationProbeDelayMs: 0 },
     );
     const gen = harness.run.generation;
 
@@ -1018,10 +1018,11 @@ describe('revived run tracker', () => {
       }),
     ).toBe(true);
 
-    // Expiry promotes the preparation into the owning run.
-    await new Promise((resolve) => setTimeout(resolve, 15));
+    // First expiry promotes; the unresolved-admission bound is a second
+    // window of the same length. Assert the fenced promoted state in
+    // between, then admit before that bound lifts.
+    await new Promise((resolve) => setTimeout(resolve, 50));
     expect(harness.tracker.isTracked('ses_child', gen)).toBe(true);
-    // Still fencing: the admission itself is unresolved.
     expect(harness.tracker.isObservationPending('ses_child', gen)).toBe(true);
     expect(harness.board.get('ses_child')?.state).toBe('running');
 
@@ -1057,6 +1058,33 @@ describe('revived run tracker', () => {
     // A subsequent explicit host refusal releases it.
     harness.tracker.rejectObservation('ses_child', gen);
     expect(harness.tracker.isObservationPending('ses_child', gen)).toBe(false);
+  });
+
+  test('handoff: unresolved admission lifts the fence after a bound without dropping the owner', async () => {
+    const harness = createHarness(
+      completedTranscript(() => false),
+      undefined,
+      false,
+      { handoffExpiryMs: 5, stabilizationProbeDelayMs: 0 },
+    );
+    const gen = harness.run.generation;
+    harness.tracker.prepareObservation({
+      taskID: 'ses_child',
+      generation: gen,
+      parentSessionID: 'parent',
+      baselineMessageID: 'baseline',
+      description: 'inspect the change',
+    });
+
+    expect(harness.tracker.settleObservationUnresolved('ses_child', gen)).toBe(
+      true,
+    );
+    expect(harness.tracker.isObservationPending('ses_child', gen)).toBe(true);
+    expect(harness.tracker.isTracked('ses_child', gen)).toBe(true);
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(harness.tracker.isObservationPending('ses_child', gen)).toBe(false);
+    expect(harness.tracker.isTracked('ses_child', gen)).toBe(true);
   });
 
   test('handoff: prepare refuses a stale generation', () => {

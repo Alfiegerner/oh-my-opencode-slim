@@ -28,7 +28,8 @@ import type { RevivedRunTracker } from './revived-run-tracker';
  * - `settleUnresolved` handles unknown outcomes (transport failed
  *   without a response — the host may still have accepted the replay):
  *   the prepared ownership CONVERTS into a tracked run instead of being
- *   dropped.
+ *   dropped. The gate fence lifts after one more expiry window if
+ *   admit/reject never arrive; the owner stays.
  *
  * Guards: only confirmed BACKGROUND jobs (`background === true`,
  * `state === 'running'`) participate; the generation is REQUIRED (never

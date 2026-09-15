@@ -84,9 +84,9 @@ export interface RevivedRunTracker {
    * (immediate probe, no reinstall). Reject withdraws on an explicit
    * host refusal (error envelope / capability rejection). A hung
    * admission PROMOTES the preparation into the owning run instead of
-   * dropping it — `isObservationPending` stays true until admit/reject,
-   * so an `absent` verdict cannot become a stop while admission is
-   * unresolved. */
+   * dropping it. `isObservationPending` stays true until admit/reject
+   * OR a bounded unresolved-admission timer lifts the fence (owner
+   * kept) so a valid empty transcript can still confirm stopped. */
   prepareObservation(input: {
     taskID: string;
     generation: number;
@@ -100,7 +100,9 @@ export interface RevivedRunTracker {
   rejectObservation(taskID: string, generation: number): void;
   /** Unknown admission outcome (transport failed without a response):
    * the prepared ownership CONVERTS into a tracked run instead of being
-   * dropped — the host may still have accepted the replay. */
+   * dropped — the host may still have accepted the replay. The gate
+   * fence lifts after one more expiry window if admit/reject never
+   * arrive; the owner stays. */
   settleObservationUnresolved(taskID: string, generation: number): boolean;
   isObservationPending(taskID: string, generation: number): boolean;
   /** Observation-identity fence for the stop gate: a monotonic
@@ -538,8 +540,8 @@ export function createRevivedRunTracker(options: {
     // unresolved transport failure, but the ADMISSION itself is still
     // unresolved — the re-prompt may yet start, so an `absent` verdict
     // must not become a terminal stop meanwhile. The entry is cleaned
-    // only when the admission resolves (admit/reject) or an external
-    // registration supersedes it.
+    // on admit/reject, external registration, or the bounded
+    // unresolved-admission timer (owner kept).
     const pending = pendingHandoffs.get(taskID);
     return pending?.generation === generation;
   }
@@ -564,6 +566,32 @@ export function createRevivedRunTracker(options: {
       stabilizationProbes: 0,
     });
     options.onRegister?.(input.taskID);
+  }
+
+  /** After promotion the owner is installed but admission is still
+   * unknown. Keep fencing the gate for one more expiry window, then
+   * probe again and lift the fence WITHOUT discarding the owner — a
+   * still-empty transcript can confirm stopped, a late result still
+   * has a delivery owner. */
+  function armPromotedResolution(taskID: string, generation: number): void {
+    const pending = pendingHandoffs.get(taskID);
+    if (pending?.state !== 'promoted' || pending.generation !== generation) {
+      return;
+    }
+    if (pending.expiryTimer) clearTimeout(pending.expiryTimer);
+    pending.expiryTimer = setTimeout(() => {
+      const current = pendingHandoffs.get(taskID);
+      if (current?.state !== 'promoted' || current.generation !== generation) {
+        return;
+      }
+      void probe(taskID, generation).finally(() => {
+        const still = pendingHandoffs.get(taskID);
+        if (still?.state === 'promoted' && still.generation === generation) {
+          deleteHandoff(taskID);
+        }
+      });
+    }, handoffExpiryMs);
+    pending.expiryTimer.unref?.();
   }
 
   /** Convert a pending preparation into the owning tracked run. Used
@@ -597,6 +625,7 @@ export function createRevivedRunTracker(options: {
     // The re-prompt may already be persisted (admission is async): own
     // it now rather than waiting for an idle that already happened.
     void probe(taskID, pending.generation);
+    armPromotedResolution(taskID, pending.generation);
     return true;
   }
 
