@@ -5,6 +5,7 @@ import {
   runtimeSessionStatus,
 } from '../../utils';
 import { log } from '../../utils/logger';
+import type { StopEvidenceGate } from './stop-confirmation';
 import {
   observeNonBusyRuntime,
   STOP_CONFIRMATION_GRACE_MS,
@@ -23,6 +24,10 @@ export function createRuntimeStatusReconciler(options: {
     contextFilesForPrompt(taskId: string): ContextFile[];
     prune(board: { taskIDs(): Set<string> }): void;
   };
+  /** Transcript-backed stop gate: consulted before publishing `stopped`
+   * so a quiescent job whose transcript already holds the terminal
+   * result settles completed/error instead (false-stop incident). */
+  stopEvidenceGate?: StopEvidenceGate;
 }) {
   const delayMs = options.delayMs ?? RUNTIME_STATUS_RECONCILE_DELAY_MS;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -107,8 +112,9 @@ export function createRuntimeStatusReconciler(options: {
       return;
     }
 
+    const confirmations: Array<Promise<void>> = [];
     for (const job of running) {
-      if (disposed) return;
+      if (disposed) break;
       const current = options.backgroundJobBoard.get(job.taskID);
       if (
         current?.state !== 'running' ||
@@ -141,31 +147,46 @@ export function createRuntimeStatusReconciler(options: {
         status === undefined
           ? 'Runtime status response did not contain a live session state; task termination is unconfirmed.'
           : 'Runtime session is idle; task termination is unconfirmed.';
-      const updated = observeNonBusyRuntime({
-        backgroundJobBoard: options.backgroundJobBoard,
-        taskID: job.taskID,
-        observedAt: requestStartedAt,
-        generation: job.generation,
-        graceMs,
-        lastStatusError,
-        taskContextTracker: options.taskContextTracker,
-      });
-      if (updated?.state === 'stopped') {
-        log('[task-session-manager] confirmed runtime-stopped job', {
-          taskID: updated.taskID,
-          alias: updated.alias,
-          parentSessionID: updated.parentSessionID,
-        });
-        continue;
-      }
-      log(
-        '[task-session-manager] runtime session quiescent; terminal result pending',
-        {
+      const gate = options.stopEvidenceGate;
+      // Fire-and-await later: a hung transcript read on one job must not
+      // stall confirmation of the rest of the pass.
+      confirmations.push(
+        observeNonBusyRuntime({
+          backgroundJobBoard: options.backgroundJobBoard,
           taskID: job.taskID,
+          observedAt: requestStartedAt,
           generation: job.generation,
-        },
+          graceMs,
+          lastStatusError,
+          taskContextTracker: options.taskContextTracker,
+          confirmStop: gate
+            ? (confirmation) =>
+                gate.confirm({
+                  ...confirmation,
+                  generation: job.generation,
+                  taskContextTracker: options.taskContextTracker,
+                })
+            : undefined,
+        }).then((updated) => {
+          if (updated?.state === 'stopped') {
+            log('[task-session-manager] confirmed runtime-stopped job', {
+              taskID: updated.taskID,
+              alias: updated.alias,
+              parentSessionID: updated.parentSessionID,
+            });
+            return;
+          }
+          log(
+            '[task-session-manager] runtime session quiescent; terminal result pending',
+            {
+              taskID: job.taskID,
+              generation: job.generation,
+            },
+          );
+        }),
       );
     }
+    await Promise.all(confirmations);
   }
 
   async function reconcile(): Promise<void> {

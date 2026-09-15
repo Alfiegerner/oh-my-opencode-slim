@@ -46,6 +46,7 @@ import {
   SessionLifecycle,
 } from './hooks';
 import { processImageAttachments } from './hooks/image-hook';
+import { createBackgroundFallbackHandoff } from './hooks/task-session-manager/fallback-observation-transfer';
 import { createRevivedRunTracker } from './hooks/task-session-manager/revived-run-tracker';
 import type { ToolLoopGuardHook } from './hooks/tool-loop-guard/hook';
 import { isMessageWithParts, type MessageWithParts } from './hooks/types';
@@ -618,6 +619,15 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // Initialize foreground fallback manager for runtime model switching.
     // Agents without a chain (e.g. councillor, owned by CouncilManager) are
     // left alone — FG only aborts/re-prompts when it has a model to switch to.
+    // The observation handoff brackets the re-prompt admission for
+    // BACKGROUND children (false-stop incident): prepare() defers the stop
+    // gate before the await, admit() enrolls the run tracker after host
+    // acceptance, reject() withdraws on failure; see
+    // fallback-observation-transfer.ts.
+    const backgroundFallbackHandoff = createBackgroundFallbackHandoff({
+      backgroundJobBoard: backgroundJobCoordinator,
+      revivedRunTracker,
+    });
     foregroundFallback = new ForegroundFallbackManager(
       runtime.runtimeChains,
       runtime.fallback.enabled !== false,
@@ -631,6 +641,19 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         backgroundTaskConcurrency.migrateTask(sessionID, model),
       runtime.fallback.initialRetryDelayMs,
       runtime.fallback.retryDelayMs,
+      backgroundFallbackHandoff,
+      // Generation fence captured BEFORE any await in the fallback
+      // preparation, and ONLY for confirmed BACKGROUND children:
+      // undefined for foreground/unmanaged sessions means "observation
+      // handoff not applicable" — never a wildcard — so a stale-
+      // generation rejection can be distinguished from a legitimate
+      // foreground fallback.
+      (sessionID) => {
+        const record = backgroundJobCoordinator.get(sessionID);
+        return record?.state === 'running' && record.background === true
+          ? record.generation
+          : undefined;
+      },
     );
 
     deepworkCommandHook = createDeepworkCommandHook();

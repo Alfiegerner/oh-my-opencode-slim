@@ -18,6 +18,7 @@
  */
 
 import type { PluginInput } from '@opencode-ai/plugin';
+import { responseError } from '../../utils/child-transcript';
 import { isRecord } from '../../utils/guards';
 import { createInternalAgentTextPart } from '../../utils/internal-initiator';
 import { log } from '../../utils/logger';
@@ -338,6 +339,37 @@ export class ForegroundFallbackManager {
     sessionID: string,
     model: string,
   ) => void;
+  /** sessionID + transcript baseline + the board generation captured
+   *  BEFORE the admission await, notified when a fallback re-prompt was
+   *  admitted for a background child. The host's native task notifier is
+   *  bound to the original background job and does not re-arm for the
+   *  re-prompted execution, so without this transfer nobody observes the
+   *  substituted run's transcript — the quiescent stop-confirmation then
+   *  publishes a false `stopped` even though the fallback's final answer
+   *  is already persisted (false-stop incident). The pre-await generation
+   *  fences relaunches: a generation change during the admission must not
+   *  enroll the new run under the stale attempt's baseline. */
+  private readonly backgroundFallbackHandoff?: {
+    prepare: (
+      sessionID: string,
+      preparedGeneration: number | undefined,
+      baselineMessageID: string | undefined,
+    ) => boolean;
+    admit: (sessionID: string, preparedGeneration: number | undefined) => void;
+    reject: (sessionID: string, preparedGeneration: number | undefined) => void;
+    settleUnresolved: (
+      sessionID: string,
+      preparedGeneration: number | undefined,
+    ) => void;
+  };
+  /** Synchronous board read returning the tracked generation for a
+   *  confirmed BACKGROUND child only — undefined for foreground or
+   *  unmanaged sessions (that undefined means "handoff not
+   *  applicable", never a wildcard). Captured before ANY await in the
+   *  fallback preparation. */
+  private readonly readBackgroundGeneration?: (
+    sessionID: string,
+  ) => number | undefined;
 
   /** Exposed for task-session-manager: prevents idle reconciliation
    *  while a fallback abort/re-prompt is in flight for this session. */
@@ -402,8 +434,39 @@ export class ForegroundFallbackManager {
     private readonly initialRetryDelayMs: number = 0,
     /** Delay between consecutive fallback attempts. */
     private readonly retryDelayMs: number = 500,
+    /** Terminal-observation handoff for background children: prepare()
+     *  arms the stop-gate deferral BEFORE the admission await (with the
+     *  baseline from the same transcript read that produced the replay);
+     *  admit() converts it into a tracked run once the host accepts the
+     *  re-prompt; reject() withdraws it on any non-admitted outcome. */
+    backgroundFallbackHandoff?: {
+      prepare: (
+        sessionID: string,
+        preparedGeneration: number | undefined,
+        baselineMessageID: string | undefined,
+      ) => boolean;
+      admit: (
+        sessionID: string,
+        preparedGeneration: number | undefined,
+      ) => void;
+      reject: (
+        sessionID: string,
+        preparedGeneration: number | undefined,
+      ) => void;
+      settleUnresolved: (
+        sessionID: string,
+        preparedGeneration: number | undefined,
+      ) => void;
+    },
+    /** Synchronous board read returning the tracked generation for a
+     *  confirmed BACKGROUND child only (undefined = foreground or
+     *  unmanaged — the handoff is not applicable, never a wildcard).
+     *  Captured before ANY await in the fallback preparation. */
+    readBackgroundGeneration?: (sessionID: string) => number | undefined,
   ) {
     this.onSessionModelChanged = onSessionModelChanged;
+    this.backgroundFallbackHandoff = backgroundFallbackHandoff;
+    this.readBackgroundGeneration = readBackgroundGeneration;
     if (coordinator) {
       coordinator.onSessionDeleted((id) => {
         this.sessionModel.delete(id);
@@ -888,6 +951,14 @@ export class ForegroundFallbackManager {
       }
 
       // Retrieve the last user message to re-submit with the fallback model.
+      // Fence captured BEFORE any await in the preparation: a board
+      // relaunch during the transcript read or the admission await must
+      // not enroll the new generation under this (stale) attempt's
+      // baseline. undefined = not a tracked background child
+      // (foreground/untracked) → the handoff is a no-op, never a
+      // wildcard.
+      const preparedGeneration = this.readBackgroundGeneration?.(sessionID);
+
       const result = await session.messages({
         path: { id: sessionID },
       });
@@ -951,38 +1022,127 @@ export class ForegroundFallbackManager {
       };
 
       let promptResult: unknown;
+      // Arm the observation handoff BEFORE the admission await: while
+      // promptAsync is pending the stop gate defers terminal
+      // publication — the re-prompted result may already be persisted
+      // but has no delivery owner yet. Baseline = trailing message WITH
+      // a string id from the transcript read that produced the replay,
+      // so the substituted run's answer is always post-baseline.
+      const baselineMessageID = [...messages]
+        .reverse()
+        .find(
+          (m) =>
+            isRecord(m) &&
+            typeof (m as { info?: { id?: unknown } }).info?.id === 'string',
+        ) as { info: { id: string } } | undefined;
+      const handoffArmed =
+        this.backgroundFallbackHandoff?.prepare(
+          sessionID,
+          preparedGeneration,
+          baselineMessageID?.info?.id,
+        ) ?? false;
+      // Distinguish "not applicable" (foreground or unmanaged session —
+      // preparedGeneration undefined, the fallback proceeds) from "was
+      // a confirmed background child whose preparation lost validity"
+      // (generation changed during the transcript read): the replay
+      // prompt and baseline are stale for an execution that no longer
+      // exists — do NOT send them.
+      if (preparedGeneration !== undefined && !handoffArmed) {
+        log(
+          '[foreground-fallback] background child superseded during preparation; replay aborted',
+          { sessionID, preparedGeneration },
+        );
+        return;
+      }
+      const withdrawHandoff = (): void => {
+        if (handoffArmed) {
+          this.backgroundFallbackHandoff?.reject(sessionID, preparedGeneration);
+        }
+      };
+      const settleUnresolvedHandoff = (): void => {
+        if (handoffArmed) {
+          this.backgroundFallbackHandoff?.settleUnresolved(
+            sessionID,
+            preparedGeneration,
+          );
+        }
+      };
       try {
         promptResult = await promptAsync(promptBody);
       } catch (promptErr) {
         if (isSwitchModelUnavailableError(promptErr)) {
-          // Not a busy session — the host cannot switch models at all, so
-          // aborting and retrying cannot help (same missing capability on
-          // every attempt). Surface the real cause via the outer handler.
+          // Explicit typed refusal: the host cannot switch models at
+          // all, so aborting and retrying cannot help (same missing
+          // capability on every attempt). Nothing was admitted.
+          withdrawHandoff();
           throw promptErr;
         }
         log('[foreground-fallback] promptAsync on busy session, aborting', {
           sessionID,
         });
-        await abortSessionWithTimeout(getClient(this.input), sessionID);
+        try {
+          await abortSessionWithTimeout(getClient(this.input), sessionID);
+        } catch (abortErr) {
+          // Unknown outcome: the abort transport failed — the admission
+          // state cannot be proven either way, so the prepared ownership
+          // CONVERTS into a tracked run instead of being dropped.
+          settleUnresolvedHandoff();
+          throw abortErr;
+        }
         await new Promise((r) => setTimeout(r, REPROMPT_DELAY_MS));
-        promptResult = await promptAsync(promptBody);
+        try {
+          promptResult = await promptAsync(promptBody);
+        } catch (retryErr) {
+          // Transport failed without a response: the host may still
+          // have accepted the replay — convert, never drop.
+          settleUnresolvedHandoff();
+          throw retryErr;
+        }
       }
 
-      // v2 shim truthfulness: when the replay was delivered on the CURRENT
-      // model (session.switchModel failed mid-replay, `switched: false`),
-      // the switch claim must not be recorded — sessionModel feeds chain
-      // descent and onSessionModelChanged migrates provider accounting;
-      // both would lie. v1 results carry no `switched` key and keep the
-      // claim (v1 parity).
-      if (isRecord(promptResult) && promptResult.switched === false) {
+      // SDK envelopes can resolve (not reject) with `{ error }` — an
+      // unresolved admission must not be treated as an accepted switch:
+      // state migration and observation transfer only happen after the
+      // same error-envelope contract the other SDK call sites apply.
+      if (isRecord(promptResult) && responseError(promptResult) !== undefined) {
+        log(
+          '[foreground-fallback] fallback re-prompt rejected by host error envelope',
+          {
+            sessionID,
+            agentName,
+            intended: nextModel,
+          },
+        );
+        withdrawHandoff();
+        return;
+      }
+
+      // v2 shim: `switched: false` means the replay WAS DELIVERED on
+      // the current model — the work is admitted, so the observation
+      // handoff is kept (delivery needs an owner); only the model-switch
+      // CLAIM is suppressed (sessionModel feeds chain descent and
+      // onSessionModelChanged migrates provider accounting; both would
+      // lie). Prompt admission and switch confirmation are two
+      // different facts.
+      const deliveredWithoutSwitch =
+        isRecord(promptResult) && promptResult.switched === false;
+      if (deliveredWithoutSwitch) {
         log(
           '[foreground-fallback] fallback prompt delivered on the current model (model switch failed)',
           { sessionID, agentName, from: currentModel, intended: nextModel },
         );
-        return;
+      } else {
+        this.sessionModel.set(sessionID, nextModel);
+        this.onSessionModelChanged?.(sessionID, nextModel);
       }
-      this.sessionModel.set(sessionID, nextModel);
-      this.onSessionModelChanged?.(sessionID, nextModel);
+      // Admission accepted (with or without the switch): convert the
+      // prepared handoff into a tracked run (register + immediate
+      // probe) so the substituted run's result is observed and
+      // delivered to the parent.
+      if (handoffArmed) {
+        this.backgroundFallbackHandoff?.admit(sessionID, preparedGeneration);
+      }
+      if (deliveredWithoutSwitch) return;
       log('[foreground-fallback] switched to fallback model', {
         sessionID,
         agentName,

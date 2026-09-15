@@ -245,7 +245,14 @@ async function verifyQuiescentSession(
       break;
     }
     lastStatus = status.status;
-    const quiescent = status.status === 'idle';
+    // Activity-map contract (verified on the host core): entries are
+    // REMOVED when a session goes idle, so a valid status map without an
+    // entry for this session is quiescence evidence — not a failed
+    // lookup. Explicit busy/retry entries and real failures (lookup
+    // error, malformed entry) still refuse to confirm.
+    const quiescent =
+      status.status === 'idle' ||
+      (status.status === undefined && status.source === 'missing-from-map');
     if (!quiescent) {
       stableStoppedSince = undefined;
       await delay(retryIntervalMs);

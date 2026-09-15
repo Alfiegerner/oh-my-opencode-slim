@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { BackgroundJobBoard } from '../../utils';
 import { buildPluginInput } from '../../v2/client-shim';
 import { createRuntimeStatusReconciler } from './runtime-status-reconciliation';
+import { createStopEvidenceGate } from './stop-confirmation';
 
 function createReconciler(
   status: () => Promise<unknown>,
@@ -685,5 +686,85 @@ describe('runtime status reconciliation', () => {
       statusUncertain: false,
     });
     reconciler.dispose();
+  });
+
+  test('a hung transcript read on one job does not stall confirmation of the rest', async () => {
+    const board = new BackgroundJobBoard();
+    const contextFilesForPrompt = mock(() => []);
+    const prune = mock(() => {});
+    const hung = board.registerLaunch({
+      taskID: 'child-hung',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      description: 'hung read',
+      now: 0,
+    });
+    const other = board.registerLaunch({
+      taskID: 'child-other',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      description: 'other',
+      now: 0,
+    });
+    board.noteStopConfirmation('child-hung', 1, hung.generation);
+    board.noteStopConfirmation('child-other', 1, other.generation);
+    const gate = createStopEvidenceGate({
+      backgroundJobBoard: board,
+      readTimeoutMs: 30,
+      readTerminalEvidence: async (taskID) => {
+        if (taskID === 'child-hung') return new Promise(() => {});
+        return {
+          data: [
+            { info: { id: 'm1', role: 'user' }, parts: [] },
+            {
+              info: {
+                id: 'm2',
+                role: 'assistant',
+                finish: 'stop',
+                time: { completed: 1 },
+              },
+              parts: [{ type: 'text', text: 'other answer' }],
+            },
+          ],
+        };
+      },
+      baselineFor: (taskID) => (taskID === 'child-other' ? 'm1' : undefined),
+    });
+    const reconciler = createRuntimeStatusReconciler({
+      input: {
+        directory: '/test/project',
+        client: {
+          session: {
+            status: async () => ({
+              data: {
+                'child-hung': { type: 'idle' },
+                'child-other': { type: 'idle' },
+              },
+            }),
+          },
+        },
+      } as never,
+      backgroundJobBoard: board,
+      stopConfirmationGraceMs: 0,
+      taskContextTracker: {
+        pendingManagedTaskIds: new Set(['child-hung', 'child-other']),
+        contextFilesForPrompt,
+        prune,
+      },
+      stopEvidenceGate: gate,
+    });
+
+    const settled = await Promise.race([
+      reconciler.reconcile().then(() => 'done'),
+      new Promise((resolve) => setTimeout(() => resolve('timeout'), 400)),
+    ]);
+    expect(settled).toBe('done');
+    expect(board.get('child-other')).toMatchObject({
+      state: 'completed',
+      resultSummary: 'other answer',
+    });
+    expect(board.get('child-hung')).toMatchObject({ state: 'running' });
+    reconciler.dispose();
+    gate.dispose();
   });
 });

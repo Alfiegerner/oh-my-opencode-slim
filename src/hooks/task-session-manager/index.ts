@@ -45,6 +45,7 @@ import {
 } from './pending-call-tracker';
 import type { RevivedRunTracker } from './revived-run-tracker';
 import { createRuntimeStatusReconciler } from './runtime-status-reconciliation';
+import { createStopEvidenceGate } from './stop-confirmation';
 import { createTaskContextTracker } from './task-context-tracker';
 import {
   handleToolExecuteAfter,
@@ -258,6 +259,27 @@ export function createTaskSessionManagerHook(
   const rehydrateState = getBackgroundJobLifecycleLedger(backgroundJobBoard);
   const rehydrateTombstones = rehydrateState.tombstones;
 
+  // Transcript-backed stop gate (false-stop incident): shared by the
+  // quiescent stop-confirmation timer and the periodic runtime-status
+  // reconciler so neither can publish `stopped` while the child's
+  // transcript already holds the terminal result. Unknown reads never
+  // terminate into stopped; the #1157 guarantee lives on a valid
+  // transcript that provably holds no result for this run.
+  const stopEvidenceGate = createStopEvidenceGate({
+    backgroundJobBoard,
+    readTerminalEvidence: async (taskID) =>
+      fetchChildTranscript(getClient(_ctx), taskID, _ctx.directory).catch(
+        () => undefined,
+      ),
+    baselineFor: (taskID, generation) =>
+      options.revivedRunTracker?.baselineFor(taskID, generation),
+    observationRevisionFor: (taskID, generation) =>
+      options.revivedRunTracker?.revisionFor(taskID, generation),
+    isObservationPending: (taskID, generation) =>
+      options.revivedRunTracker?.isObservationPending(taskID, generation) ??
+      false,
+  });
+
   const rememberDeletedSession = (sessionID: string): void => {
     const remember = (taskID: string): void => {
       recordBackgroundJobSuppression(backgroundJobBoard, taskID);
@@ -447,6 +469,7 @@ export function createTaskSessionManagerHook(
     isCurrentIdleSessionToken: (s, t) => isCurrentIdleSessionToken(s, t),
     taskContextTracker,
     revivedRunTracker: options.revivedRunTracker,
+    stopEvidenceGate,
     // v2: no live session-status map exists, but Session.Info.outcome
     // publishes the terminal transition — use it to settle quiescent jobs
     // to their accurate terminal state (v1 hosts keep the status-map
@@ -486,6 +509,7 @@ export function createTaskSessionManagerHook(
     backgroundJobBoard,
     delayMs: options.runtimeStatusReconcileDelayMs,
     taskContextTracker,
+    stopEvidenceGate,
   });
 
   const idleSessionTokens = createIdleSessionTokens({
@@ -786,6 +810,7 @@ export function createTaskSessionManagerHook(
 
       if (input.event.type === 'server.instance.disposed') {
         runtimeStatusReconciler.dispose();
+        stopEvidenceGate.dispose();
       }
       return handleEvent(input, {
         inputWaits,

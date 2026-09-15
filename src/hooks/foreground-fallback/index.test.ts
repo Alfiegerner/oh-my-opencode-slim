@@ -719,6 +719,226 @@ describe('ForegroundFallbackManager session.error', () => {
     expect(call[0].body.parts[0]?.text).toBe('real prompt');
   });
 
+  function handoffMock() {
+    const calls = {
+      prepare: [] as Array<[string, number | undefined, string | undefined]>,
+      admit: [] as Array<[string, number | undefined]>,
+      reject: [] as Array<[string, number | undefined]>,
+      settleUnresolved: [] as Array<[string, number | undefined]>,
+    };
+    return {
+      calls,
+      handoff: {
+        prepare: (
+          sessionID: string,
+          generation: number | undefined,
+          baseline: string | undefined,
+        ) => {
+          calls.prepare.push([sessionID, generation, baseline]);
+          return true;
+        },
+        admit: (sessionID: string, generation: number | undefined) => {
+          calls.admit.push([sessionID, generation]);
+        },
+        reject: (sessionID: string, generation: number | undefined) => {
+          calls.reject.push([sessionID, generation]);
+        },
+        settleUnresolved: (
+          sessionID: string,
+          generation: number | undefined,
+        ) => {
+          calls.settleUnresolved.push([sessionID, generation]);
+        },
+      },
+    };
+  }
+
+  /** Common handoff-scenario runner: builds the mock client, the
+   * manager (with optional handoff/reader/modelChanged) and fires the
+   * message.updated → session.error sequence that triggers a fallback
+   * attempt on 'sess-1'. */
+  async function runFallbackScenario(options?: {
+    promptAsyncImpl?: () => Promise<unknown>;
+    abortImpl?: () => Promise<unknown>;
+    messagesData?: unknown[];
+    handoff?: ReturnType<typeof handoffMock>['handoff'];
+    readBackgroundGeneration?: (sessionID: string) => number | undefined;
+    modelChanged?: () => void;
+  }) {
+    ({ mocks } = createMockClient({
+      promptAsyncImpl: options?.promptAsyncImpl,
+      abortImpl: options?.abortImpl,
+      messagesData: options?.messagesData,
+    }));
+    mgr = new ForegroundFallbackManager(
+      makeChains(),
+      true,
+      { directory: '/test' } as any,
+      3,
+      undefined,
+      options?.modelChanged,
+      0,
+      500,
+      options?.handoff,
+      options?.readBackgroundGeneration,
+    );
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID: 'sess-1',
+          providerID: 'anthropic',
+          modelID: 'claude-opus-4-5',
+          role: 'assistant',
+        },
+      },
+    });
+    await mgr.handleEvent({
+      type: 'session.error',
+      properties: {
+        sessionID: 'sess-1',
+        error: { message: 'Rate limit exceeded' },
+      },
+    });
+    return mocks;
+  }
+
+  const taskPrompt = [
+    {
+      info: { id: 'm1', role: 'user' },
+      parts: [{ type: 'text', text: 'task prompt' }],
+    },
+  ];
+
+  test('arms the handoff before the admission await and admits after acceptance', async () => {
+    // False-stop incident: for a background child the fallback PREPARES
+    // the observation handoff before promptAsync is awaited (stop gate
+    // defers terminal publication) and ADMITS it once the host accepts
+    // the re-prompt — baseline = trailing message with a string id from
+    // the same read that produced the replay.
+    const { calls, handoff } = handoffMock();
+    const mocks = await runFallbackScenario({
+      handoff,
+      messagesData: [
+        ...taskPrompt,
+        { info: { id: 'm2', role: 'assistant' }, parts: [] },
+      ],
+    });
+
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(calls.prepare).toEqual([['sess-1', undefined, 'm2']]);
+    expect(calls.admit).toEqual([['sess-1', undefined]]);
+    expect(calls.reject).toEqual([]);
+  });
+
+  test('rejects the handoff when promptAsync resolves with an error envelope', async () => {
+    const { calls, handoff } = handoffMock();
+    const mocks = await runFallbackScenario({
+      handoff,
+      messagesData: taskPrompt,
+      promptAsyncImpl: async () => ({
+        error: { message: 'admission refused' },
+      }),
+    });
+
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(calls.prepare).toHaveLength(1);
+    expect(calls.admit).toEqual([]);
+    expect(calls.reject).toHaveLength(1);
+  });
+
+  test('converts the handoff to a owner when every promptAsync attempt rejects', async () => {
+    // A transport failure without a response does NOT prove the host
+    // refused — the replay may have been accepted. The prepared
+    // ownership converts into a tracked run instead of being dropped.
+    const { calls, handoff } = handoffMock();
+    await runFallbackScenario({
+      handoff,
+      messagesData: taskPrompt,
+      promptAsyncImpl: async () => {
+        throw new Error('transport failed');
+      },
+      abortImpl: async () => {
+        throw new Error('abort also failed');
+      },
+    });
+
+    expect(calls.prepare).toHaveLength(1);
+    expect(calls.admit).toEqual([]);
+    expect(calls.reject).toEqual([]);
+    expect(calls.settleUnresolved).toHaveLength(1);
+  });
+
+  test('switched:false still delivers — the handoff is admitted without the switch claim', async () => {
+    // The v2 shim runs s.prompt even when switchModel fails;
+    // `switched: false` means the replay WAS delivered on the current
+    // model. Admission and switch confirmation are different facts:
+    // the delivery keeps its owner; only sessionModel stays.
+    const { calls, handoff } = handoffMock();
+    const modelChanged = mock(() => {});
+    const mocks = await runFallbackScenario({
+      handoff,
+      modelChanged,
+      messagesData: taskPrompt,
+      promptAsyncImpl: async () => ({ switched: false }),
+    });
+
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    expect(calls.admit).toHaveLength(1);
+    expect(calls.reject).toEqual([]);
+    expect(calls.settleUnresolved).toEqual([]);
+    // The switch claim is suppressed: no model migration.
+    expect(modelChanged).not.toHaveBeenCalled();
+  });
+
+  test('a stale background generation during the transcript read aborts the replay', async () => {
+    // The reader confirmed a BACKGROUND child, but the preparation lost
+    // validity (generation changed during the read) — sending the stale
+    // replay/baseline to a session that belongs to another execution
+    // must not happen.
+    const calls = {
+      prepare: [] as Array<[string, number | undefined, string | undefined]>,
+    };
+    const mocks = await runFallbackScenario({
+      messagesData: taskPrompt,
+      handoff: {
+        prepare: (
+          sessionID: string,
+          generation: number | undefined,
+          baseline: string | undefined,
+        ) => {
+          calls.prepare.push([sessionID, generation, baseline]);
+          return false; // superseded between the read and the arming
+        },
+        admit: () => {},
+        reject: () => {},
+        settleUnresolved: () => {},
+      },
+      readBackgroundGeneration: () => 7, // confirmed background child
+    });
+
+    expect(calls.prepare).toEqual([['sess-1', 7, 'm1']]);
+    expect(mocks.promptAsync).not.toHaveBeenCalled();
+  });
+
+  test('passes the generation captured before any await', async () => {
+    let generation = 7;
+    const { calls, handoff } = handoffMock();
+    await runFallbackScenario({
+      handoff,
+      messagesData: taskPrompt,
+      readBackgroundGeneration: () => generation,
+      promptAsyncImpl: async () => {
+        generation = 8;
+        return {};
+      },
+    });
+
+    expect(calls.prepare).toEqual([['sess-1', 7, 'm1']]);
+    expect(calls.admit).toEqual([['sess-1', 7]]);
+    expect(generation).toBe(8);
+  });
+
   test('replays the last user message from v2-shaped session.messages data', async () => {
     // OpenCode 1.18+ session.messages() returns v2 SessionMessage objects
     // ({ type, text }) instead of the v1 { info, parts } shape. The fallback
