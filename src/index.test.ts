@@ -7,7 +7,7 @@ import pluginModuleDefault, {
   sessionManagerMultiplexerConfig,
   shouldEnableMultiplexer,
 } from './index';
-import { readTuiSnapshot } from './tui-state';
+import { readTuiSnapshot, snapshotSectionsEqual } from './tui-state';
 import { createInternalAgentTextPart } from './utils/internal-initiator';
 
 function createPluginClient(
@@ -729,6 +729,36 @@ describe('plugin TUI agent activity', () => {
     });
   });
 
+  test('message.part.delta does not write TUI activity or session model', async () => {
+    await hooks?.['chat.message']?.(
+      {
+        sessionID: 'stream-1',
+        agent: 'orchestrator',
+        model: { providerID: 'openai', modelID: 'gpt-4o' },
+      } as never,
+      {} as never,
+    );
+    const before = readTuiSnapshot(projectDir);
+
+    await hooks?.event?.({
+      event: {
+        type: 'message.part.delta',
+        properties: {
+          sessionID: 'stream-1',
+          messageID: 'msg-1',
+          partID: 'part-1',
+          field: 'text',
+          delta: 'a'.repeat(200),
+        },
+      },
+    } as never);
+
+    const after = readTuiSnapshot(projectDir);
+    expect(after.activeSessions).toEqual(before.activeSessions);
+    expect(after.agentModels).toEqual(before.agentModels);
+    expect(snapshotSectionsEqual(after, before)).toBe(true);
+  });
+
   test('chat.message model is published to sessionDetails when the session is already busy', async () => {
     await busy('ora-child');
     await hooks?.['chat.message']?.(
@@ -892,35 +922,6 @@ describe('plugin TUI agent activity', () => {
     );
   });
 
-  test('message.part.delta does not write TUI activity or session model', async () => {
-    await hooks?.['chat.message']?.(
-      {
-        sessionID: 'stream-1',
-        agent: 'orchestrator',
-        model: { providerID: 'openai', modelID: 'gpt-4o' },
-      } as never,
-      {} as never,
-    );
-    const before = readTuiSnapshot(projectDir);
-
-    await hooks?.event?.({
-      event: {
-        type: 'message.part.delta',
-        properties: {
-          sessionID: 'stream-1',
-          messageID: 'msg-1',
-          partID: 'part-1',
-          field: 'text',
-          delta: 'a'.repeat(200),
-        },
-      },
-    } as never);
-
-    const after = readTuiSnapshot(projectDir);
-    expect(after.activeSessions).toEqual(before.activeSessions);
-    expect(after.agentModels).toEqual(before.agentModels);
-    expect(after.updatedAt).toBe(before.updatedAt);
-  });
 });
 
 describe('background task admission model resolution', () => {
