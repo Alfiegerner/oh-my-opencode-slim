@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import type { PluginInput } from '@opencode-ai/plugin';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createAgents } from '../agents';
 import { createFilterAvailableSkillsHook } from '../hooks/filter-available-skills';
-import type { PluginInput } from '@opencode-ai/plugin';
 import { RuntimeConfig } from './runtime';
 import { PluginConfigSchema } from './schema';
 
