@@ -545,7 +545,9 @@ export class RuntimeConfig {
 
   private projectLocalSkillNames(): readonly string[] {
     if (this.localSkillNamesCache === undefined) {
-      this.localSkillNamesCache = discoverProjectLocalSkillNames(this.directory);
+      this.localSkillNamesCache = discoverProjectLocalSkillNames(
+        this.directory,
+      );
     }
     return this.localSkillNamesCache;
   }
