@@ -51,11 +51,18 @@ afterEach(() => {
 describe('discoverProjectLocalSkillNames', () => {
   test('discovers nested skills by frontmatter name and ignores invalid files', () => {
     const projectDir = makeProject();
-    writeSkill(projectDir, 'folder-name-does-not-matter', 'project-architecture');
+    writeSkill(
+      projectDir,
+      'folder-name-does-not-matter',
+      'project-architecture',
+    );
     writeSkill(projectDir, 'nested/testing', 'project-testing');
     const invalidDir = path.join(projectDir, '.opencode', 'skills', 'invalid');
     fs.mkdirSync(invalidDir, { recursive: true });
-    fs.writeFileSync(path.join(invalidDir, 'SKILL.md'), '# missing frontmatter name');
+    fs.writeFileSync(
+      path.join(invalidDir, 'SKILL.md'),
+      '# missing frontmatter name',
+    );
 
     expect(discoverProjectLocalSkillNames(projectDir)).toEqual([
       'project-architecture',
