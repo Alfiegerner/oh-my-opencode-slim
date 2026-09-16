@@ -13,7 +13,24 @@ import { parseFrontmatter } from '../utils/frontmatter';
 export function discoverProjectLocalSkillNames(
   projectDirectory: string,
 ): string[] {
-  const root = path.join(projectDirectory, '.opencode', 'skills');
+  const configuredRoot = path.join(projectDirectory, '.opencode', 'skills');
+  let root: string;
+
+  try {
+    const canonicalProject = fs.realpathSync(projectDirectory);
+    root = fs.realpathSync(configuredRoot);
+    const expectedRoot = path.join(canonicalProject, '.opencode', 'skills');
+
+    // Keep the opt-in strictly project-local. In particular, do not let a
+    // symlinked `.opencode` or `skills` directory turn this into discovery of
+    // an external/global skill tree.
+    if (root !== expectedRoot) {
+      return [];
+    }
+  } catch {
+    return [];
+  }
+
   const names = new Set<string>();
 
   const visit = (directory: string): void => {
