@@ -46,6 +46,59 @@ export function getAcpAgentNames(config: PluginConfig | undefined): string[] {
   return Object.keys(config?.acpAgents ?? {});
 }
 
+const SKILL_DIRECTIVE_KEYS = [
+  'skills',
+  'skills_add',
+  'skills_remove',
+  'skills_include_local',
+] as const satisfies readonly (keyof AgentOverrideConfig)[];
+
+/**
+ * Preserve skill directives carried by a legacy alias when a merged config
+ * also contains the canonical agent key. Canonical values remain
+ * authoritative when both records explicitly provide the same field.
+ *
+ * Layered runtime config can legitimately produce both records (for example,
+ * a preset using `explore` over root config using `explorer`). Downstream
+ * lookup is canonical-first, so without this reconciliation the alias's skill
+ * directives would otherwise be silently dropped.
+ */
+function reconcileAliasSkillDirectives(
+  agents: Record<string, AgentOverrideConfig>,
+): Record<string, AgentOverrideConfig> {
+  let result = agents;
+
+  for (const [alias, canonical] of Object.entries(AGENT_ALIASES)) {
+    const aliasOverride = agents[alias];
+    const canonicalOverride = result[canonical];
+    if (!aliasOverride || !canonicalOverride) {
+      continue;
+    }
+
+    let mergedCanonical = canonicalOverride;
+    for (const key of SKILL_DIRECTIVE_KEYS) {
+      if (
+        mergedCanonical[key] === undefined &&
+        aliasOverride[key] !== undefined
+      ) {
+        if (mergedCanonical === canonicalOverride) {
+          mergedCanonical = { ...canonicalOverride };
+        }
+        Object.assign(mergedCanonical, { [key]: aliasOverride[key] });
+      }
+    }
+
+    if (mergedCanonical !== canonicalOverride) {
+      if (result === agents) {
+        result = { ...agents };
+      }
+      result[canonical] = mergedCanonical;
+    }
+  }
+
+  return result;
+}
+
 /**
  * Fold per-agent skill directives (`skills_add` / `skills_remove` /
  * `skills_include_local`) into the effective `skills` list so downstream
@@ -57,9 +110,10 @@ export function normalizeAgentSkillDirectives(
   agents: Record<string, AgentOverrideConfig>,
   localSkillNames: readonly string[] = [],
 ): Record<string, AgentOverrideConfig> {
-  let changed = false;
+  const reconciled = reconcileAliasSkillDirectives(agents);
+  let changed = reconciled !== agents;
   const result: Record<string, AgentOverrideConfig> = {};
-  for (const [name, override] of Object.entries(agents)) {
+  for (const [name, override] of Object.entries(reconciled)) {
     if (
       override.skills_add === undefined &&
       override.skills_remove === undefined &&
