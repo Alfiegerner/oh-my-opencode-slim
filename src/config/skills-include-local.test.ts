@@ -73,6 +73,28 @@ describe('discoverProjectLocalSkillNames', () => {
   test('returns an empty list when the project has no local skills directory', () => {
     expect(discoverProjectLocalSkillNames(makeProject())).toEqual([]);
   });
+
+  test('does not follow a project skills root that resolves outside the project', () => {
+    const projectDir = makeProject();
+    const externalDir = makeProject();
+    const externalSkillsRoot = path.join(externalDir, 'shared-skills');
+    const externalSkillDir = path.join(externalSkillsRoot, 'external-skill');
+    fs.mkdirSync(externalSkillDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(externalSkillDir, 'SKILL.md'),
+      '---\nname: external-skill\ndescription: external\n---\n',
+    );
+
+    const opencodeDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(opencodeDir, { recursive: true });
+    fs.symlinkSync(
+      externalSkillsRoot,
+      path.join(opencodeDir, 'skills'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    expect(discoverProjectLocalSkillNames(projectDir)).toEqual([]);
+  });
 });
 
 describe('skills_include_local', () => {
@@ -123,6 +145,33 @@ describe('skills_include_local', () => {
 
     expect(effective).toContain('project-architecture');
     expect(effective).not.toContain('project-testing');
+  });
+
+  test('preserves local-skill grants from a legacy alias across canonical config layers', () => {
+    const projectDir = makeProject();
+    writeSkill(projectDir, 'project-testing', 'project-testing');
+
+    const config = PluginConfigSchema.parse({
+      preset: 'local-project',
+      presets: {
+        'local-project': {
+          explore: {
+            skills_include_local: true,
+          },
+        },
+      },
+      agents: {
+        explorer: {
+          skills: ['codemap'],
+        },
+      },
+    });
+
+    RuntimeConfig.init(projectDir, config);
+    const effective = RuntimeConfig.get(projectDir).agent('explorer')?.skills;
+
+    expect(effective).toContain('codemap');
+    expect(effective).toContain('project-testing');
   });
 
   test('available-skills filtering keeps automatically included local skills', async () => {
