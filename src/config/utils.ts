@@ -47,36 +47,44 @@ export function getAcpAgentNames(config: PluginConfig | undefined): string[] {
 }
 
 /**
- * Fold per-agent skill directives (`skills_add` / `skills_remove`) into the
- * effective `skills` list so downstream consumers (agent factories, hooks)
- * only ever see a plain `skills` array. Entries without directives keep
- * their original reference; the input record is returned unchanged when no
- * entry needs folding.
+ * Fold per-agent skill directives (`skills_add` / `skills_remove` /
+ * `skills_include_local`) into the effective `skills` list so downstream
+ * consumers (agent factories, hooks) only ever see a plain `skills` array.
+ * Entries without directives keep their original reference; the input record
+ * is returned unchanged when no entry needs folding.
  */
 export function normalizeAgentSkillDirectives(
   agents: Record<string, AgentOverrideConfig>,
+  localSkillNames: readonly string[] = [],
 ): Record<string, AgentOverrideConfig> {
   let changed = false;
   const result: Record<string, AgentOverrideConfig> = {};
   for (const [name, override] of Object.entries(agents)) {
     if (
       override.skills_add === undefined &&
-      override.skills_remove === undefined
+      override.skills_remove === undefined &&
+      override.skills_include_local === undefined
     ) {
       result[name] = override;
       continue;
     }
+
     changed = true;
+    const additions =
+      override.skills_include_local === true
+        ? [...(override.skills_add ?? []), ...localSkillNames]
+        : override.skills_add;
     const effective = resolveEffectiveSkills(
       name,
       override.skills,
-      override.skills_add,
+      additions,
       override.skills_remove,
     );
     const {
       skills: _skills,
       skills_add: _skillsAdd,
       skills_remove: _skillsRemove,
+      skills_include_local: _skillsIncludeLocal,
       ...rest
     } = override;
     const entry: AgentOverrideConfig = { ...rest };

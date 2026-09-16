@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import type { PluginInput } from '@opencode-ai/plugin';
 import { createAgents } from '../agents';
 import { createFilterAvailableSkillsHook } from '../hooks/filter-available-skills';
+import { discoverProjectLocalSkillNames } from './project-skills';
 import { RuntimeConfig } from './runtime';
 import { PluginConfigSchema } from './schema';
 
@@ -47,6 +48,26 @@ afterEach(() => {
   }
 });
 
+describe('discoverProjectLocalSkillNames', () => {
+  test('discovers nested skills by frontmatter name and ignores invalid files', () => {
+    const projectDir = makeProject();
+    writeSkill(projectDir, 'folder-name-does-not-matter', 'project-architecture');
+    writeSkill(projectDir, 'nested/testing', 'project-testing');
+    const invalidDir = path.join(projectDir, '.opencode', 'skills', 'invalid');
+    fs.mkdirSync(invalidDir, { recursive: true });
+    fs.writeFileSync(path.join(invalidDir, 'SKILL.md'), '# missing frontmatter name');
+
+    expect(discoverProjectLocalSkillNames(projectDir)).toEqual([
+      'project-architecture',
+      'project-testing',
+    ]);
+  });
+
+  test('returns an empty list when the project has no local skills directory', () => {
+    expect(discoverProjectLocalSkillNames(makeProject())).toEqual([]);
+  });
+});
+
 describe('skills_include_local', () => {
   test('adds all project .opencode/skills entries to an agent effective skills', () => {
     const projectDir = makeProject();
@@ -78,6 +99,7 @@ describe('skills_include_local', () => {
 
   test('skills_remove still wins over an automatically included local skill', () => {
     const projectDir = makeProject();
+    writeSkill(projectDir, 'project-architecture', 'project-architecture');
     writeSkill(projectDir, 'project-testing', 'project-testing');
 
     const config = PluginConfigSchema.parse({
@@ -92,6 +114,7 @@ describe('skills_include_local', () => {
     RuntimeConfig.init(projectDir, config);
     const effective = RuntimeConfig.get(projectDir).agents().oracle?.skills;
 
+    expect(effective).toContain('project-architecture');
     expect(effective).not.toContain('project-testing');
   });
 
