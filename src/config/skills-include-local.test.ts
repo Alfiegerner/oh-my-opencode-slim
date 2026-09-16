@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import type { PluginInput } from '@opencode-ai/plugin';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import type { PluginInput } from '@opencode-ai/plugin';
 import { createAgents } from '../agents';
 import { createFilterAvailableSkillsHook } from '../hooks/filter-available-skills';
 import { RuntimeConfig } from './runtime';
@@ -11,12 +11,18 @@ import { PluginConfigSchema } from './schema';
 const tempDirs: string[] = [];
 
 function makeProject(): string {
-  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omo-local-skills-'));
+  const projectDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'omo-local-skills-'),
+  );
   tempDirs.push(projectDir);
   return projectDir;
 }
 
-function writeSkill(projectDir: string, relativeDir: string, name: string): void {
+function writeSkill(
+  projectDir: string,
+  relativeDir: string,
+  name: string,
+): void {
   const skillDir = path.join(projectDir, '.opencode', 'skills', relativeDir);
   fs.mkdirSync(skillDir, { recursive: true });
   fs.writeFileSync(
@@ -28,7 +34,8 @@ function writeSkill(projectDir: string, relativeDir: string, name: string): void
 function availableSkillsBlock(...names: string[]): string {
   return `<available_skills>\n${names
     .map(
-      (name) => `<skill>\n  <name>${name}</name>\n  <description>${name}</description>\n  <location>file:///tmp/${name}</location>\n</skill>`,
+      (name) =>
+        `<skill>\n  <name>${name}</name>\n  <description>${name}</description>\n  <location>file:///tmp/${name}</location>\n</skill>`,
     )
     .join('\n')}\n</available_skills>`;
 }
