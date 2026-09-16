@@ -36,8 +36,10 @@ export function discoverProjectLocalSkillNames(
       }
 
       try {
-        const content = fs.readFileSync(entryPath, 'utf-8').replace(/^\uFEFF/, '');
-        const name = parseFrontmatter(content).attributes.name?.trim();
+        const content = fs
+          .readFileSync(entryPath, 'utf-8')
+          .replace(/^\uFEFF/, '');
+        const name = parseFrontmatter(content)?.name?.trim();
         if (name) {
           names.add(name);
         }
