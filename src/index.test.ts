@@ -1723,6 +1723,32 @@ describe('system.transform orchestrator injection', () => {
     }
   });
 
+  test('collapses the v2.0.5 identity part spliced at system[1] after the orchestrator prompt', async () => {
+    // OpenCode v2.0.5 core splices a "# Your Model" identity part at
+    // system[1] (packages/core/src/plugin/identity.ts). The transform
+    // must keep appending the orchestrator prompt to system[0] and
+    // collapse deterministically regardless.
+    const hooks = await loadPluginWithOrchestratorSession();
+    try {
+      const system = [
+        'You are an agent powered by OpenCode.\n<env>Working directory: /tmp</env>',
+        '# Your Model\n- Name: GLM\n- Provider ID: zhipuai\n- Model ID: glm-5.3',
+      ];
+      await hooks['experimental.chat.system.transform']?.(
+        { sessionID: 'ses-orc', agent: 'orchestrator' } as never,
+        { system } as never,
+      );
+      expect(system).toHaveLength(1);
+      expect(system[0]).toContain('# Your Model');
+      const identityAt = (system[0] as string).indexOf('# Your Model');
+      const orchestratorAt = (system[0] as string).indexOf('<Role>');
+      expect(orchestratorAt).toBeGreaterThan(-1);
+      expect(identityAt).toBeGreaterThan(orchestratorAt);
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
   test('request-scoped agent overrides session tracking', async () => {
     const hooks = await loadPluginWithOrchestratorSession();
     try {

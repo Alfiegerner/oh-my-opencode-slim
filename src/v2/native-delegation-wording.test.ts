@@ -53,21 +53,24 @@ function orchestratorPromptFor(hostFlavor?: string): string {
 }
 
 describe('delegationVocabulary', () => {
-  test("v2 → { tool: 'subagent', agentParam: 'agent' }", () => {
+  test("v2 → { tool: 'subagent', agentParam: 'agent', modelParam: 'model' }", () => {
     expect(delegationVocabulary('v2')).toEqual({
       tool: 'subagent',
       agentParam: 'agent',
+      modelParam: 'model',
     });
   });
 
-  test("v1/default → { tool: 'task', agentParam: 'subagent_type' }", () => {
+  test("v1/default → { tool: 'task', agentParam: 'subagent_type', modelParam: undefined }", () => {
     expect(delegationVocabulary(undefined)).toEqual({
       tool: 'task',
       agentParam: 'subagent_type',
+      modelParam: undefined,
     });
     expect(delegationVocabulary('v1')).toEqual({
       tool: 'task',
       agentParam: 'subagent_type',
+      modelParam: undefined,
     });
   });
 });
@@ -87,6 +90,9 @@ describe('buildOrchestratorPrompt delegation vocabulary', () => {
     expect(prompt).toContain('cannot receive another `subagent` call');
     expect(prompt).toContain("in the subagent tool's `task_id` argument");
     expect(prompt).toContain('call subagent with `agent: "fixer"`');
+    expect(prompt).toContain(
+      'The subagent tool also accepts an optional `model` argument ("providerID/modelID")',
+    );
     expect(prompt).not.toContain('subagent_type');
     expect(prompt).not.toContain('task(');
   });
@@ -104,6 +110,7 @@ describe('buildOrchestratorPrompt delegation vocabulary', () => {
     expect(prompt).toContain('cannot receive another `task` call');
     expect(prompt).toContain("in the task tool's `task_id` argument");
     expect(prompt).toContain('call task with `subagent_type: "fixer"`');
+    expect(prompt).not.toContain('optional `model` argument');
   });
 
   test('explicit v1/unknown hostFlavor is byte-identical to no hostFlavor', () => {
@@ -121,6 +128,11 @@ describe('buildOrchestratorPrompt delegation vocabulary', () => {
   });
 });
 
+/** v2.0.5+ model-param guidance, appended at the two `vocab.tool` prompt
+ * sites (orchestrator base prompt + council block) when the host's
+ * subagent tool supports the optional `model` parameter. */
+const MODEL_PARAM_SENTENCE = ` The subagent tool also accepts an optional \`model\` argument ("providerID/modelID"). Only set it when the user explicitly asks for a specific model or variant; never guess the ID — look it up with the models tool first, filtering to your own provider.`;
+
 describe('createAgents council dispatch vocabulary', () => {
   test('v2 hostFlavor emits subagent(agent=...) dispatch instructions', () => {
     const prompt = orchestratorPromptFor('v2');
@@ -129,6 +141,7 @@ describe('createAgents council dispatch vocabulary', () => {
     expect(prompt).toContain("subagent(agent='councillor-alpha'");
     expect(prompt).toContain('in PARALLEL via subagent():');
     expect(prompt).toContain("subagent(agent='council'");
+    expect(prompt).toContain(MODEL_PARAM_SENTENCE);
     expect(prompt).not.toContain('subagent_type');
     expect(prompt).not.toContain('task(');
   });
@@ -140,11 +153,14 @@ describe('createAgents council dispatch vocabulary', () => {
     expect(prompt).toContain("task(subagent_type='councillor-alpha'");
     expect(prompt).toContain('in PARALLEL via task():');
     expect(prompt).toContain("task(subagent_type='council'");
+    expect(prompt).not.toContain(MODEL_PARAM_SENTENCE);
   });
 
   test('v2 and v1 prompts differ only by delegation vocabulary', () => {
     const v1 = orchestratorPromptFor();
-    const v2 = orchestratorPromptFor('v2');
+    // v2 additionally carries the model-param guidance sentence at the
+    // two vocab.tool sites; with it stripped, only vocabulary differs.
+    const v2 = orchestratorPromptFor('v2').replaceAll(MODEL_PARAM_SENTENCE, '');
     expect(v2).toBe(
       v1
         .replaceAll('subagent_type', 'agent')
