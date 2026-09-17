@@ -447,6 +447,7 @@ export function createBackgroundJobTerminalGate(options: {
     if (runtime.origin === 'session.idle') {
       value.idleCandidate = runtime;
       value.pendingRuntime = false;
+      value.retries = 0;
       return deferred(token);
     }
     value.pendingRuntime =
@@ -472,6 +473,10 @@ export function createBackgroundJobTerminalGate(options: {
       options.onRunning?.(record);
       return { kind: 'deferred', record };
     }
+    // Recovering runtime starts a fresh evidence budget. Repeated quiescent
+    // reads must not replenish it while transcript stabilization is pending.
+    if (runtime.kind === 'quiescent' && value.runtime?.kind !== 'quiescent')
+      value.retries = 0;
     value.runtime = runtime;
     if (runtime.kind === 'unknown') {
       if (runtime.retryAfter) {
@@ -485,7 +490,8 @@ export function createBackgroundJobTerminalGate(options: {
         );
       }
       value.episode += 1;
-      value.retries = 0;
+      // Unknown invalidates open evidence, but never replenishes retries.
+      // inspect accounts for the failed attempt, including missing APIs.
       value.quiescentSince = undefined;
       if (value.timer) clearTimeout(value.timer);
       value.timer = undefined;
@@ -647,6 +653,10 @@ export function createBackgroundJobTerminalGate(options: {
               readStartedAt: token.readStartedAt,
             });
           }
+          // As with session.status, our own unknown observation advances the
+          // episode. Continue with its token rather than losing the retry as stale.
+          token = capture(run);
+          if (!token) return { kind: 'stale' };
         }
       }
     }
@@ -654,11 +664,18 @@ export function createBackgroundJobTerminalGate(options: {
     const runtime = value.runtime;
     if (runtime?.kind === 'busy' || runtime?.kind === 'retry')
       return deferred(run);
-    if (!runtime || runtime.kind === 'unknown')
-      return deferred(
+    if (!runtime || runtime.kind === 'unknown') {
+      // Occupied readers already own an availability-driven continuation;
+      // they neither consume the diagnostic budget nor need a second timer.
+      if (runtime?.retryAfter) return deferred(run);
+      value.retries += 1;
+      return retry(
         run,
-        'Runtime observation unavailable; task termination is unconfirmed.',
+        value.retries > (options.maxEvidenceRetries ?? 3)
+          ? EVIDENCE_UNAVAILABLE_DIAGNOSTIC
+          : 'Runtime observation unavailable; task termination is unconfirmed.',
       );
+    }
     if (options.isObservationPending?.(run.taskID, run.generation))
       return retry(
         run,
@@ -815,6 +832,7 @@ export function createBackgroundJobTerminalGate(options: {
         origin?.taskID === run.taskID &&
         origin.generation === run.generation
       ) {
+        value.retries = 0;
         value.candidate = { signal, token };
         if (signal.kind === 'output' && signal.status.state === 'running')
           board.updateStatus({

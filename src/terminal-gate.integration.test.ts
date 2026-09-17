@@ -42,7 +42,11 @@ async function assembly(
     board: BackgroundJobCoordinator,
     gate: gateFactories.BackgroundJobTerminalGate,
   ) => void,
-  statusTimeoutMs?: number,
+  setup: {
+    statusTimeoutMs?: number;
+    statusAvailable?: boolean;
+    graceMs?: number;
+  } = {},
 ) {
   const env = { ...process.env };
   const directory = await mkdtemp('/tmp/slim-terminal-assembly-');
@@ -73,7 +77,7 @@ async function assembly(
   ).mockImplementation((options) => {
     runtime = originalRuntime({
       ...options,
-      statusTimeoutMs: statusTimeoutMs ?? options.statusTimeoutMs,
+      statusTimeoutMs: setup.statusTimeoutMs ?? options.statusTimeoutMs,
     });
     return runtime;
   });
@@ -83,7 +87,10 @@ async function assembly(
     'createBackgroundJobTerminalGate',
   ).mockImplementation((options) => {
     board = options.backgroundJobBoard as BackgroundJobCoordinator;
-    gate = originalGate(options);
+    gate = originalGate({
+      ...options,
+      graceMs: setup.graceMs ?? options.graceMs,
+    });
     return gate;
   });
   const originalHook = hookFactories.createTaskSessionManagerHook;
@@ -117,14 +124,24 @@ async function assembly(
   const messages = mock(
     async (_args: unknown): Promise<unknown> => transcript(),
   );
+  const get = mock(
+    async (_args: unknown): Promise<unknown> => ({
+      data: { parentID: 'parent', outcome: 'succeeded' },
+    }),
+  );
   const noop = async () => ({ data: [] });
   const session = new Proxy(
     {
       status,
       messages,
-      get: async () => ({ data: { parentID: 'parent', outcome: 'succeeded' } }),
+      get,
     },
-    { get: (target, key) => Reflect.get(target, key) ?? noop },
+    {
+      get: (target, key) =>
+        key === 'status' && setup.statusAvailable === false
+          ? undefined
+          : (Reflect.get(target, key) ?? noop),
+    },
   );
   const client = new Proxy(
     { session, app: { log: noop } },
@@ -193,6 +210,7 @@ async function assembly(
     status,
     statusMetrics,
     messages,
+    get,
     directory,
     begin,
     requestTask,
@@ -267,6 +285,58 @@ test('regression: idle-with-busy-host must query status and publish nothing', as
   expect(terminal).not.toHaveBeenCalled();
 });
 
+test.each(['missing outcome', 'lookup failure'])(
+  'final idle without status retries a transient %s and releases capacity without another signal',
+  async (failure) => {
+    const h = await assembly(undefined, {
+      statusAvailable: false,
+      graceMs: 20,
+    });
+    await h.begin();
+    await h.after('running');
+    h.get.mockClear();
+    h.get.mockImplementationOnce(async () => {
+      if (failure === 'lookup failure')
+        throw new Error('temporarily unavailable');
+      return { data: { parentID: 'parent' } };
+    });
+    const release = spyOn(BackgroundTaskConcurrency.prototype, 'releaseTask');
+    cleanups.push(async () => {
+      release.mockRestore();
+    });
+    let admitted = false;
+    const extra = h.requestTask('extra', 'queued before final idle').then(
+      () => {
+        admitted = true;
+      },
+      () => {},
+    );
+    await flush();
+    expect(admitted).toBe(false);
+    await h.idle();
+    await flush();
+    expect(h.get).toHaveBeenCalledTimes(1);
+    expect(h.board.get('child')).toMatchObject({
+      state: 'running',
+      statusUncertain: true,
+    });
+    expect(release).not.toHaveBeenCalled();
+    // No more host events, transforms or manual gate reconciliations.
+    for (let i = 0; i < 100 && h.board.get('child')?.state === 'running'; i++)
+      await Bun.sleep(2);
+    expect(h.board.get('child')).toMatchObject({
+      state: 'completed',
+      terminalRevision: 1,
+      resultSummary: 'confirmed result',
+    });
+    expect(h.get).toHaveBeenCalledTimes(2);
+    expect(h.status).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledTimes(1);
+    await extra;
+    expect(admitted).toBe(true);
+  },
+);
+
 test('regression: native-after-releases-reopened-run releases once and retains capacity', async () => {
   const h = await assembly();
   await h.begin();
@@ -334,10 +404,9 @@ test('busy at the exact publication timestamp triggers a runtime contrast', asyn
 test.each(['open', 'timed-out'] as const)(
   'deferred contrast survives collision with held polling and repairs without another signal (%s)',
   async (readState) => {
-    const h = await assembly(
-      undefined,
-      readState === 'timed-out' ? 1 : undefined,
-    );
+    const h = await assembly(undefined, {
+      statusTimeoutMs: readState === 'timed-out' ? 1 : undefined,
+    });
     const { publication, activityAt } = await completeWhileBusy(h);
     h.status.mockClear();
     const releaseStatus = h.holdStatus();

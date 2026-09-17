@@ -436,6 +436,48 @@ describe('terminal gate', () => {
       lastStatusError: EVIDENCE_UNAVAILABLE_DIAGNOSTIC,
     });
   });
+  test.each(['status', 'no runtime API'])(
+    'runtime unknown retries are bounded for %s',
+    async (source) => {
+      const readRuntime = mock(
+        async (
+          _run: unknown,
+          readStartedAt: number,
+        ): Promise<RuntimeObservation> => ({
+          kind: 'unknown',
+          origin: 'session.status',
+          readStartedAt,
+        }),
+      );
+      const inspect = mock(() => {});
+      const h = harness({
+        readRuntime: source === 'status' ? readRuntime : undefined,
+        observationRevisionFor: () => {
+          inspect();
+          return 1;
+        },
+        graceMs: 5,
+      });
+      await h.gate.reconcile(h.run);
+      for (
+        let i = 0;
+        i < 100 &&
+        h.board.get(h.run.taskID)?.lastStatusError !==
+          EVIDENCE_UNAVAILABLE_DIAGNOSTIC;
+        i++
+      )
+        await tick();
+      expect(h.board.get(h.run.taskID)).toMatchObject({
+        state: 'running',
+        statusUncertain: true,
+        lastStatusError: EVIDENCE_UNAVAILABLE_DIAGNOSTIC,
+      });
+      expect(readRuntime).toHaveBeenCalledTimes(source === 'status' ? 4 : 0);
+      const calls = inspect.mock.calls.length;
+      await Bun.sleep(25);
+      expect(inspect).toHaveBeenCalledTimes(calls);
+    },
+  );
   test('busy during an evidence await immediately invalidates it', async () => {
     let resolve!: (value: unknown) => void;
     const h = harness({
@@ -857,98 +899,134 @@ test('integration: late acknowledgement and transport success for A cannot consu
   }
 });
 
-test('v2 real shim resumes after diagnostic retry cutoff on the next idle event and returns an idempotent result', async () => {
-  let valid = false;
-  const context = mock(async () => {
-    if (!valid) throw new Error('context temporarily unavailable');
-    return [
-      { id: 'baseline', role: 'user', content: [] },
-      {
-        id: 'result',
-        role: 'assistant',
-        content: [{ type: 'text', text: 'v2 result' }],
-      },
-    ];
-  });
-  const input = buildPluginInput({
-    location: { directory: '/tmp' },
-    session: {
-      get: async () => ({
+test.each(['transcript', 'outcome'])(
+  'v2 real shim resumes after %s retry cutoff on the next idle event and returns an idempotent result',
+  async (source) => {
+    let valid = false;
+    const context = mock(async () => {
+      if (!valid) throw new Error('context temporarily unavailable');
+      return [
+        { id: 'baseline', role: 'user', content: [] },
+        {
+          id: 'result',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'v2 result' }],
+        },
+      ];
+    });
+    const get = mock(
+      async (): Promise<{
+        id: string;
+        parentID: string;
+        outcome?: 'succeeded';
+      }> => ({
         id: 'ses_v2child',
         parentID: 'parent',
-        outcome: 'succeeded',
+        outcome: source === 'transcript' || valid ? 'succeeded' : undefined,
       }),
-      context,
-    },
-  } as never) as never;
-  const board = new BackgroundJobBoard();
-  const run = board.registerLaunch({
-    taskID: 'ses_v2child',
-    parentSessionID: 'parent',
-    agent: 'fixer',
-    now: 0,
-  });
-  const gate = createBackgroundJobTerminalGate({
-    input,
-    backgroundJobBoard: board,
-    baselineFor: () => 'baseline',
-    maxEvidenceRetries: 1,
-    graceMs: 1,
-  });
-  gates.push(gate);
-  const hook = createTaskSessionManagerHook(input, {
-    terminalGate: gate,
-    backgroundJobBoard: board,
-    shouldManageSession: () => true,
-    maxSessionsPerAgent: 10,
-    maxRetainedSnapshots: 10,
-  });
-  const idle = () =>
-    hook.event({
-      event: { type: 'session.idle', properties: { sessionID: run.taskID } },
+    );
+    const input = buildPluginInput({
+      location: { directory: '/tmp' },
+      session: {
+        get,
+        context,
+      },
+    } as never) as never;
+    const board = new BackgroundJobBoard();
+    const run = board.registerLaunch({
+      taskID: 'ses_v2child',
+      parentSessionID: 'parent',
+      agent: 'fixer',
+      now: 0,
     });
-  try {
-    await idle();
-    for (
-      let i = 0;
-      i < 50 &&
-      board.get(run.taskID)?.lastStatusError !==
-        EVIDENCE_UNAVAILABLE_DIAGNOSTIC;
-      i++
-    )
-      await tick();
-    expect(board.get(run.taskID)).toMatchObject({
-      state: 'running',
-      lastStatusError: EVIDENCE_UNAVAILABLE_DIAGNOSTIC,
-    });
-    const calls = context.mock.calls.length;
-    for (let i = 0; i < 5; i++) await tick();
-    expect(context).toHaveBeenCalledTimes(calls);
-    valid = true;
-    await idle(); // No manual gate reconciliation or runtime polling exists on this host.
-    for (let i = 0; i < 50 && board.get(run.taskID)?.state === 'running'; i++)
-      await tick();
-    expect(board.get(run.taskID)).toMatchObject({
-      state: 'completed',
-      resultSummary: 'v2 result',
-    });
-    const result = createTaskResultTool({
+    const gate = createBackgroundJobTerminalGate({
       input,
       backgroundJobBoard: board,
+      baselineFor: () => 'baseline',
+      maxEvidenceRetries: source === 'transcript' ? 1 : 3,
+      graceMs: 5,
+    });
+    gates.push(gate);
+    const hook = createTaskSessionManagerHook(input, {
       terminalGate: gate,
-    }).task_result;
-    expect(
-      await result.execute({ task_id: run.taskID }, {
-        sessionID: 'parent',
-      } as never),
-    ).toBe('v2 result');
-    expect(
-      await result.execute({ task_id: run.taskID }, {
-        sessionID: 'parent',
-      } as never),
-    ).toBe('v2 result');
-    expect(context).toHaveBeenCalledWith({ sessionID: run.taskID });
-  } finally {
-    await hook.event({ event: { type: 'server.instance.disposed' } });
-  }
-});
+      backgroundJobBoard: board,
+      shouldManageSession: () => true,
+      maxSessionsPerAgent: 10,
+      maxRetainedSnapshots: 10,
+    });
+    const idle = () =>
+      hook.event({
+        event: { type: 'session.idle', properties: { sessionID: run.taskID } },
+      });
+    try {
+      await idle();
+      for (
+        let i = 0;
+        i < 50 &&
+        board.get(run.taskID)?.lastStatusError !==
+          EVIDENCE_UNAVAILABLE_DIAGNOSTIC;
+        i++
+      )
+        await tick();
+      expect(board.get(run.taskID)).toMatchObject({
+        state: 'running',
+        statusUncertain: true,
+        lastStatusError: EVIDENCE_UNAVAILABLE_DIAGNOSTIC,
+      });
+      const calls = context.mock.calls.length;
+      const runtimeCalls = get.mock.calls.length;
+      if (source === 'outcome') {
+        expect(runtimeCalls).toBe(4);
+        expect(context).not.toHaveBeenCalled();
+      }
+      await Bun.sleep(25); // More than graceMs * 4: neither reader may keep polling.
+      expect(context).toHaveBeenCalledTimes(calls);
+      expect(get).toHaveBeenCalledTimes(runtimeCalls);
+      if (source === 'outcome') {
+        // The host signal must renew the budget even if its first lookup still
+        // lacks outcome. The next automatic retry, not another signal, succeeds.
+        let release!: () => void;
+        const pending = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        get.mockImplementationOnce(async () => {
+          await pending;
+          return { id: 'ses_v2child', parentID: 'parent' };
+        });
+        await idle();
+        for (let i = 0; i < 50 && get.mock.calls.length === runtimeCalls; i++)
+          await tick();
+        expect(get).toHaveBeenCalledTimes(runtimeCalls + 1);
+        valid = true;
+        release();
+      } else {
+        valid = true;
+        await idle();
+      }
+      for (let i = 0; i < 50 && board.get(run.taskID)?.state === 'running'; i++)
+        await tick();
+      expect(board.get(run.taskID)).toMatchObject({
+        state: 'completed',
+        resultSummary: 'v2 result',
+      });
+      const result = createTaskResultTool({
+        input,
+        backgroundJobBoard: board,
+        terminalGate: gate,
+      }).task_result;
+      expect(
+        await result.execute({ task_id: run.taskID }, {
+          sessionID: 'parent',
+        } as never),
+      ).toBe('v2 result');
+      expect(
+        await result.execute({ task_id: run.taskID }, {
+          sessionID: 'parent',
+        } as never),
+      ).toBe('v2 result');
+      expect(context).toHaveBeenCalledWith({ sessionID: run.taskID });
+    } finally {
+      await hook.event({ event: { type: 'server.instance.disposed' } });
+    }
+  },
+);
