@@ -304,7 +304,7 @@ export function buildPluginInput(
         : {}),
       abort: s.interrupt
         ? async (args: Record<string, unknown>) =>
-            s.interrupt?.({ sessionID: sessionIDOf(args), continue: false })
+            s.interrupt?.({ sessionID: sessionIDOf(args), resume: false })
         : async (args: Record<string, unknown>) => {
             log('[v2][shim] session.interrupt unavailable', {
               id: sessionIDOf(args),

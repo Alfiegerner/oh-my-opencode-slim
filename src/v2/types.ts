@@ -240,10 +240,11 @@ export interface V2Context {
       directory?: string;
       parentID?: string | null;
     }): Promise<unknown>;
-    /** v2 session.interrupt — `continue: false` aborts the active run. */
+    /** v2 session.interrupt — `resume: false` aborts the active run
+     * (field renamed from `continue` in v2.0.5). */
     interrupt?(input: {
       sessionID: string;
-      continue?: boolean;
+      resume?: boolean;
     }): Promise<unknown>;
     /** v2 session.update ({sessionID, title?, permissions?}) — v2.0.5 replacement
      * for the removed session.rename and permission.rules. `permissions`
