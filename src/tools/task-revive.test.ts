@@ -1,9 +1,14 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
 import { createOpencodeClient } from '@opencode-ai/sdk';
 import { createRevivedRunTracker } from '../hooks/task-session-manager/revived-run-tracker';
-import { BackgroundJobBoard } from '../utils/background-job-board';
+import { BackgroundJobBoard } from '../utils/background-job-fixture';
 import { createCancelTaskTool } from './cancel-task';
 import { createTaskReviveTool } from './task-revive';
+import {
+  createBackgroundJobTerminalGate,
+  type BackgroundJobTerminalGate,
+} from '../utils/background-job-terminal-gate';
+const gates: BackgroundJobTerminalGate[] = [];
 
 let mockClient: Record<string, unknown>;
 
@@ -31,11 +36,17 @@ function createTool(overrides?: {
   );
   const promptAsync = mock(overrides?.promptAsync ?? (async () => ({})));
   mockClient = { session: { abort, status, promptAsync } };
+  const terminalGate = createBackgroundJobTerminalGate({
+    backgroundJobBoard: board,
+    input: { directory: '/test/project' } as never,
+  });
+  gates.push(terminalGate);
   const revivedRunTracker =
     overrides?.revivedRunTracker ??
     createRevivedRunTracker({
       input: { directory: '/test/project' } as any,
       backgroundJobBoard: board,
+      terminalGate,
     });
   const tools = createTaskReviveTool({
     input: { directory: '/test/project' } as any,
@@ -49,6 +60,7 @@ function createTool(overrides?: {
   const cancelTools = createCancelTaskTool({
     input: { directory: '/test/project' } as any,
     backgroundJobBoard: board,
+    terminalGate,
     shouldManageSession: () => true,
     verifyAbortMs: 10,
     abortRetryIntervalMs: 0,
@@ -66,7 +78,10 @@ function createTool(overrides?: {
 
 const context = { sessionID: 'parent-1', agent: 'orchestrator' } as any;
 
-afterEach(() => mock.restore());
+afterEach(() => {
+  for (const gate of gates.splice(0)) gate.dispose();
+  mock.restore();
+});
 
 function acknowledgedCompleted(board: BackgroundJobBoard, taskID = 'ses_1') {
   board.registerLaunch({
@@ -282,7 +297,7 @@ describe('task_revive tool', () => {
     await expect(pending).rejects.toThrow(/became active again/);
     expect(promptAsync).toHaveBeenCalledTimes(0);
     expect(board.get('ses_1')).toMatchObject({
-      state: 'stopped',
+      state: 'running',
       generation: 1,
       lastLiveBusyAt: 115,
     });

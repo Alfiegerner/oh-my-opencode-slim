@@ -4,10 +4,14 @@ import type {
   BackgroundJobPromptMetadata,
   BackgroundJobRecord,
   BackgroundJobStatusInput,
+  BackgroundJobTerminalInput,
   ContextFile,
   WallClockTimeoutClaimInput,
-  WallClockTimeoutFinalizeInput,
 } from './background-job-board';
+import type {
+  BackgroundJobTerminalGate,
+  TerminalCommitToken,
+} from './background-job-terminal-gate';
 import {
   clearSuppression as clearSuppressionPersisted,
   persistedBackgroundJobState,
@@ -177,30 +181,26 @@ export interface BackgroundJobStore {
   acquireTerminalNotificationLease(
     taskID: string,
     generation: number,
+    terminalRevision?: number,
   ): BackgroundJobLease | undefined;
   validateLease(lease: BackgroundJobLease): boolean;
   releaseLease(lease: BackgroundJobLease): boolean;
   updateStatus(
-    input: BackgroundJobStatusInput,
+    input: BackgroundJobStatusInput & { state: 'running' },
   ): BackgroundJobRecord | undefined;
-  updateFromStatusOutput(output: string): BackgroundJobRecord | undefined;
+  commitTerminal(
+    input: BackgroundJobTerminalInput,
+    token: TerminalCommitToken,
+  ): BackgroundJobRecord | undefined;
+  bindTerminalGate(gate: BackgroundJobTerminalGate): void;
   claimWallClockDeadline(
     input: WallClockTimeoutClaimInput,
-  ): BackgroundJobRecord | undefined;
-  finalizeWallClockTimeout(
-    input: WallClockTimeoutFinalizeInput,
   ): BackgroundJobRecord | undefined;
   markRunningFromLiveSession(
     taskID: string,
     now?: number,
     expectedGeneration?: number,
-  ): BackgroundJobRecord | undefined;
-  markStopped(
-    taskID: string,
-    resultSummary: string,
-    observedAt?: number,
-    expectedGeneration?: number,
-    now?: number,
+    observedTerminalRevision?: number,
   ): BackgroundJobRecord | undefined;
   noteStopConfirmation(
     taskID: string,
@@ -217,16 +217,11 @@ export interface BackgroundJobStore {
    * Acknowledge the terminal notification delivered to the parent session.
    * This is a prompt-lifecycle acknowledgement, not filesystem reconciliation.
    */
-  markReconciled(taskID: string, now?: number): BackgroundJobRecord | undefined;
-  markCancelled(
+  markReconciled(
     taskID: string,
-    reason?: string,
     now?: number,
-    options?: {
-      force?: boolean;
-      expectedGeneration?: number;
-      cancellationLease?: BackgroundJobLease;
-    },
+    expectedGeneration?: number,
+    expectedRevision?: number,
   ): BackgroundJobRecord | undefined;
   clearParent(parentSessionID: string): void;
   drop(taskID: string): void;

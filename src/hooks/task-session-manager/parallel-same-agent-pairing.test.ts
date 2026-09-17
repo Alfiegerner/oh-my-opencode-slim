@@ -17,6 +17,9 @@ function createHook(
     pendingCallTracker?: ReturnType<typeof createPendingCallTracker>;
   } = {},
 ) {
+  board.addTerminalStateListener((taskID) =>
+    extra.backgroundTaskConcurrency?.releaseTask(taskID),
+  );
   return createTaskSessionManagerHook(
     {
       client: { session: { status: mock(async () => ({ data: {} })) } },

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
 import { parseTaskStatusOutput } from '../utils';
-import { BackgroundJobBoard } from '../utils/background-job-board';
+import { BackgroundJobBoard } from '../utils/background-job-fixture';
 import { createCancelTaskTool } from './cancel-task';
 
 let mockClient: Record<string, unknown>;

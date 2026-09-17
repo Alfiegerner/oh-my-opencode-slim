@@ -39,12 +39,8 @@ import {
 } from '../cache-safe-injection';
 import type { MessagePart, MessageWithParts } from '../types';
 import { isMessageWithParts, isUserMessageWithParts } from '../types';
-import {
-  extractTaskSummary,
-  formatCancelledTaskStatusOutput,
-  isLateCancelledTaskError,
-  updateBackgroundJobFromOutput,
-} from './status-utils';
+import { extractTaskSummary, isLateCancelledTaskError } from './status-utils';
+import type { BackgroundJobTerminalGate } from '../../utils/background-job-terminal-gate';
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -126,6 +122,7 @@ const HOST_MESSAGE_OCCURRENCE_PREFIX = 'host-message:';
 
 export interface InjectionState {
   backgroundJobBoard: BackgroundJobStore;
+  terminalGate: BackgroundJobTerminalGate;
   lifecycleLedger: BackgroundJobLifecycleLedger;
   maxRetainedSnapshots: number;
   strategy: 'latest' | 'checkpoint-compatible';
@@ -688,13 +685,13 @@ export function stabilizeRunningTaskParts(messages: unknown[]): void {
   }
 }
 
-export function updateFromInjectedCompletion(
+export async function updateFromInjectedCompletion(
   state: InjectionState,
   part: MessagePart,
   message: MessageWithParts,
   _messageIndex: number,
   partIndex: number,
-): BackgroundJobRecord | undefined {
+): Promise<BackgroundJobRecord | undefined> {
   if (part.type !== 'text' || typeof part.text !== 'string') {
     return undefined;
   }
@@ -716,7 +713,7 @@ export function updateFromInjectedCompletion(
     }
     return undefined;
   }
-  if (status.state !== 'completed' && status.state !== 'error') {
+  if (!isProcessableSyntheticTerminal(part.text, status)) {
     return undefined;
   }
 
@@ -857,10 +854,6 @@ export function updateFromInjectedCompletion(
   }
 
   if (isFailed && isLateCancelledTaskError(existing, status.state)) {
-    part.text = formatCancelledTaskStatusOutput(
-      status.taskID,
-      state.backgroundJobBoard.getResultSummary(status.taskID),
-    );
     log('[task-session-manager] normalized late cancelled injected failure', {
       taskID: status.taskID,
       alias: existing?.alias,
@@ -892,6 +885,7 @@ export function updateFromInjectedCompletion(
       rememberPendingInjectedTerminalJob(state, existing.parentSessionID, {
         taskID: existing.taskID,
         generation: existing.generation,
+        terminalRevision: existing.terminalRevision,
       });
     }
     return existing;
@@ -909,17 +903,43 @@ export function updateFromInjectedCompletion(
     return undefined;
   }
 
-  const updated = updateBackgroundJobFromOutput(
-    part.text,
-    state.backgroundJobBoard,
-    state.taskContextTracker,
+  if (!existing) return undefined;
+  // Reception deduplication is separate from terminal confirmation. A replay
+  // without an observed execution owner can only request an inspection.
+  rememberProcessedInjectedCompletion(
+    state,
+    status.taskID,
+    occurrenceId,
+    provenanceKind,
+    {
+      taskID: existing.taskID,
+      generation: existing.generation,
+      lifecycleEpoch: state.getLifecycleEpoch?.() ?? 0,
+    },
   );
+  const result = await state.terminalGate.reconcile(
+    existing,
+    origin?.generationAtObservation === existing.generation
+      ? {
+          kind: 'output',
+          status,
+          origin: {
+            kind: 'synthetic',
+            occurrenceID: occurrenceId,
+            run: existing,
+            provenance: provenanceKind,
+          },
+        }
+      : { kind: 'inspect' },
+  );
+  const updated = result.kind === 'stale' ? undefined : result.record;
   if (!updated) return undefined;
 
   if (updated.terminalUnreconciled && updated.parentSessionID) {
     rememberPendingInjectedTerminalJob(state, updated.parentSessionID, {
       taskID: updated.taskID,
       generation: updated.generation,
+      terminalRevision: updated.terminalRevision,
     });
   }
 
@@ -979,7 +999,7 @@ export function isMissingRememberedSessionError(output: string): boolean {
 }
 
 function executionKey(execution: BackgroundJobExecution): string {
-  return `${execution.taskID}\u001f${execution.generation}`;
+  return `${execution.taskID}\u001f${execution.generation}\u001f${execution.terminalRevision}`;
 }
 
 function sameExecutionIdentity(
@@ -1010,7 +1030,11 @@ function reconcileExecutionBatch(
 ): void {
   for (const execution of executions) {
     const current = state.backgroundJobBoard.get(execution.taskID);
-    if (!current || current.generation !== execution.generation) {
+    if (
+      !current ||
+      current.generation !== execution.generation ||
+      current.terminalRevision !== execution.terminalRevision
+    ) {
       log('[task-session-manager] skipped stale terminal execution', {
         parentSessionID,
         execution,
@@ -1018,7 +1042,12 @@ function reconcileExecutionBatch(
       });
       continue;
     }
-    state.backgroundJobBoard.markReconciled(execution.taskID);
+    state.backgroundJobBoard.markReconciled(
+      execution.taskID,
+      undefined,
+      execution.generation,
+      execution.terminalRevision,
+    );
   }
 }
 

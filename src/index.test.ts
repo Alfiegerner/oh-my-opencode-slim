@@ -1288,6 +1288,19 @@ describe('plugin config model inheritance', () => {
     };
 
     const client = createPluginClient(async () => ({}));
+    client.session.status = async () => ({ data: {} });
+    client.session.messages = async () => ({
+      data: [
+        {
+          info: {
+            role: 'assistant',
+            time: { completed: Date.now() },
+            finish: 'stop',
+          },
+          parts: [{ type: 'text', text: 'done' }],
+        },
+      ],
+    });
     return plugin({
       client,
       directory: configDir,

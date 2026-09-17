@@ -1,5 +1,6 @@
 import { describe, expect, mock, test } from 'bun:test';
-import { BackgroundJobBoard } from './background-job-board';
+import { BackgroundJobBoard } from './background-job-fixture';
+import { BackgroundJobBoard as ProductionBoard } from './background-job-board';
 
 describe('BackgroundJobBoard', () => {
   test('registers background launches as running jobs with aliases', () => {
@@ -410,8 +411,8 @@ describe('BackgroundJobBoard', () => {
 
     expect(metadata?.text).toBe(board.formatForPrompt('parent-1'));
     expect(metadata?.terminalUnreconciledTaskIDs).toEqual([
-      { taskID: 'ses_1', generation: 1 },
-      { taskID: 'ses_2', generation: 2 },
+      { taskID: 'ses_1', generation: 1, terminalRevision: 1 },
+      { taskID: 'ses_2', generation: 2, terminalRevision: 1 },
     ]);
     expect(
       metadata?.terminalUnreconciledTaskIDs.some(
@@ -779,8 +780,8 @@ describe('BackgroundJobBoard', () => {
     });
   });
 
-  test('updates status from native task output', () => {
-    const board = new BackgroundJobBoard();
+  test('updateStatus refuses terminal state without a gate commit', () => {
+    const board = new ProductionBoard();
     board.registerLaunch({
       taskID: 'ses_1',
       parentSessionID: 'parent-1',
@@ -788,25 +789,21 @@ describe('BackgroundJobBoard', () => {
       description: 'map files',
     });
 
-    board.updateFromStatusOutput(
-      [
-        'task_id: ses_1',
-        'state: error',
-        '<task_result>',
-        'failed',
-        '</task_result>',
-      ].join('\n'),
-    );
-
-    expect(board.get('ses_1')).toMatchObject({
+    board.updateStatus({
+      taskID: 'ses_1',
       state: 'error',
-      terminalUnreconciled: true,
       resultSummary: 'failed',
     });
+
+    expect(board.get('ses_1')).toMatchObject({
+      state: 'running',
+      terminalUnreconciled: false,
+    });
+    expect(board.get('ses_1')?.resultSummary).toBeUndefined();
   });
 
-  test('rejects an empty completed status as an error', () => {
-    const board = new BackgroundJobBoard();
+  test('an empty completed label cannot publish an error either', () => {
+    const board = new ProductionBoard();
     board.registerLaunch({
       taskID: 'ses_1',
       parentSessionID: 'parent-1',
@@ -814,24 +811,20 @@ describe('BackgroundJobBoard', () => {
       description: 'map files',
     });
 
-    board.updateFromStatusOutput(
-      [
-        'task_id: ses_1',
-        'state: completed',
-        '<task_result>',
-        '</task_result>',
-      ].join('\n'),
-    );
+    board.updateStatus({
+      taskID: 'ses_1',
+      state: 'completed',
+      resultSummary: '',
+    });
 
     expect(board.get('ses_1')).toMatchObject({
-      state: 'error',
-      resultSummary:
-        'Task ended without a public text result; completion is not confirmed',
+      state: 'running',
     });
+    expect(board.get('ses_1')?.resultSummary).toBeUndefined();
   });
 
-  test('updates error summary from task_error output', () => {
-    const board = new BackgroundJobBoard();
+  test('cancellation text cannot bypass the gate', () => {
+    const board = new ProductionBoard();
     board.registerLaunch({
       taskID: 'ses_1',
       parentSessionID: 'parent-1',
@@ -839,22 +832,17 @@ describe('BackgroundJobBoard', () => {
       description: 'map files',
     });
 
-    board.updateFromStatusOutput(
-      [
-        'task_id: ses_1',
-        'state: cancelled',
-        '',
-        '<task_error>',
-        'cancelled by user',
-        '</task_error>',
-      ].join('\n'),
-    );
-
-    expect(board.get('ses_1')).toMatchObject({
+    board.updateStatus({
+      taskID: 'ses_1',
       state: 'cancelled',
-      terminalUnreconciled: true,
       resultSummary: 'cancelled by user',
     });
+
+    expect(board.get('ses_1')).toMatchObject({
+      state: 'running',
+      terminalUnreconciled: false,
+    });
+    expect(board.get('ses_1')?.resultSummary).toBeUndefined();
   });
 
   test('resolves task IDs and aliases within parent scope', () => {
@@ -1118,7 +1106,7 @@ describe('BackgroundJobBoard', () => {
     });
   });
 
-  test('live busy session does not reopen stale cancelled jobs', () => {
+  test('confirmed live busy retracts a cancelled publication', () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({
       taskID: 'ses_1',
@@ -1135,16 +1123,17 @@ describe('BackgroundJobBoard', () => {
     const updated = board.markRunningFromLiveSession('ses_1', 200);
 
     expect(updated).toMatchObject({
-      state: 'cancelled',
-      terminalUnreconciled: true,
+      state: 'running',
+      terminalUnreconciled: false,
       lastLiveBusyAt: 200,
+      terminalRevision: 2,
     });
-    expect(updated?.completedAt).toBeDefined();
-    expect(updated?.terminalState).toBe('cancelled');
-    expect(updated?.resultSummary).toBe('upstream cancelled during compaction');
+    expect(updated?.completedAt).toBeUndefined();
+    expect(updated?.terminalState).toBeUndefined();
+    expect(updated?.resultSummary).toBeUndefined();
   });
 
-  test('live busy session does not reopen explicit cancel requests', () => {
+  test('live busy reopens cancellation while preserving its intent', () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({
       taskID: 'ses_1',
@@ -1156,13 +1145,13 @@ describe('BackgroundJobBoard', () => {
     const updated = board.markRunningFromLiveSession('ses_1', 200);
 
     expect(updated).toMatchObject({
-      state: 'cancelled',
+      state: 'running',
       cancellationRequested: true,
-      terminalUnreconciled: true,
+      terminalUnreconciled: false,
     });
   });
 
-  test('live busy session does not reopen reconciled stale cancellations', () => {
+  test('live busy retracts even reconciled cancellation publications', () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({
       taskID: 'ses_1',
@@ -1175,9 +1164,9 @@ describe('BackgroundJobBoard', () => {
     const updated = board.markRunningFromLiveSession('ses_1', 200);
 
     expect(updated).toMatchObject({
-      state: 'reconciled',
+      state: 'running',
       terminalUnreconciled: false,
-      terminalState: 'cancelled',
+      terminalState: undefined,
       lastLiveBusyAt: 200,
     });
   });
@@ -1218,7 +1207,27 @@ describe('BackgroundJobBoard', () => {
     });
   });
 
-  test('stale busy does not revive a confirmed stopped job after terminal wake', () => {
+  test('old busy leaves an acknowledged stopped publication unchanged', () => {
+    const board = new BackgroundJobBoard();
+    const run = board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      now: 100,
+    });
+    board.markStopped(run.taskID, 'no result', 150, run.generation, 150);
+    board.markReconciled(run.taskID, 160);
+    const acknowledged = board.get(run.taskID);
+    expect(
+      board.markRunningFromLiveSession(run.taskID, 150, run.generation),
+    ).toEqual({ ...acknowledged, lastLiveBusyAt: 150 });
+    expect(board.get(run.taskID)).toMatchObject({
+      state: 'stopped',
+      terminalUnreconciled: false,
+    });
+  });
+
+  test('new busy reopens an acknowledged stopped publication', () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({
       taskID: 'ses_1',
@@ -1233,7 +1242,7 @@ describe('BackgroundJobBoard', () => {
     const updated = board.markRunningFromLiveSession('ses_1', 200, generation);
 
     expect(updated).toMatchObject({
-      state: 'stopped',
+      state: 'running',
       terminalUnreconciled: false,
       lastLiveBusyAt: 200,
     });
@@ -1264,12 +1273,9 @@ describe('BackgroundJobBoard', () => {
     });
   });
 
-  test('live busy cannot resurrect a stopped job under a relaunch lease', () => {
-    // P1 regression: while a task_revive holds the relaunch lease for a
-    // stopped generation, a busy observation must not flip the record
-    // back to running underneath the in-flight revive. The observation
-    // is recorded (lastLiveBusyAt) so the revive can refuse on fresh
-    // activity; once the lease is released, a later busy can revive.
+  test('relaunch lease retains exclusion but cannot hide live activity', () => {
+    // The lease excludes competing operations, not observed host activity.
+    // Revive must notice the activity and refuse while the board shows running.
     const board = new BackgroundJobBoard();
     board.registerLaunch({
       taskID: 'ses_1',
@@ -1285,10 +1291,14 @@ describe('BackgroundJobBoard', () => {
 
     const leased = board.markRunningFromLiveSession('ses_1', 200, generation);
     expect(leased).toMatchObject({
-      state: 'stopped',
-      terminalUnreconciled: true,
+      state: 'running',
+      terminalUnreconciled: false,
       lastLiveBusyAt: 200,
     });
+    expect(
+      board.acquireRelaunchLease('ses_1', generation ?? 1),
+    ).toBeUndefined();
+    if (lease) expect(board.validateLease(lease)).toBe(true);
 
     if (lease) board.releaseLease(lease);
 
@@ -1299,7 +1309,7 @@ describe('BackgroundJobBoard', () => {
     });
   });
 
-  test('live busy session does not reopen non-cancelled terminal jobs', () => {
+  test('live busy retracts a completed publication', () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({
       taskID: 'ses_1',
@@ -1311,12 +1321,12 @@ describe('BackgroundJobBoard', () => {
     const updated = board.markRunningFromLiveSession('ses_1', 200);
 
     expect(updated).toMatchObject({
-      state: 'completed',
-      terminalUnreconciled: true,
-      terminalState: 'completed',
+      state: 'running',
+      terminalUnreconciled: false,
+      terminalState: undefined,
       lastLiveBusyAt: 200,
     });
-    expect(updated?.completedAt).toBeDefined();
+    expect(updated?.completedAt).toBeUndefined();
   });
 
   test('live busy recovery clears timeout state on running jobs', () => {

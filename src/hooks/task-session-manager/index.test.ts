@@ -2,13 +2,17 @@ import { beforeEach, describe, expect, mock, test } from 'bun:test';
 import { DEFAULT_MAX_RETAINED_SNAPSHOTS } from '../../config/constants';
 import { SessionLifecycle } from '../../hooks/session-lifecycle';
 import {
-  BackgroundJobBoard,
   BackgroundJobSupervisor,
   BackgroundTaskConcurrency,
   createInternalAgentTextPart,
   getBackgroundJobLifecycleLedger,
   SLIM_INTERNAL_INITIATOR_MARKER,
 } from '../../utils';
+import { BackgroundJobBoard } from '../../utils/background-job-fixture';
+import {
+  createBackgroundJobTerminalGate,
+  type BackgroundJobTerminalGate,
+} from '../../utils/background-job-terminal-gate';
 import {
   createPhaseReminderHook,
   PHASE_REMINDER_METADATA_KEY,
@@ -111,6 +115,7 @@ type HookOptions = {
   strategy?: 'latest' | 'checkpoint-compatible';
   maxRetainedSnapshots?: number;
   backgroundJobBoard?: BackgroundJobBoard;
+  terminalGate?: BackgroundJobTerminalGate;
   sessionStatus?: unknown;
   sessionClient?: Record<string, unknown>;
   idleReconcileDelayMs?: number;
@@ -125,11 +130,57 @@ type HookOptions = {
 };
 
 function createHook(options?: HookOptions) {
+  // Adapter tests supply independent host transcript evidence explicitly.
+  // A synthetic occurrence alone never seeds this source.
+  const transcripts = new Map<
+    string,
+    { generation?: number; data: unknown[] }
+  >();
+  function complete(taskID: string, text: string, error = false) {
+    transcripts.set(taskID, {
+      generation: options?.backgroundJobBoard?.get(taskID)?.generation,
+      data: [
+        {
+          info: {
+            id: `answer-${taskID}`,
+            role: 'assistant',
+            finish: 'stop',
+            time: { completed: Date.now() },
+            ...(error ? { error: text } : {}),
+          },
+          parts: error ? [] : [{ type: 'text', text }],
+        },
+      ],
+    });
+  }
   const hook = createTaskSessionManagerHook(
     {
       client: {
         session: {
           status: mock(async () => ({ data: options?.sessionStatus ?? {} })),
+          messages: async ({ path }: { path: { id: string } }) => {
+            const transcript = transcripts.get(path.id);
+            if (!transcript) return undefined;
+            const generation = options?.backgroundJobBoard?.get(
+              path.id,
+            )?.generation;
+            return {
+              data:
+                transcript.generation !== undefined &&
+                generation !== transcript.generation
+                  ? [
+                      ...transcript.data,
+                      {
+                        info: {
+                          role: 'assistant',
+                          id: `pending-${generation}`,
+                        },
+                        parts: [],
+                      },
+                    ]
+                  : transcript.data,
+            };
+          },
           ...options?.sessionClient,
         },
       },
@@ -144,6 +195,7 @@ function createHook(options?: HookOptions) {
       readContextMinLines: options?.readContextMinLines,
       readContextMaxFiles: options?.readContextMaxFiles,
       backgroundJobBoard: options?.backgroundJobBoard,
+      terminalGate: options?.terminalGate,
       backgroundJobSupervisor: options?.backgroundJobSupervisor,
       backgroundTaskConcurrency: options?.backgroundTaskConcurrency,
       pendingCallTracker: options?.pendingCallTracker,
@@ -158,7 +210,7 @@ function createHook(options?: HookOptions) {
     },
   );
 
-  return { hook };
+  return { hook, complete };
 }
 
 function createMessages(sessionID: string, text = 'user message') {
@@ -408,6 +460,10 @@ describe('task-session-manager hook', () => {
     });
 
     const secondBoard = new BackgroundJobBoard();
+    // The assembly, not the after-hook, owns terminal capacity release.
+    secondBoard.addTerminalStateListener((taskID) =>
+      concurrency.releaseTask(taskID),
+    );
     const secondGeneration = createHook({
       backgroundJobBoard: secondBoard,
       backgroundTaskConcurrency: concurrency,
@@ -684,14 +740,15 @@ describe('task-session-manager hook', () => {
     });
   });
 
-  test('consumes historical terminal completion before restart reconciliation', async () => {
+  test('contrasts current runtime and result evidence before consuming historical completion', async () => {
     const board = new BackgroundJobBoard();
     const status = mock(async () => ({ data: {} }));
-    const { hook } = createHook({
+    const { hook, complete } = createHook({
       backgroundJobBoard: board,
       sessionClient: { status },
       runtimeStatusReconcileDelayMs: 60_000,
     });
+    complete('completed-child', 'historical result');
     const messages = {
       messages: [
         {
@@ -730,7 +787,7 @@ describe('task-session-manager hook', () => {
       terminalUnreconciled: true,
       resultSummary: 'historical result',
     });
-    expect(status).not.toHaveBeenCalled();
+    expect(status).toHaveBeenCalled();
   });
 
   test('keeps a rehydrated child running when live status is busy', async () => {
@@ -1965,6 +2022,7 @@ describe('task-session-manager hook', () => {
         properties: {
           sessionID: 'child-1',
           status: { type: 'busy' },
+          activityAt: (board.get('child-1')?.lastLiveBusyAt ?? 0) + 1,
         },
       },
     });
@@ -2341,6 +2399,7 @@ describe('task-session-manager hook', () => {
         properties: {
           sessionID: 'ses_timeout',
           status: { type: 'busy' },
+          activityAt: (board.get('ses_timeout')?.lastLiveBusyAt ?? 0) + 1,
         },
       },
     });
@@ -2393,6 +2452,7 @@ describe('task-session-manager hook', () => {
         properties: {
           sessionID: 'child-1',
           status: { type: 'busy' },
+          activityAt: (board.get('child-1')?.lastLiveBusyAt ?? 0) + 1,
         },
       },
     });
@@ -2413,7 +2473,7 @@ describe('task-session-manager hook', () => {
 
   test('updates background job board from injected completion messages', async () => {
     const board = new BackgroundJobBoard();
-    const { hook } = createHook({ backgroundJobBoard: board });
+    const { hook, complete } = createHook({ backgroundJobBoard: board });
 
     await hook['tool.execute.before'](
       { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
@@ -2454,6 +2514,7 @@ describe('task-session-manager hook', () => {
       ],
     };
 
+    complete('child-1', 'found hook flow');
     await transformMessages(hook, messages);
 
     expect(board.get('child-1')).toMatchObject({
@@ -2468,7 +2529,7 @@ describe('task-session-manager hook', () => {
 
   test('injected completion through message transform (without injectBackgroundJobBoard) remains terminal-unreconciled before parent idle, then reconciles after', async () => {
     const board = new BackgroundJobBoard();
-    const { hook } = createHook({ backgroundJobBoard: board });
+    const { hook, complete } = createHook({ backgroundJobBoard: board });
 
     await hook['tool.execute.before'](
       { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
@@ -2510,6 +2571,7 @@ describe('task-session-manager hook', () => {
     };
 
     // through transform only, without injectBackgroundJobBoard (avoids broad remember)
+    complete('child-1', 'found hook flow');
     await hook['experimental.chat.messages.transform']({}, messages as never);
 
     expect(board.get('child-1')).toMatchObject({
@@ -2540,7 +2602,7 @@ describe('task-session-manager hook', () => {
 
   test('another terminal-unreconciled sibling remains unreconciled when only first child completion was injected', async () => {
     const board = new BackgroundJobBoard();
-    const { hook } = createHook({ backgroundJobBoard: board });
+    const { hook, complete } = createHook({ backgroundJobBoard: board });
 
     // setup child-1
     await hook['tool.execute.before'](
@@ -2588,6 +2650,7 @@ describe('task-session-manager hook', () => {
         },
       ],
     };
+    complete('child-1', 'done1');
     await transformMessages(hook, messages);
 
     expect(board.get('child-1')?.terminalUnreconciled).toBe(true);
@@ -2626,7 +2689,7 @@ describe('task-session-manager hook', () => {
 
   test('a later synthetic completion does not replace an older delivered terminal batch', async () => {
     const board = new BackgroundJobBoard({ maxReusablePerAgent: 3 });
-    const { hook } = createHook({
+    const { hook, complete } = createHook({
       backgroundJobBoard: board,
       idleReconcileDelayMs: 0,
     });
@@ -2672,6 +2735,7 @@ describe('task-session-manager hook', () => {
     };
 
     // Process the later synthetic completion without rendering a new board.
+    complete('child-3', 'done3');
     await hook['experimental.chat.messages.transform'](
       {},
       laterCompletion as never,
@@ -2694,7 +2758,7 @@ describe('task-session-manager hook', () => {
 
   test('shape reconciliation leaves a pending synthetic completion unreconciled until its payload is delivered', async () => {
     const board = new BackgroundJobBoard({ maxReusablePerAgent: 3 });
-    const { hook } = createHook({
+    const { hook, complete } = createHook({
       backgroundJobBoard: board,
       idleReconcileDelayMs: 0,
     });
@@ -2734,6 +2798,7 @@ describe('task-session-manager hook', () => {
         },
       ],
     };
+    complete('child-2', 'done2');
     await hook['experimental.chat.messages.transform'](
       {},
       pendingCompletion as never,
@@ -2772,7 +2837,7 @@ describe('task-session-manager hook', () => {
 
   test('no-starvation latest pipeline: child-1 synthetic remembered; child-2 becomes terminal before idle; next full transform emits child-2 in board; idle reconciles both', async () => {
     const board = new BackgroundJobBoard();
-    const { hook } = createHook({ backgroundJobBoard: board });
+    const { hook, complete } = createHook({ backgroundJobBoard: board });
 
     // child-1 via tool + synthetic injected (narrow + metadata will remember it)
     await hook['tool.execute.before'](
@@ -2804,6 +2869,7 @@ describe('task-session-manager hook', () => {
         },
       ],
     };
+    complete('child-1', 'done1');
     await transformMessages(hook, msg1);
     expect(board.get('child-1')?.terminalUnreconciled).toBe(true);
 
@@ -2918,7 +2984,7 @@ describe('task-session-manager hook', () => {
 
   test('checkpoint-compatible no-starvation via snapshot replay: child-1 synthetic; child-2 terminal no synthetic; second transform replays snapshot with child-2; board text has it; idle reconciles both', async () => {
     const board = new BackgroundJobBoard();
-    const { hook } = createHook({
+    const { hook, complete } = createHook({
       backgroundJobBoard: board,
       strategy: 'checkpoint-compatible',
       idleReconcileDelayMs: 0,
@@ -2954,6 +3020,7 @@ describe('task-session-manager hook', () => {
         },
       ],
     };
+    complete('child-1', 'done1');
     await transformMessages(hook, msg1);
     expect(board.get('child-1')?.terminalUnreconciled).toBe(true);
 
@@ -3207,7 +3274,7 @@ describe('task-session-manager hook', () => {
 
   test('does not replay old injected completion after same task id relaunches', async () => {
     const board = new BackgroundJobBoard();
-    const { hook } = createHook({ backgroundJobBoard: board });
+    const { hook, complete } = createHook({ backgroundJobBoard: board });
 
     board.registerLaunch({
       taskID: 'child-1',
@@ -3240,6 +3307,7 @@ describe('task-session-manager hook', () => {
       ],
     };
 
+    complete('child-1', 'old result');
     await transformMessages(hook, messages);
     expect(board.get('child-1')).toMatchObject({
       state: 'completed',
@@ -3364,7 +3432,7 @@ describe('task-session-manager hook', () => {
 
   test('dedupes anonymous synthetic completions by content hash even when message index changes', async () => {
     const board = new BackgroundJobBoard();
-    const { hook } = createHook({ backgroundJobBoard: board });
+    const { hook, complete } = createHook({ backgroundJobBoard: board });
 
     board.registerLaunch({
       taskID: 'child-1',
@@ -3397,6 +3465,7 @@ describe('task-session-manager hook', () => {
       ],
     };
 
+    complete('child-1', 'same result');
     await transformMessages(hook, firstMessages);
 
     expect(board.get('child-1')).toMatchObject({
@@ -3618,7 +3687,7 @@ describe('task-session-manager hook', () => {
 
   test('valid synthetic completed message updates board to terminal', async () => {
     const board = new BackgroundJobBoard();
-    const { hook } = createHook({ backgroundJobBoard: board });
+    const { hook, complete } = createHook({ backgroundJobBoard: board });
 
     board.registerLaunch({
       taskID: 'child-1',
@@ -3649,6 +3718,7 @@ describe('task-session-manager hook', () => {
       ],
     };
 
+    complete('child-1', 'successfully mapped');
     await transformMessages(hook, messages);
 
     expect(board.get('child-1')).toMatchObject({
@@ -3660,7 +3730,7 @@ describe('task-session-manager hook', () => {
 
   test('valid synthetic failed message updates board to terminal error', async () => {
     const board = new BackgroundJobBoard();
-    const { hook } = createHook({ backgroundJobBoard: board });
+    const { hook, complete } = createHook({ backgroundJobBoard: board });
 
     board.registerLaunch({
       taskID: 'child-1',
@@ -3691,6 +3761,7 @@ describe('task-session-manager hook', () => {
       ],
     };
 
+    complete('child-1', 'mapping failed', true);
     await transformMessages(hook, messages);
 
     expect(board.get('child-1')).toMatchObject({
@@ -3700,7 +3771,7 @@ describe('task-session-manager hook', () => {
     });
   });
 
-  test('normalizes late injected failure for an explicitly cancelled task', async () => {
+  test('preserves historical injected failure while presenting current cancellation', async () => {
     const board = new BackgroundJobBoard();
     const { hook } = createHook({ backgroundJobBoard: board });
 
@@ -3743,7 +3814,7 @@ describe('task-session-manager hook', () => {
     expect(board.get('child-1')?.resultSummary).toBe(
       'cancelled: user requested',
     );
-    expect(messages.messages[0].parts[0].text).not.toContain(
+    expect(messages.messages[0].parts[0].text).toContain(
       'No user message found',
     );
     expect(board.get('child-1')).toMatchObject({
@@ -3840,7 +3911,7 @@ describe('task-session-manager hook', () => {
     expect(boardText(nextMessages)).toContain('Reusable Sessions');
   });
 
-  test('does not reopen stale cancelled child job when child session becomes busy', async () => {
+  test('confirmed live busy reopens an acknowledged cancelled child', async () => {
     const board = new BackgroundJobBoard();
     const { hook } = createHook({ backgroundJobBoard: board });
 
@@ -3856,18 +3927,23 @@ describe('task-session-manager hook', () => {
     await hook.event({
       event: {
         type: 'session.status',
-        properties: { sessionID: 'child-1', status: { type: 'busy' } },
+        properties: {
+          sessionID: 'child-1',
+          status: { type: 'busy' },
+          activityAt: (board.get('child-1')?.completedAt ?? 0) + 1,
+        },
       },
     });
 
     expect(board.get('child-1')).toMatchObject({
-      state: 'reconciled',
+      state: 'running',
       terminalUnreconciled: false,
-      terminalState: 'cancelled',
+      terminalState: undefined,
+      cancellationRequested: true,
     });
   });
 
-  test('late injected completion during idle delay is not dropped by reconciliation', async () => {
+  test('an earlier idle delivery cannot acknowledge a replacement publication', async () => {
     const board = new BackgroundJobBoard();
     const { hook } = createHook({ backgroundJobBoard: board });
 
@@ -3884,7 +3960,11 @@ describe('task-session-manager hook', () => {
       },
     });
 
-    // Before the timer fires, a late injected completion arrives with error
+    // Live activity withdraws A; a separately confirmed error publishes B.
+    board.markRunningFromLiveSession(
+      'child-1',
+      (board.get('child-1')?.completedAt ?? Date.now()) + 1,
+    );
     board.updateStatus({
       taskID: 'child-1',
       state: 'error',
@@ -3893,9 +3973,10 @@ describe('task-session-manager hook', () => {
 
     await flushIdleReconcileDelay();
 
-    // Reconciled with the late error's result, not the idle-written fallback
+    // The pending timer only acknowledges A's publication revision.
     expect(board.get('child-1')).toMatchObject({
-      state: 'reconciled',
+      state: 'error',
+      terminalUnreconciled: true,
       terminalState: 'error',
       resultSummary: 'actual error from child',
     });
@@ -5074,16 +5155,18 @@ describe('task-session-manager hook', () => {
     expect(resume.args.task_id).toBe('exp-1');
   });
 
-  test('custom subagent raw session task_id is preserved', async () => {
+  test('custom subagent unknown native task_id is rejected before host execution', async () => {
     const { hook } = createHook();
     const resume = {
       args: { subagent_type: 'repro-helper', task_id: 'ses_custom123' },
     };
 
-    await hook['tool.execute.before'](
-      { tool: 'task', sessionID: 'parent-1', callID: 'resume' },
-      resume,
-    );
+    await expect(
+      hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'resume' },
+        resume,
+      ),
+    ).rejects.toThrow(/Unknown task ID or alias/);
 
     expect(resume.args.task_id).toBe('ses_custom123');
   });
@@ -5228,7 +5311,7 @@ describe('task-session-manager hook', () => {
     expect(resume.args.task_id).toBe('ses_child');
   });
 
-  test('late child busy event does not reopen completed foreground XML task', async () => {
+  test('confirmed child busy reopens completed foreground XML task', async () => {
     const board = new BackgroundJobBoard();
     const { hook } = createHook({ backgroundJobBoard: board });
     await hook['tool.execute.before'](
@@ -5251,27 +5334,33 @@ describe('task-session-manager hook', () => {
     await hook.event({
       event: {
         type: 'session.status',
-        properties: { sessionID: 'ses_child', status: { type: 'busy' } },
+        properties: {
+          sessionID: 'ses_child',
+          status: { type: 'busy' },
+          activityAt: (board.get('ses_child')?.completedAt ?? 0) + 1,
+        },
       },
     });
 
     expect(board.get('ses_child')).toMatchObject({
-      state: 'completed',
-      terminalState: 'completed',
-      terminalUnreconciled: true,
+      state: 'running',
+      terminalState: undefined,
+      terminalUnreconciled: false,
     });
   });
 
-  test('preserves explicit raw session ids when reusable board misses', async () => {
+  test('rejects unknown native resume ids before launching the host', async () => {
     const { hook } = createHook();
     const resume = {
       args: { subagent_type: 'fixer', task_id: 'ses_existing' },
     };
 
-    await hook['tool.execute.before'](
-      { tool: 'task', sessionID: 'parent-1', callID: 'resume-1' },
-      resume,
-    );
+    await expect(
+      hook['tool.execute.before'](
+        { tool: 'task', sessionID: 'parent-1', callID: 'resume-1' },
+        resume,
+      ),
+    ).rejects.toThrow(/Unknown task ID or alias: ses_existing/);
 
     expect(resume.args.task_id).toBe('ses_existing');
   });
@@ -5335,7 +5424,13 @@ describe('task-session-manager hook', () => {
     );
     await hook['tool.execute.after'](
       { tool: 'task', sessionID: 'parent-1', callID: 'status-1' },
-      { output: ['task_id: child-1', 'state: completed'].join('\n') },
+      {
+        output: [
+          'task_id: child-1',
+          'state: completed',
+          '<task_result>inspected files</task_result>',
+        ].join('\n'),
+      },
     );
     const messages = createMessages('parent-1', 'continue');
     await transformMessages(hook, messages);
@@ -6182,7 +6277,7 @@ describe('task-session-manager hook', () => {
     const board = new BackgroundJobBoard();
     const terminalListener = mock(() => {});
     board.addTerminalStateListener(terminalListener);
-    const { hook } = createHook({
+    const { hook, complete } = createHook({
       backgroundJobBoard: board,
       runtimeStatusReconcileDelayMs: 60_000,
     });
@@ -6212,6 +6307,7 @@ describe('task-session-manager hook', () => {
         properties: { part: completion },
       },
     });
+    complete('child-same-generation', 'same generation result');
     await hook['experimental.chat.messages.transform']({}, {
       messages: [
         {
@@ -6414,7 +6510,7 @@ describe('task-session-manager hook', () => {
 
     expect(board.get('child-relaunch')).toMatchObject({
       generation: 2,
-      state: 'reconciled',
+      state: 'completed',
       terminalState: 'completed',
       statusUncertain: false,
       resultSummary: 'settled final answer',
@@ -6423,7 +6519,7 @@ describe('task-session-manager hook', () => {
 
   test('skips an old remembered completion after relaunch without poisoning status (fence-first)', async () => {
     const board = new BackgroundJobBoard();
-    const { hook } = createHook({
+    const { hook, complete } = createHook({
       backgroundJobBoard: board,
       runtimeStatusReconcileDelayMs: 60_000,
     });
@@ -6451,6 +6547,7 @@ describe('task-session-manager hook', () => {
         properties: { part: completion },
       },
     });
+    complete('child-stale-fence', 'old result');
     await hook['experimental.chat.messages.transform']({}, {
       messages: [
         {
@@ -6581,7 +6678,7 @@ describe('task-session-manager hook', () => {
     const board = new BackgroundJobBoard();
     const terminalListener = mock(() => {});
     board.addTerminalStateListener(terminalListener);
-    const { hook } = createHook({
+    const { hook, complete } = createHook({
       backgroundJobBoard: board,
       runtimeStatusReconcileDelayMs: 60_000,
     });
@@ -6613,6 +6710,7 @@ describe('task-session-manager hook', () => {
     });
     const transformedCompletion = { ...observedCompletion };
     delete transformedCompletion.messageID;
+    complete('child-ambiguous', 'uncertain result');
     await hook['experimental.chat.messages.transform']({}, {
       messages: [
         {
@@ -6701,7 +6799,7 @@ describe('task-session-manager hook', () => {
     const board = new BackgroundJobBoard();
     const terminalListener = mock(() => {});
     board.addTerminalStateListener(terminalListener);
-    const { hook } = createHook({
+    const { hook, complete } = createHook({
       backgroundJobBoard: board,
       runtimeStatusReconcileDelayMs: 60_000,
     });
@@ -6752,6 +6850,7 @@ describe('task-session-manager hook', () => {
         properties: { part: explicitCompletion },
       },
     });
+    complete('child-explicit-host-prefix', 'explicit result');
     await hook['experimental.chat.messages.transform']({}, {
       messages: [
         {
@@ -6857,7 +6956,7 @@ describe('task-session-manager hook', () => {
     const board = new BackgroundJobBoard();
     const terminalListener = mock(() => {});
     board.addTerminalStateListener(terminalListener);
-    const { hook } = createHook({
+    const { hook, complete } = createHook({
       backgroundJobBoard: board,
       runtimeStatusReconcileDelayMs: 60_000,
     });
@@ -6897,6 +6996,7 @@ describe('task-session-manager hook', () => {
       },
     });
 
+    complete('child-valid-host', 'valid result');
     await hook['experimental.chat.messages.transform']({}, {
       messages: [
         {
@@ -6923,7 +7023,7 @@ describe('task-session-manager hook', () => {
     const board = new BackgroundJobBoard();
     const terminalListener = mock(() => {});
     board.addTerminalStateListener(terminalListener);
-    const { hook } = createHook({
+    const { hook, complete } = createHook({
       backgroundJobBoard: board,
       runtimeStatusReconcileDelayMs: 60_000,
     });
@@ -6951,6 +7051,7 @@ describe('task-session-manager hook', () => {
         properties: { part: first },
       },
     });
+    complete('child-processed-weak-origin', 'first result');
     await hook['experimental.chat.messages.transform']({}, {
       messages: [
         {
@@ -7754,8 +7855,13 @@ describe('task-session-manager hook', () => {
     const coordinator = new SessionLifecycle(() => {});
     const clock = createSupervisorClock();
     const abort = mock(async () => undefined);
+    const terminalGate = createBackgroundJobTerminalGate({
+      backgroundJobBoard: board,
+      now: clock.now,
+    });
     const supervisor = new BackgroundJobSupervisor({
       backgroundJobStore: board,
+      terminalGate,
       wallClockTimeoutMs: 100,
       abortGraceMs: 20,
       abort,
@@ -7774,6 +7880,7 @@ describe('task-session-manager hook', () => {
     let fallback = false;
     const { hook } = createHook({
       backgroundJobBoard: board,
+      terminalGate,
       backgroundJobSupervisor: supervisor,
       coordinator,
       shouldManageSession: () => false,
@@ -7796,6 +7903,7 @@ describe('task-session-manager hook', () => {
       timedOut: true,
       deadlineExceededAt: 100,
     });
+    terminalGate.dispose();
   });
 
   test('cancelled job is not reconciled from idle', async () => {
