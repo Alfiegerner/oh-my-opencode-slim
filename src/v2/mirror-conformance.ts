@@ -3,10 +3,10 @@
  *
  * Compile-time assertions binding the hand-mirrored v2 plugin context in
  * `./types.ts` to the official `@opencode/plugin` types (pinned to the
- * audited version in devDependencies). Enforcement point is `bun run
- * typecheck`: this file must NOT carry a test suffix, because tsconfig
- * excludes test-suffixed files (`*.test.ts`) from tsc — a test-suffixed
- * guard silently checks nothing.
+ * audited version in devDependencies; baseline `2.0.5`). Enforcement
+ * point is `bun run typecheck`: this file must NOT carry a test suffix,
+ * because tsconfig excludes test-suffixed files (`*.test.ts`) from tsc —
+ * a test-suffixed guard silently checks nothing.
  *
  * This file is deliberately NOT imported by any entry point, so it never
  * reaches the runtime bundles, and it uses `import type` only, so it
@@ -32,7 +32,10 @@
  */
 
 import type { PermissionDomain } from '@opencode/plugin/promise/permission';
-import type { SessionHooks } from '@opencode/plugin/promise/session';
+import type {
+  SessionDomain,
+  SessionHooks,
+} from '@opencode/plugin/promise/session';
 import type { V2Context } from './types';
 
 type Expect<T extends true> = T;
@@ -51,6 +54,7 @@ type OfficialSessionHookNames =
   | 'model.request'
   | 'http.request'
   | 'http.response'
+  | 'experimental.ws.handshake'
   | 'retry';
 
 /** Layer 1: the official surface is exactly this set — nothing added,
@@ -110,14 +114,25 @@ type _modelRequestKind = Expect<
     ? true
     : false
 >;
-type _permissionRulesExists = Expect<
-  PermissionDomain['rules'] extends (...args: never[]) => unknown ? true : false
+/** v2.0.5 removed permission.rules — the guard must notice if it comes
+ * back or the mirror starts calling something that no longer exists. */
+type _permissionRulesGone = Expect<
+  Equal<'rules' extends keyof PermissionDomain ? true : false, false>
 >;
-type _permissionRulesInput = Expect<
-  Parameters<PermissionDomain['rules']>[0] extends {
-    sessionID: string;
-    permissions: ReadonlyArray<unknown>;
-  }
+
+type SessionUpdateInput = Parameters<SessionDomain['update']>[0];
+type _sessionUpdateInput = Expect<
+  SessionUpdateInput extends { sessionID: string; title?: string }
     ? true
     : false
+>;
+
+type SessionInterruptInput = Parameters<SessionDomain['interrupt']>[0];
+type _sessionInterruptResume = Expect<
+  SessionInterruptInput extends { sessionID: string; resume?: boolean }
+    ? true
+    : false
+>;
+type _sessionInterruptContinueGone = Expect<
+  Equal<'continue' extends keyof SessionInterruptInput ? true : false, false>
 >;
