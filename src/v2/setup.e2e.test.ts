@@ -592,11 +592,10 @@ describe('createV2Setup e2e', () => {
     expect(logText).not.toContain('[v2] v1 dispose failed');
   }, 20_000);
 
-  test('host rejecting the model.request hook name degrades: one log, no crash', async () => {
-    // Older v2 hosts reject unknown session.hook names. The chat.headers
-    // bridge must degrade exactly like the prompt hook: setup completes,
-    // every other bridge still registers, and the deterministic
-    // unavailability line lands in the plugin log exactly once.
+  test('host rejecting the model.request hook name fails setup loudly', async () => {
+    // v2.0.5-only posture: hook-name rejection is a host contract
+    // violation, not a degrade path — the error propagates out of setup
+    // (no fallback log, no silent skip of the Copilot initiator header).
     const { ctx, calls } = makeMockV2Context(projectDir);
     const baseHook = ctx.session.hook.bind(ctx.session);
     const rejected: string[] = [];
@@ -611,23 +610,18 @@ describe('createV2Setup e2e', () => {
       return baseHook(name as 'context', cb as never);
     };
 
-    const cleanup = await createV2Setup()(ctx);
+    await expect(createV2Setup()(ctx)).rejects.toThrow(
+      'unknown session hook: model.request',
+    );
 
-    try {
-      expect(rejected).toEqual(['model.request']);
-      // Other session bridges unaffected by the rejection.
-      expect(calls.hooks).toContain('session:context');
-      expect(calls.hooks).toContain('session:prompt');
-      expect(calls.contextHookCb).toBeFunction();
+    // Bridges registered before the failure are intact.
+    expect(rejected).toEqual(['model.request']);
+    expect(calls.hooks).toContain('session:context');
+    expect(calls.hooks).toContain('session:prompt');
+    expect(calls.contextHookCb).toBeFunction();
 
-      await flushLoggerForTesting();
-      const logText = readPluginLog();
-      expect(logText).toContain(
-        '[v2] session.hook(model.request) unavailable; chat.headers not bridged',
-      );
-      expect(logText.match(/chat\.headers not bridged/g) ?? []).toHaveLength(1);
-    } finally {
-      await cleanup(); // must not throw despite the rejected hook
-    }
+    await flushLoggerForTesting();
+    const logText = readPluginLog();
+    expect(logText).not.toContain('chat.headers not bridged');
   }, 20_000);
 });
