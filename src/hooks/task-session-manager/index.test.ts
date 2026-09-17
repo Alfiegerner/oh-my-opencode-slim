@@ -8102,6 +8102,57 @@ describe('task-session-manager hook', () => {
     expect(hook.hasInputWait('parent-1')).toBe(true);
   });
 
+  test('injected non-operator nudges do not clear wait_for_user (shared genuine-operator gate)', async () => {
+    const { hook } = createHook();
+    // noReply injection with operator-looking text.
+    hook.beginUserWait('parent-1');
+    hook.observeChatMessage(
+      { sessionID: 'parent-1', messageID: 'nudge-1', noReply: true },
+      {
+        message: { id: 'nudge-1', role: 'user', sessionID: 'parent-1' },
+        parts: [{ type: 'text', text: 'status nudge' }],
+      },
+    );
+    expect(hook.hasInputWait('parent-1')).toBe(true);
+    // v2 command-marker submit: plain text with no message identity.
+    hook.observeChatMessage(
+      { sessionID: 'parent-1' },
+      {
+        message: { role: 'user', sessionID: 'parent-1' },
+        parts: [{ type: 'text', text: '/deepwork marker' }],
+      },
+    );
+    expect(hook.hasInputWait('parent-1')).toBe(true);
+    // Board-tagged injection that lost its synthetic flag.
+    hook.observeChatMessage(
+      { sessionID: 'parent-1', messageID: 'nudge-2' },
+      {
+        message: { id: 'nudge-2', role: 'user', sessionID: 'parent-1' },
+        parts: [
+          {
+            type: 'text',
+            text: 'board snapshot',
+            metadata: { 'oh-my-opencode-slim.backgroundJobBoard': true },
+          },
+        ],
+      },
+    );
+    expect(hook.hasInputWait('parent-1')).toBe(true);
+    // A genuine external operator message still clears.
+    hook.observeChatMessage(
+      { sessionID: 'parent-1', messageID: 'msg-user-resumes' },
+      {
+        message: {
+          id: 'msg-user-resumes',
+          role: 'user',
+          sessionID: 'parent-1',
+        },
+        parts: [{ type: 'text', text: 'The manual step is complete.' }],
+      },
+    );
+    expect(hook.hasInputWait('parent-1')).toBe(false);
+  });
+
   test('question/permission asks arm hasInputWait until resolved', async () => {
     const { hook } = createHook();
     await hook.event({

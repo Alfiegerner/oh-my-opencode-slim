@@ -54,6 +54,78 @@ export const ORCHESTRATOR_WAKE_TEXT =
 export const ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT =
   '<system-reminder>\nA background job stopped without a terminal result. Consult the Background Job Board, recover or reroute the work as needed, and do not wait for that job as if it were still running. Do not respond to this reminder.\n</system-reminder>';
 
+/**
+ * True only for a genuine external operator message. Plugin-injected nudges
+ * must never rearm the no-progress cap or clear wait state:
+ * - synthetic parts (board tails, phase reminders, revived-run terminal
+ *   notifications, internal-initiator wake replays) are host/internal, not
+ *   operator input;
+ * - `noReply` prompts (task_message child nudges, interview URL
+ *   notifications) never expect an operator turn;
+ * - v2 command-marker submits (`ctx.session.prompt` text-only submits) carry
+ *   no chat.message messageID identity, so they fail the operator-identity
+ *   gate below.
+ *
+ * Exported for unit tests and shared with task-session-manager (single
+ * source of truth for the genuine-operator verdict).
+ */
+export function isGenuineOperatorMessage(
+  inputMessage: Record<string, unknown> | undefined,
+  outputMessage: Record<string, unknown> | undefined,
+  parts: unknown,
+): boolean {
+  if (!Array.isArray(parts) || parts.length === 0) return false;
+  for (const part of parts) {
+    if (!isObjectRecord(part)) continue;
+    // Any synthetic or internal-initiator part vetoes the whole message:
+    // a single plugin-injected part marks the turn as plugin-injected even
+    // when it rides alongside genuine operator text (e.g. a wake replay
+    // appended to an operator turn). Fail closed toward no-rearm.
+    if (part.synthetic === true || isInternalInitiatorPart(part)) return false;
+    // Non-text/non-file/non-image parts (e.g. step-start markers) carry no
+    // operator content.
+    if (
+      !(
+        (part.type === 'text' && typeof part.text === 'string') ||
+        part.type === 'file' ||
+        part.type === 'image'
+      )
+    ) {
+      continue;
+    }
+    // Tagged synthetic-adjacent injections (board/phase metadata keys) that
+    // survived without the synthetic flag are still not operator input.
+    if (isObjectRecord(part.metadata)) {
+      const metadata = part.metadata as Record<string, unknown>;
+      if (
+        metadata['oh-my-opencode-slim.backgroundJobBoard'] === true ||
+        metadata['oh-my-opencode-slim.phaseReminder'] === true ||
+        metadata['oh-my-opencode-slim.internalInitiator'] === true
+      ) {
+        return false;
+      }
+    }
+  }
+  // Operator identity: the host assigns a messageID to real chat.message
+  // turns. v2 command submits and bare notify injections arrive without one.
+  // Upstream's messageIdentity seam (input.messageID → output.message.id →
+  // same-process output.message object, fail closed) is the identity half
+  // of this verdict; the checks above are the genuineness half. Both must
+  // pass: callers keep their own messageIdentity computation and additionally
+  // require this helper, so neither seam can pass an injection alone.
+  const inputMessageID = inputMessage?.messageID;
+  const outputMessageID = outputMessage?.id;
+  const hasOperatorIdentity =
+    (typeof inputMessageID === 'string' && inputMessageID.length > 0) ||
+    (typeof outputMessageID === 'string' && outputMessageID.length > 0);
+  if (!hasOperatorIdentity) return false;
+  // noReply injections never expect an operator turn.
+  if (inputMessage?.noReply === true || outputMessage?.noReply === true) {
+    return false;
+  }
+  return true;
+}
+
 /** Self-contained terminal delta appended to the stopped-job recovery wake.
  * The board snapshot path cannot serve this wake: under the
  * `checkpoint-compatible` injection strategy, internal-initiator messages
@@ -1489,6 +1561,13 @@ export function createOrchestratorWakeScheduler(
         outputMessage.role !== 'user') ||
       !Array.isArray(parts) ||
       parts.some(isInternalInitiatorPart) ||
+      // Non-operator nudges (task_message noReply injections, interview
+      // URL notifications, v2 command-marker submits, board/phase synthetic
+      // tails) arrive as synthetic parts, internal-initiator parts, or
+      // unmarked plain-text injections with no operator message identity.
+      // Only a genuine external operator message rearms the no-progress
+      // cap; injected nudges must not.
+      !isGenuineOperatorMessage(inputMessage, outputMessage, parts) ||
       !parts.some(
         (part) =>
           isObjectRecord(part) &&
