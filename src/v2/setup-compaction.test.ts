@@ -1,5 +1,5 @@
 /**
- * v2 compaction hook bridge (`ctx.session.hook("compaction")`, v2.0.0+).
+ * v2 compaction hook bridge (`ctx.session.hook("compaction")`).
  *
  * Coverage:
  * - tagged synthetic parts are stripped from the compaction event's
@@ -8,7 +8,7 @@
  * - read-only guarantees: `system` is never modified and `result` is
  *   never set (host-owned; open host bug — the compaction system prompt
  *   may be absent, so the bridge must not add or rewrite one)
- * - registration contract (v2.0.5-only): a host that rejects the hook
+ * - registration contract: a host that rejects the hook
  *   name fails setup loudly — the error propagates instead of being
  *   swallowed with a fallback log (mirrors the model.request contract
  *   test in setup.e2e.test.ts)
@@ -373,7 +373,7 @@ describe('createV2Setup compaction hook', () => {
   }, 20_000);
 
   test('host rejecting the compaction hook name fails setup loudly', async () => {
-    // v2.0.5-only posture: hook-name rejection is a host contract
+    // Hook-name rejection is a host contract
     // violation, not a degrade path — the error propagates out of setup
     // instead of being swallowed with a fallback log line.
     const { ctx, hooks, rejected, getContextCb } = makeCtx({

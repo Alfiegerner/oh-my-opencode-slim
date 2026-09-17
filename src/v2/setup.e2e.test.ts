@@ -593,7 +593,7 @@ describe('createV2Setup e2e', () => {
   }, 20_000);
 
   test('host rejecting the model.request hook name fails setup loudly', async () => {
-    // v2.0.5-only posture: hook-name rejection is a host contract
+    // Hook-name rejection is a host contract
     // violation, not a degrade path — the error propagates out of setup
     // (no fallback log, no silent skip of the Copilot initiator header).
     const { ctx, calls } = makeMockV2Context(projectDir);

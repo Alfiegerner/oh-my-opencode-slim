@@ -121,7 +121,7 @@ export function createV2InterviewBridge(
       await submitUserText(sessionID, text);
     },
     rename: async (sessionID, title) => {
-      // v2.0.5 merged rename into session.update({sessionID, title?}).
+      // Renames go through session.update({sessionID, title}).
       if (typeof methods.update !== 'function') {
         log('[v2][interview] session rename unavailable', { sessionID });
         return;

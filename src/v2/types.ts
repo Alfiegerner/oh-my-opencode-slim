@@ -118,7 +118,7 @@ export interface V2SessionModelRequestEvent {
   headers: Record<string, string>;
 }
 /**
- * v2 `session.compaction` hook payload (v2.0.0+): the host's session
+ * v2 `session.compaction` hook payload: the host's session
  * summarization request. Same request shape as the context event plus an
  * optional host-owned `result`. The plugin bridge only strips its own
  * tagged synthetic parts from `messages`; `system` is never rewritten
@@ -222,9 +222,8 @@ export interface V2Context {
       name: 'model.request',
       cb: (event: V2SessionModelRequestEvent) => Promise<void>,
     ): Promise<V2Registration>;
-    /** v2 session.compaction hook (v2.0.0+) — host summarization request
-     * (see V2SessionCompactionEvent). Older v2 hosts reject the name;
-     * callers must degrade. */
+    /** v2 session.compaction hook — host summarization request
+     * (see V2SessionCompactionEvent). */
     hook(
       name: 'compaction',
       cb: (event: V2SessionCompactionEvent) => Promise<void>,
@@ -240,16 +239,14 @@ export interface V2Context {
       directory?: string;
       parentID?: string | null;
     }): Promise<unknown>;
-    /** v2 session.interrupt — `resume: false` aborts the active run
-     * (field renamed from `continue` in v2.0.5). */
+    /** v2 session.interrupt — `resume: false` aborts the active run. */
     interrupt?(input: {
       sessionID: string;
       resume?: boolean;
     }): Promise<unknown>;
-    /** v2 session.update ({sessionID, title?, permissions?}) — v2.0.5 replacement
-     * for the removed session.rename and permission.rules. `permissions`
-     * REPLACES the session-scoped rule list (see createPermissionRulesBridge in
-     * setup.ts). */
+    /** v2 session.update ({sessionID, title?, permissions?}) — sets the
+     * session title and/or REPLACES the session-scoped rule list (see
+     * createPermissionRulesBridge in setup.ts). */
     update?(input: {
       sessionID: string;
       title?: string;

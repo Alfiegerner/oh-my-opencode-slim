@@ -9,7 +9,7 @@
  * `session.prompt` hook (once-per-admission chat.message fidelity), the
  * native `session.model.request` hook (v1 chat.headers — Copilot
  * initiator header), tool execute hooks, and the event stream. Session
- * hooks register unconditionally on full contexts (v2.0.5-only): a
+ * hooks register unconditionally on full contexts: a
  * registration failure fails setup loudly. Domain transforms
  * (agent/tool/mcp/command) stay independently try/catch-guarded.
  */
@@ -606,7 +606,7 @@ const COMPACTION_STRIP_METADATA_KEYS: readonly string[] = [
 ];
 
 /**
- * Native `session.compaction` hook bridge (v2.0.0+).
+ * Native `session.compaction` hook bridge.
  *
  * The host's session summarizer fires `compaction` with the request's
  * message list; without this bridge the summary would bake the plugin's
@@ -1410,7 +1410,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
 
     if (!v1Hooks) return async () => {};
 
-    // Fail-loud unwinding (v2.0.5-only): session hooks register
+    // Fail-loud unwinding: session hooks register
     // unconditionally, so any throw from here through the return below
     // must not leak the resources setup already registered (transforms,
     // hooks, the interview bridge, v1 resources). Run the saved
@@ -1632,8 +1632,8 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       // per admitted input with the eventual inbox User messageID — the
       // identity v1 chat.message consumers key on. With it registered the
       // context hook's per-request chat.message emulation narrows to
-      // agent/model discovery (v2.0.5-only: registration is unconditional
-      // on full contexts — a registration failure fails setup).
+      // agent/model discovery (registration is unconditional on full
+      // contexts — a registration failure fails setup).
       let promptBridge: V2SessionPromptBridge | undefined;
       if (chatMessage) {
         const bridge = createSessionPromptBridge(chatMessage);
@@ -1671,7 +1671,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       log('[v2] session context hook registered');
 
       // v1 chat.headers → v2 session.model.request (per-provider-request
-      // HTTP headers; v2.0.5-only: registered unconditionally when the v1
+      // HTTP headers; registered unconditionally when the v1
       // hook exists — a failure fails setup rather than silently skipping
       // the Copilot initiator header).
       if (chatHeadersHook) {
@@ -1683,10 +1683,10 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         log('[v2] chat.headers bridge registered (session.model.request)');
       }
 
-      // v2 native compaction hook (v2.0.0+): strip the plugin's tagged
+      // v2 native compaction hook: strip the plugin's tagged
       // synthetic injections from the host's summarization request so
       // the compacted transcript never bakes volatile board/status
-      // content. v2.0.5-only: registered unconditionally — a failure
+      // content. Registered unconditionally — a failure
       // fails setup (tagged content baking into the compacted transcript
       // is a correctness issue, not a summary-quality nicety).
       const compactionReg = await ctx.session.hook(

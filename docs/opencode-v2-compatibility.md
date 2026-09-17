@@ -5,15 +5,12 @@ and OpenCode v2 (`opencode2`) from a single published package. This document
 describes how each host loads the plugin, what is supported where, and how to
 register it.
 
-The verified compatibility baseline is **OpenCode v2.0.5**. Unlike the
-earlier stable line (v2.0.0–v2.0.3 shipped zero
-`packages/plugin` API changes), v2.0.5 changed the plugin API surface —
-`session.rename` and per-session `permission.rules` were removed (both
-merged into `session.update`), and `session.interrupt`'s input field
-`continue` was renamed to `resume` (see
-[v2.0.5 API migrations](#v205-api-migrations)). The adapter targets the
-2.0.5 surface, and the compile-time mirror guard below is pinned to
-`@opencode/plugin` 2.0.5.
+The verified compatibility baseline is **OpenCode v2.0.5**. The plugin
+requires OpenCode v2.0.5+ on v2 hosts; older v2 hosts are unsupported.
+The adapter targets the v2.0.5 plugin API surface (see
+[The v2.0.5 plugin API surface](#the-v205-plugin-api-surface-this-adapter-uses)),
+and the compile-time mirror guard below is pinned to `@opencode/plugin`
+2.0.5.
 
 ## How it works
 
@@ -99,20 +96,19 @@ name for the chat.headers bridge; the event stream, bridges, and
 orchestrator-wake children-driven degraded mode are exercised end-to-end
 on the stable host — live mock-driven re-verification on 2026-09-09
 included a queued wake firing after 60 s of parent idle with a stalled
-background child). That live verification pre-dates v2.0.5 (it ran on
-the v2.0.3 stable host); v2.0.5 conformance is compile-time-pinned by
-the mirror-conformance guard against the `@opencode/plugin` 2.0.5
-devDependency, backed by git-history facts and the mock-driven bridge
-tests. Every v2 API the adapter touches is
+background child). v2.0.5 conformance is compile-time-pinned by the
+mirror-conformance guard against the `@opencode/plugin` 2.0.5
+devDependency and exercised by the mock-driven bridge tests. Every v2
+API the adapter touches is
 capability-probed at runtime (`typeof ctx.mcp?.transform === 'function'`,
 `s.switchModel`, `ctx.generate`, …), so a host lacking one capability
 degrades that single feature with a log line instead of breaking the load.
-The session hooks are the deliberate exception under the v2.0.5-only
-posture: on full contexts they register unconditionally and a
+The session hooks are the deliberate exception: on full contexts they
+register unconditionally and a
 registration failure fails setup (see
 [The v2 adapter](#the-v2-adapter-srcv2setupts)).
 `ctx.mcp.transform` in particular is present in **all** v2.0.x stable hosts;
-its probe only ever matters on pre-stable beta builds.
+its probe only ever matters on non-stable host builds.
 
 ## The v2 adapter (`src/v2/setup.ts`)
 
@@ -124,8 +120,7 @@ its probe only ever matters on pre-stable beta builds.
    v2 flat session calls — `session.get`, `session.abort`→`interrupt`
    (`resume: false` aborts the active run), `session.messages`→`context`,
    `session.prompt` (as `delivery: "steer"`), `session.update`→
-   `session.update` (`{sessionID, title}` — v2.0.5 removed
-   `session.rename`), `session.delete`→`remove` (same
+   `session.update` (`{sessionID, title}`), `session.delete`→`remove` (same
    `DELETE /api/session/:id`; stops the smartfetch secondary-model temp
    sessions leaking), and `session.list` (v2 `Session.Info` page → the v1
    `{data}` envelope with `directory` derived from `location` and `outcome`
@@ -271,8 +266,8 @@ try/catch-guarded so one failure cannot disable the rest, and a
 zero-registration load logs a loud health-check warning. The session hooks
 (`prompt`, `context`, `model.request`, `compaction`) register
 **unconditionally** on full v2 contexts: a registration failure fails
-setup loudly instead of degrading — consistent with the v2.0.5-only
-posture (older-host hook-name fallbacks were removed).
+setup loudly instead of degrading — hook-name rejection is treated as a
+host contract violation, not a degrade path.
 
 ## Feature matrix
 
@@ -286,7 +281,7 @@ posture (older-host hook-name fallbacks were removed).
 | Message transforms (phase reminder, skills filter, image routing, display-name rewrite) | ✅ | ✅ via the single context hook | — |
 | Event handling (session tracking, lifecycle, cache telemetry) | ✅ | ✅ event pump + additive v2→v1 synthesis | — |
 | Tool execute hooks (apply-patch recovery, task-session, json-recovery) | ✅ | ✅ `createToolExecuteBridges` with subagent→task normalization | — |
-| Built-in MCPs (context7, gh_grep) auto-registered | ✅ | ✅ `ctx.mcp.transform` | `ctx.mcp.transform` is present in all v2.0.x stable hosts; the runtime capability probe only ever matters on pre-stable beta builds |
+| Built-in MCPs (context7, gh_grep) auto-registered | ✅ | ✅ `ctx.mcp.transform` | `ctx.mcp.transform` is present in all v2.0.x stable hosts; the runtime capability probe is belt-and-suspenders |
 | webfetch secondary-model summaries | ✅ | ✅ via `ctx.generate.text` | host without `ctx.generate` → summaries unavailable (logged) |
 | Background-job state persistence (tombstones, deletion epochs, alias high-water marks) | ➖ process-local | ✅ via `ctx.storage` | optional domain; absent → pure in-memory fallback, zero behavior change (see [Background job state](#background-job-state-rehydrate-probe-and-persistence)) |
 | Foreground model fallback (rate-limit failover) | ✅ | ✅ shim translates re-prompt into `session.switchModel` + `delivery:"steer"` prompt | — |
@@ -360,41 +355,35 @@ currently break this plugin:
   v1 hosts expose the method and keep the exact historical polling
   behavior. Background job stop-confirmation was never obtainable from
   the v2 poll anyway (the lookup failed every time).
-- **Stable-line plugin API additions (historical, verified in v2.0.3).**
-  Between the pre-stable betas and v2.0.0, upstream grew the plugin surface
-  with session hooks `compaction`, `generate`, and `title` (the title and
-  compaction hooks may set `result` to skip the model call entirely),
-  per-session `permission.rules`, and TUI `ui.tabs.move()` (with
-  `tabs.open` no longer focusing a tab and `tabs.focus` now opening the
-  tab if needed). The `SessionContext` request shape also merged
-  `generation` and `providerOptions` into a single `options` object —
-  the plugin is unaffected: its context bridge mutates only
-  system/messages, and cache hints ride `ContentPart.cache`, which is
-  unchanged. Adoption status: the **compaction hook is adopted** — the
-  plugin strips its tagged synthetic parts from the compaction input
-  (new in this release); **child-session permission rules are applied** —
-  v2.0.5 removed per-session `permission.rules` (merged into
-  `session.update`), so plugin-managed child sessions now receive
-  exact-match task-policy rules once at creation via
-  `ctx.session.update({sessionID, permissions})`
+- **Plugin API surface and adoption status.** The v2 plugin API exposes
+  session hooks `compaction`, `generate`, and `title` (the title and
+  compaction hooks may set `result` to skip the model call entirely)
+  and TUI `ui.tabs.move()` (`tabs.open` does not focus a tab;
+  `tabs.focus` opens the tab if needed). The `SessionContext` request
+  shape carries `generation` and `providerOptions` in a single
+  `options` object — the plugin is unaffected: its context bridge
+  mutates only system/messages, and cache hints ride
+  `ContentPart.cache`. Adoption status: the **compaction hook is
+  adopted** — the plugin strips its tagged synthetic parts from the
+  compaction input; **child-session permission rules are applied** —
+  plugin-managed child sessions receive exact-match task-policy rules
+  once at creation via `ctx.session.update({sessionID, permissions})`
   (`createPermissionRulesBridge` in `src/v2/setup.ts`; exact-match
   strings only, no wildcards, while upstream matching semantics settle —
-  PRs #48194/#46495/#46871; still triggered on plugin-managed child
+  PRs #48194/#46495/#46871; triggered on plugin-managed child
   `session.created` and fail-soft with a one-time warning on reduced
-  hosts without the method); the
-  `generate` session hook (not the `ctx.generate` text channel the
-  webfetch summaries use), the `title` hook, and the new `tabs`
-  methods are not used.
+  hosts without the method); the `generate` session hook (not the
+  `ctx.generate` text channel the webfetch summaries use), the `title`
+  hook, and the `tabs` methods are not used.
   The `title` hook needs no adoption for child sessions: v2 hosts
   title subagent children deterministically at creation (the
   `subagent` tool sets `title` from its `description` argument, which
-  the delegation pipeline always supplies) — the earlier
-  "deterministic child titles" future-work item is closed as natively
-  covered; the hook only matters if custom title formats are wanted.
-  Upstream is still actively fixing compaction×hook plumbing and
-  compaction×cache behavior after v2.0.5, so compaction-hook semantics
-  may evolve; the plugin's hook callback is written shape-tolerant
-  (messages-only mutation) to ride those changes.
+  the delegation pipeline always supplies) — the hook only matters if
+  custom title formats are wanted. Upstream is still actively fixing
+  compaction×hook plumbing and compaction×cache behavior, so
+  compaction-hook semantics may evolve; the plugin's hook callback is
+  written shape-tolerant (messages-only mutation) to ride those
+  changes.
 - **Duplicate idle delivery.** The adapter synthesizes both an idle
   `session.status` and a `session.idle` from each terminal execution event,
   so a consumer watching both sees idle twice per terminal transition.
@@ -418,30 +407,25 @@ currently break this plugin:
   (`"mcps": ["context7", "!gh_grep"]` in agent config), and registration
   uses its own server names via `draft.set(name, ...)`.
 
-### v2.0.5 API migrations
+### The v2.0.5 plugin API surface this adapter uses
 
-What changed in `packages/plugin` at v2.0.5 and how the adapter followed:
-
-- **`session.rename` → `session.update`.** v2.0.5 removed `session.rename`
-  and merged it into `session.update({sessionID, title?, permissions?})`.
-  The client shim's v1-facing `session.update({body: {title}})` and the
-  v2 interview bridge's session renames both call `session.update` now.
-- **`permission.rules` → `session.update`.** The per-session
-  `permission.rules` method was removed; child-session permission rules
-  are applied through `session.update({sessionID, permissions})`
-  (see the adoption-status bullet above).
-- **`interrupt.continue` → `interrupt.resume`.** `session.interrupt`'s
-  input field was renamed; the shim's abort path sends
-  `{sessionID, resume: false}` (`resume: false` aborts the active run).
-- **New `experimental.ws.handshake` session hook.** Pinned in the
-  mirror-conformance guard's official hook set; **not used** by this
-  plugin.
-- **Core `# Your Model` identity system part.** v2.0.5 core splices a
+- **`session.update({sessionID, title?, permissions?})`.** Sets the
+  session title and/or REPLACES the session-scoped permission rule
+  list. The client shim's v1-facing `session.update({body: {title}})`
+  and the v2 interview bridge's session renames both call it, and the
+  child-session permission bridge applies its rules through the
+  `permissions` field (see the adoption-status bullet above).
+- **`session.interrupt({sessionID, resume})`.** `resume: false` aborts
+  the active run; the shim's abort path sends exactly that.
+- **`experimental.ws.handshake` session hook.** Exists on the official
+  hook set (pinned in the mirror-conformance guard); **not used** by
+  this plugin.
+- **Core `# Your Model` identity system part.** v2 core splices a
   `# Your Model` identity part at `system[1]` on every LLM request. The
   plugin's system transform keeps appending the orchestrator prompt to
   `system[0]` and collapses all parts into one — locked by a regression
   test in `src/index.test.ts`.
-- **Subagent `model` param.** v2.0.5's built-in `subagent` tool gained an
+- **Subagent `model` param.** The built-in `subagent` tool takes an
   optional `model` argument (`"providerID/modelID"`). The delegation
   vocabulary exposes it (`modelParam`) and the orchestrator/council
   prompts carry a one-sentence guardrail: only set it when the user

@@ -114,8 +114,8 @@ type _modelRequestKind = Expect<
     ? true
     : false
 >;
-/** v2.0.5 removed permission.rules — the guard must notice if it comes
- * back or the mirror starts calling something that no longer exists. */
+/** The official PermissionDomain exposes no `rules` method — this fails
+ * if upstream adds one or the mirror starts calling it. */
 type _permissionRulesGone = Expect<
   Equal<'rules' extends keyof PermissionDomain ? true : false, false>
 >;
