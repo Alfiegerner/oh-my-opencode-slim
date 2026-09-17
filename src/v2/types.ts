@@ -245,6 +245,15 @@ export interface V2Context {
       sessionID: string;
       continue?: boolean;
     }): Promise<unknown>;
+    /** v2 session.update ({sessionID, title?, permissions?}) — v2.0.5 replacement
+     * for the removed session.rename and permission.rules. `permissions`
+     * REPLACES the session-scoped rule list (see createPermissionRulesBridge in
+     * setup.ts). */
+    update?(input: {
+      sessionID: string;
+      title?: string;
+      permissions?: V2PermissionRule[];
+    }): Promise<unknown>;
     /** v2 session.switchModel — v2 prompts carry no model, so a model
      * change must precede the prompt (runtime-probed). */
     switchModel?(input: {
@@ -295,21 +304,6 @@ export interface V2Context {
   mcp?: {
     transform(cb: (draft: V2McpDraft) => void): Promise<V2Registration>;
     reload(): Promise<void>;
-  };
-  /** v2 permission domain (runtime-probed optional — hosts before
-   * v2.0.0 expose no permission surface to plugins). Mirrors the
-   * OpenCode-core `PermissionDomain` subset; `rules` itself is optional
-   * and must be probed (typeof check) before use. */
-  readonly permission?: {
-    /** v2 permission.rules — REPLACES the session-scoped rule list for
-     * the session (v2.0.0+, #48351). Children inherit their parent's
-     * session rules at creation; the plugin installs each task child's
-     * own exact-match rules here (see createPermissionRulesBridge in
-     * setup.ts). */
-    rules?(input: {
-      sessionID: string;
-      permissions: V2PermissionRule[];
-    }): Promise<unknown>;
   };
 }
 

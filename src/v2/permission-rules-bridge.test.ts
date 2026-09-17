@@ -1,6 +1,6 @@
 /**
- * v2 per-session permission rules bridge (`ctx.permission.rules`, shipped
- * in v2.0.0 via #48351; verified against v2.0.3).
+ * v2 per-session permission rules bridge (`ctx.session.update` with a
+ * `permissions` payload, v2.0.5).
  *
  * The bridge installs exact-match permission rules derived from the child
  * agent's task-policy (the same plugin permission map that feeds the
@@ -12,14 +12,15 @@
  *
  * Coverage:
  * - (a) rules are applied when a plugin-managed child session is created
- * - (b) hosts without `permission.rules` no-op with a ONE-TIME
+ * - (b) hosts without `session.update` no-op with a ONE-TIME
  *   deterministic warning (the commit-2bf290ad degradation pattern)
  * - (c) duplicate session.created delivery for the same sessionID is
  *   idempotent (applied exactly once per child)
  * - (d) emitted rules contain no wildcard characters (`*`, `?`)
  * - (e) failures are logged, never thrown into the event pump
  * - gates: root sessions (no parentID) and foreign agents are never
- *   touched (ctx.permission.rules REPLACES the session-scoped list)
+ *   touched (session.update's `permissions` payload REPLACES the
+ *   session-scoped list)
  * - wiring: the createV2Setup event pump dispatches raw session.created
  *   events into the bridge (full-setup test, fixture pattern from
  *   setup-compaction.test.ts)
@@ -33,7 +34,7 @@ import {
   createV2Setup,
   deriveExactPermissionRules,
 } from './setup';
-import type { V2Context, V2PermissionRule } from './types';
+import type { V2Context, V2PermissionRule, V2Session } from './types';
 
 /** Task-policy fixture: nested exact patterns alongside entries that can
  * ONLY be expressed with wildcards (the '*' catch-all key, whole-tool
@@ -83,13 +84,19 @@ function makeChildCreatedEvent(
   };
 }
 
+/** Session-domain stub: `update` captures when a function is given; the
+ * no-argument shape is a reduced-host session domain without `update`. */
+function makeSession(update?: (input: unknown) => Promise<unknown>): V2Session {
+  return (update ? { update } : {}) as unknown as V2Session;
+}
+
 function makeBridge(options?: {
-  permission?: V2Context['permission'];
+  session?: V2Session;
   policy?: unknown;
   pluginAgents?: ReadonlySet<string>;
   onUnavailable?: () => void;
 }): ReturnType<typeof createPermissionRulesBridge> {
-  return createPermissionRulesBridge(options?.permission, {
+  return createPermissionRulesBridge(options?.session, {
     permissionForAgent: (agent) =>
       agent === 'probe' ? (options?.policy ?? TASK_POLICY) : undefined,
     pluginAgents: options?.pluginAgents ?? new Set(['probe']),
@@ -138,12 +145,10 @@ describe('createPermissionRulesBridge', () => {
   test('(a) applies exact-match rules on a plugin-managed child session', async () => {
     const calls: RulesCall[] = [];
     const bridge = makeBridge({
-      permission: {
-        rules: async (input) => {
-          calls.push(input);
-          return {};
-        },
-      },
+      session: makeSession(async (input) => {
+        calls.push(input as RulesCall);
+        return {};
+      }),
     });
 
     await bridge.observeSessionCreated(makeChildCreatedEvent({}));
@@ -156,12 +161,10 @@ describe('createPermissionRulesBridge', () => {
   test('(a-legacy) reads the legacy `properties` payload spelling', async () => {
     const calls: RulesCall[] = [];
     const bridge = makeBridge({
-      permission: {
-        rules: async (input) => {
-          calls.push(input);
-          return {};
-        },
-      },
+      session: makeSession(async (input) => {
+        calls.push(input as RulesCall);
+        return {};
+      }),
     });
 
     await bridge.observeSessionCreated(makeChildCreatedEvent({}, 'properties'));
@@ -173,12 +176,10 @@ describe('createPermissionRulesBridge', () => {
   test('(c) duplicate session.created for the same sessionID applies once', async () => {
     const calls: RulesCall[] = [];
     const bridge = makeBridge({
-      permission: {
-        rules: async (input) => {
-          calls.push(input);
-          return {};
-        },
-      },
+      session: makeSession(async (input) => {
+        calls.push(input as RulesCall);
+        return {};
+      }),
     });
 
     const event = makeChildCreatedEvent({});
@@ -193,13 +194,16 @@ describe('createPermissionRulesBridge', () => {
     const warnings: string[] = [];
     const onUnavailable = () => warnings.push('warn');
 
-    // Host without a permission domain at all (pre-2.0.0)...
+    // Host without a session domain at all...
     const domainless = makeBridge({ onUnavailable });
     await domainless.observeSessionCreated(makeChildCreatedEvent({}));
-    // ...and a host whose domain lacks the rules method. Both take the
-    // same capability-probe path.
-    const ruleless = makeBridge({ permission: {}, onUnavailable });
-    await ruleless.observeSessionCreated(
+    // ...and a host whose session domain lacks the update method. Both
+    // take the same capability-probe path.
+    const updateless = makeBridge({
+      session: makeSession(),
+      onUnavailable,
+    });
+    await updateless.observeSessionCreated(
       makeChildCreatedEvent({ sessionID: 'ses_child_2' }),
     );
 
@@ -210,7 +214,7 @@ describe('createPermissionRulesBridge', () => {
     // The latch is the only repeat-suppressor: after a reset the next
     // degraded host observation warns again (once).
     __resetPermissionRulesWarningForTesting();
-    await ruleless.observeSessionCreated(
+    await updateless.observeSessionCreated(
       makeChildCreatedEvent({ sessionID: 'ses_child_3' }),
     );
     expect(warnings).toHaveLength(2);
@@ -219,12 +223,10 @@ describe('createPermissionRulesBridge', () => {
   test('(d) emitted rules never contain wildcard characters', async () => {
     const calls: RulesCall[] = [];
     const bridge = makeBridge({
-      permission: {
-        rules: async (input) => {
-          calls.push(input);
-          return {};
-        },
-      },
+      session: makeSession(async (input) => {
+        calls.push(input as RulesCall);
+        return {};
+      }),
     });
 
     await bridge.observeSessionCreated(makeChildCreatedEvent({}));
@@ -238,13 +240,11 @@ describe('createPermissionRulesBridge', () => {
     }
   });
 
-  test('(e) a throwing rules() is absorbed, never thrown into the pump', async () => {
+  test('(e) a throwing update() is absorbed, never thrown into the pump', async () => {
     const bridge = makeBridge({
-      permission: {
-        rules: async () => {
-          throw new Error('host rejected the ruleset');
-        },
-      },
+      session: makeSession(async () => {
+        throw new Error('host rejected the ruleset');
+      }),
     });
 
     await expect(
@@ -259,20 +259,18 @@ describe('createPermissionRulesBridge', () => {
 
   test('(e-retry) a failed application is retried by a duplicate session.created', async () => {
     // Regression (review on #1194): the applied marker used to be set
-    // before the host call, so a rejected rules() permanently stranded
+    // before the host call, so a rejected update() permanently stranded
     // the child on inherited session rules. Completion must latch only
     // on success; failure releases the slot for the next event.
     let attempts = 0;
     const calls: RulesCall[] = [];
     const bridge = makeBridge({
-      permission: {
-        rules: async (input) => {
-          attempts += 1;
-          if (attempts === 1) throw new Error('transient host failure');
-          calls.push(input);
-          return {};
-        },
-      },
+      session: makeSession(async (input) => {
+        attempts += 1;
+        if (attempts === 1) throw new Error('transient host failure');
+        calls.push(input as RulesCall);
+        return {};
+      }),
     });
 
     await expect(
@@ -292,11 +290,9 @@ describe('createPermissionRulesBridge', () => {
 
   test('malformed events resolve without throwing (fail-soft)', async () => {
     const bridge = makeBridge({
-      permission: {
-        rules: async () => {
-          throw new Error('must not be called');
-        },
-      },
+      session: makeSession(async () => {
+        throw new Error('must not be called');
+      }),
     });
     await expect(
       bridge.observeSessionCreated(undefined as never),
@@ -316,12 +312,10 @@ describe('createPermissionRulesBridge', () => {
     const calls: RulesCall[] = [];
     const warnings: string[] = [];
     const bridge = makeBridge({
-      permission: {
-        rules: async (input) => {
-          calls.push(input);
-          return {};
-        },
-      },
+      session: makeSession(async (input) => {
+        calls.push(input as RulesCall);
+        return {};
+      }),
       onUnavailable: () => warnings.push('warn'),
     });
 
@@ -329,8 +323,8 @@ describe('createPermissionRulesBridge', () => {
       makeChildCreatedEvent({ parentID: undefined }),
     );
 
-    // ctx.permission.rules REPLACES the session-scoped list — a root
-    // session must not even probe the capability.
+    // session.update `permissions` REPLACES the session-scoped list — a
+    // root session must not even probe the capability.
     expect(calls).toHaveLength(0);
     expect(warnings).toHaveLength(0);
   });
@@ -339,12 +333,10 @@ describe('createPermissionRulesBridge', () => {
     const calls: RulesCall[] = [];
     const warnings: string[] = [];
     const bridge = makeBridge({
-      permission: {
-        rules: async (input) => {
-          calls.push(input);
-          return {};
-        },
-      },
+      session: makeSession(async (input) => {
+        calls.push(input as RulesCall);
+        return {};
+      }),
       pluginAgents: new Set(['probe']),
       onUnavailable: () => warnings.push('warn'),
     });
@@ -365,12 +357,10 @@ describe('createPermissionRulesBridge', () => {
   test('an empty exact-match derivation skips the host call', async () => {
     const calls: RulesCall[] = [];
     const bridge = makeBridge({
-      permission: {
-        rules: async (input) => {
-          calls.push(input);
-          return {};
-        },
-      },
+      session: makeSession(async (input) => {
+        calls.push(input as RulesCall);
+        return {};
+      }),
       // read-only policies are whole-tool effects only: nothing to apply
       policy: { edit: 'deny', read: 'allow' },
     });
@@ -448,7 +438,7 @@ describe('createV2Setup permission rules wiring', () => {
     await rm(fixtureRoot, { recursive: true, force: true });
   });
 
-  test('the event pump applies child session rules via ctx.permission.rules', async () => {
+  test('the event pump applies child session rules via ctx.session.update', async () => {
     const calls: RulesCall[] = [];
     const projectDir = path.join(fixtureRoot, 'project');
     const ctx = {
@@ -478,9 +468,7 @@ describe('createV2Setup permission rules wiring', () => {
       },
       session: {
         hook: async () => ({ dispose: () => {} }),
-      },
-      permission: {
-        rules: async (input: RulesCall) => {
+        update: async (input: RulesCall) => {
           calls.push(input);
           return {};
         },

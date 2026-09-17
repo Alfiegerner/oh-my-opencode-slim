@@ -715,17 +715,18 @@ export function deriveExactPermissionRules(perm: unknown): V2PermissionRule[] {
 }
 
 /**
- * One-time degradation notice for hosts without `ctx.permission.rules`
- * (before v2.0.0). Same contract as the client-shim notices established
- * by commit 2bf290ad: ONE deterministic warning per plugin process
- * (module-level latch; fixed text, no timestamps or per-call ids) so a
- * missing host capability is observable in the plugin log without
- * per-child noise. Never fakes success — the rules are simply not
- * applied and the static agent permissions keep governing the child.
+ * One-time degradation notice for hosts whose session domain lacks
+ * `update` (reduced v2 host contexts). Same contract as the
+ * client-shim notices established by commit 2bf290ad: ONE
+ * deterministic warning per plugin process (module-level latch; fixed
+ * text, no timestamps or per-call ids) so a missing host capability is
+ * observable in the plugin log without per-child noise. Never fakes
+ * success — the rules are simply not applied and the static agent
+ * permissions keep governing the child.
  */
 const PERMISSION_RULES_UNAVAILABLE_WARNING =
-  '[v2][permission-rules] ctx.permission.rules unavailable on this host ' +
-  'build; child session permission rules are not applied';
+  '[v2][permission-rules] ctx.session.update unavailable on this host ' +
+  'context; child session permission rules are not applied';
 let permissionRulesUnavailableWarned = false;
 
 export function __resetPermissionRulesWarningForTesting(): void {
@@ -747,8 +748,8 @@ export interface V2PermissionRulesOptions {
 }
 
 /**
- * Per-session permission rules bridge (`ctx.permission.rules`, v2.0.0+
- * #48351; capability-probed, fail-soft).
+ * Per-session permission rules bridge (`ctx.session.update`,
+ * capability-probed, fail-soft).
  *
  * v2 children inherit their parent's session-scoped rules at creation
  * and were previously governed ONLY by the static agent-level permission
@@ -758,16 +759,19 @@ export interface V2PermissionRulesOptions {
  * child's agent is plugin-defined — the v2-local equivalent of the
  * event-router's `shouldManageSession(parent)` gate, since session agent
  * metadata lives inside the v1 factory), installs the child agent's
- * task-policy as session-scoped exact-match rules exactly once per
- * sessionID (duplicate event delivery is idempotent).
+ * task-policy as session-scoped exact-match rules via
+ * `session.update({sessionID, permissions})` exactly once per sessionID
+ * (duplicate event delivery is idempotent).
  *
- * Because `rules` REPLACES the whole session-scoped list, root sessions
- * and foreign-agent children are never touched. Hosts without the
- * capability degrade with the one-time warning above. Failures are
- * logged, never thrown into the event pump.
+ * `permissions` REPLACES the whole session-scoped rule list (identical
+ * replace-semantics to the removed `permission.rules` — both call the
+ * host's sessions.setPermissions), so root sessions and foreign-agent
+ * children are never touched. Hosts without the capability degrade
+ * with the one-time warning above. Failures are logged, never thrown
+ * into the event pump.
  */
 export function createPermissionRulesBridge(
-  permission: V2Context['permission'],
+  session: V2Context['session'] | undefined,
   options: V2PermissionRulesOptions,
 ): {
   /** Observe one raw v2 event; applies rules when it is a
@@ -782,8 +786,8 @@ export function createPermissionRulesBridge(
     sessionID: string,
     agent: string,
   ): Promise<void> {
-    const rulesFn = permission?.rules;
-    if (typeof rulesFn !== 'function') {
+    const updateFn = session?.update;
+    if (typeof updateFn !== 'function') {
       if (!permissionRulesUnavailableWarned) {
         permissionRulesUnavailableWarned = true;
         (
@@ -808,7 +812,7 @@ export function createPermissionRulesBridge(
       );
       return;
     }
-    await rulesFn({ sessionID, permissions: rules });
+    await updateFn({ sessionID, permissions: rules });
     // Latch only after the host call resolves: a rejected call leaves
     // the slot free, so a replayed or duplicate session.created retries
     // instead of stranding the child on inherited session rules
@@ -838,8 +842,9 @@ export function createPermissionRulesBridge(
         const parentID = payload.parentID;
         const agent = payload.agent;
         if (typeof sessionID !== 'string' || !sessionID) return;
-        // Root sessions never qualify — `rules` REPLACES the session's
-        // scoped list, so an unrelated session must not be touched.
+        // Root sessions never qualify — `permissions` REPLACES the
+        // session's scoped list, so an unrelated session must not be
+        // touched.
         if (typeof parentID !== 'string' || !parentID) return;
         if (applied.has(sessionID)) return;
         if (typeof agent !== 'string' || !options.pluginAgents.has(agent)) {
@@ -1749,19 +1754,17 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         | ((i: { event: Record<string, unknown> }) => Promise<void>)
         | undefined;
       if (eventHook || interviewBridge) {
-        // ── Per-session permission rules (ctx.permission.rules, v2.0.0+) ──
+        // ── Per-session permission rules (ctx.session.update) ──
         // Plugin-managed child sessions get their agent's task-policy
-        // installed as session-scoped exact-match rules at creation.
-        // Fail-soft inside the bridge; the v1 event dispatch below never
-        // depends on it (capability-absent hosts degrade with a one-time
-        // deterministic warning).
-        const permissionRulesBridge = createPermissionRulesBridge(
-          ctx.permission,
-          {
-            permissionForAgent: (agent) => resolvedAgents?.[agent]?.permission,
-            pluginAgents: new Set(Object.keys(resolvedAgents ?? {})),
-          },
-        );
+        // installed as session-scoped exact-match rules at creation
+        // (session.update's `permissions` REPLACES the session-scoped
+        // list). Fail-soft inside the bridge; the v1 event dispatch
+        // below never depends on it (capability-absent hosts degrade
+        // with a one-time deterministic warning).
+        const permissionRulesBridge = createPermissionRulesBridge(ctx.session, {
+          permissionForAgent: (agent) => resolvedAgents?.[agent]?.permission,
+          pluginAgents: new Set(Object.keys(resolvedAgents ?? {})),
+        });
         const iter = ctx.event.subscribe();
         const eventIterator = iter[Symbol.asyncIterator]();
         let eventStopped = false;
