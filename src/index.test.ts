@@ -921,6 +921,97 @@ describe('plugin TUI agent activity', () => {
       /^ora-\d+$/,
     );
   });
+
+  test('terminal subagent output clears active session in TUI snapshot', async () => {
+    await hooks?.['chat.message']?.(
+      { sessionID: 'parent-3', agent: 'orchestrator' } as never,
+      {} as never,
+    );
+    await hooks?.['tool.execute.before']?.(
+      { tool: 'task', sessionID: 'parent-3', callID: 'call-fg-1' } as never,
+      {
+        args: {
+          background: false,
+          subagent_type: 'oracle',
+          description: 'foreground child',
+        },
+      } as never,
+    );
+    await hooks?.['chat.message']?.(
+      { sessionID: 'child-fg-1', agent: 'oracle' } as never,
+      {} as never,
+    );
+    await busy('child-fg-1');
+
+    expect(readTuiSnapshot(projectDir).activeSessions['child-fg-1']).toBe(
+      'oracle',
+    );
+
+    await hooks?.['tool.execute.after']?.(
+      { tool: 'task', sessionID: 'parent-3', callID: 'call-fg-1' } as never,
+      {
+        output: [
+          'task_id: child-fg-1',
+          'state: completed',
+          '',
+          '<task_result>',
+          'Analysis finished.',
+          '</task_result>',
+        ].join('\n'),
+      } as never,
+    );
+
+    const snapshot = readTuiSnapshot(projectDir);
+    expect(snapshot.activeSessions['child-fg-1']).toBeUndefined();
+    expect(snapshot.sessionDetails['child-fg-1']).toBeUndefined();
+  });
+
+  test('string status idle clears active sessions', async () => {
+    await hooks?.['chat.message']?.(
+      { sessionID: 'fixer-str', agent: 'fixer' } as never,
+      {} as never,
+    );
+    await busy('fixer-str');
+    expect(readTuiSnapshot(projectDir).activeSessions['fixer-str']).toBe(
+      'fixer',
+    );
+
+    await hooks?.event?.({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'fixer-str', status: 'idle' },
+      },
+    } as never);
+
+    expect(
+      readTuiSnapshot(projectDir).activeSessions['fixer-str'],
+    ).toBeUndefined();
+  });
+
+  test('session.error clears active sessions', async () => {
+    await hooks?.['chat.message']?.(
+      { sessionID: 'oracle-err', agent: 'oracle' } as never,
+      {} as never,
+    );
+    await busy('oracle-err');
+    expect(readTuiSnapshot(projectDir).activeSessions['oracle-err']).toBe(
+      'oracle',
+    );
+
+    await hooks?.event?.({
+      event: {
+        type: 'session.error',
+        properties: {
+          sessionID: 'oracle-err',
+          error: { message: 'Task failed' },
+        },
+      },
+    } as never);
+
+    expect(
+      readTuiSnapshot(projectDir).activeSessions['oracle-err'],
+    ).toBeUndefined();
+  });
 });
 
 describe('background task admission model resolution', () => {
