@@ -9,6 +9,18 @@ export interface EarlyTaskRegistration {
   backgroundJobBoard: BackgroundJobStore;
   backgroundJobSupervisor?: BackgroundJobSupervisor;
 }
+// Single canonical shape for per-job opt-in wall-clock supervision; the
+// supervisor's PerJobSupervisorLaunch is a type alias of this (no
+// duplication: both seams pass the same two optional fields through).
+// Both fields are snapshots of the launch args: `wallClockTimeoutMs`
+// 0/undefined disables supervision (global default), finite values are a
+// per-job deadline. `abortGraceMs` overrides the global grace for this job
+// only. Neither field is persisted on the board record; the supervisor
+// reads them from the launch observation.
+export interface PerJobSupervision {
+  wallClockTimeoutMs?: number;
+  abortGraceMs?: number;
+}
 
 export interface PendingTaskCall {
   callId: string;
@@ -19,6 +31,8 @@ export interface PendingTaskCall {
    *  uses this so long exact duplicates are not missed. */
   fullObjective?: string;
   background: boolean;
+  /** Per-job opt-in supervision snapshot from the launch args. */
+  supervision?: PerJobSupervision;
   /** Deletion epoch observed when this native task call started. */
   lifecycleEpoch: number;
   resumedTaskId?: string;

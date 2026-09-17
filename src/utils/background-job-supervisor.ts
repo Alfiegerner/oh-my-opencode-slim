@@ -1,5 +1,6 @@
 import type { BackgroundJobRecord } from './background-job-board';
 import type { BackgroundJobStore } from './background-job-store';
+import type { PerJobSupervision } from '../hooks/task-session-manager/pending-call-tracker';
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
@@ -16,9 +17,22 @@ export interface BackgroundJobSupervisorOptions {
 interface RunTimers {
   generation: number;
   parentSessionID: string;
+  wallClockTimeoutMs: number;
+  abortGraceMs: number;
   deadlineTimer?: TimerHandle;
   graceTimer?: TimerHandle;
 }
+
+/**
+ * Per-job opt-in supervision for one launch observation. Alias of the
+ * canonical PerJobSupervision from pending-call-tracker (single source of
+ * truth — the two seams share one shape). When `wallClockTimeoutMs` is a
+ * finite per-job deadline it overrides the global default for this run only
+ * (global default stays 0 = disabled). `abortGraceMs` overrides the global
+ * grace for this run only. A `wallClockTimeoutMs` of 0/undefined keeps the
+ * global behavior unchanged.
+ */
+export type PerJobSupervisorLaunch = PerJobSupervision;
 
 /**
  * One-shot wall-clock supervision for native background task sessions.
@@ -43,13 +57,42 @@ export class BackgroundJobSupervisor {
     this.clearTimer = options.clearTimeout ?? ((timer) => clearTimeout(timer));
   }
 
-  /** Register the first observation of a launch or an explicit new run. */
-  onLaunch(record: BackgroundJobRecord): void {
+  /**
+   * Register the first observation of a launch or an explicit new run.
+   *
+   * Per-job opt-in path for oracle/fixer long runs: pass `perJob` with a
+   * finite `wallClockTimeoutMs` to arm a deadline for this run only, plus
+   * an optional per-job `abortGraceMs`. Deadline → abort → grace →
+   * terminal, using the same board/coordinator seams as the global path.
+   * The global default stays 0 (disabled); omitting `perJob` preserves the
+   * prior global-only behavior exactly.
+   */
+  onLaunch(record: BackgroundJobRecord, perJob?: PerJobSupervisorLaunch): void {
     if (this.disposed || record.background !== true) {
       this.clear(record.taskID);
       return;
     }
-    if (this.options.wallClockTimeoutMs <= 0 || record.state !== 'running') {
+    // Defense-in-depth clamp: parsePerJobSupervision already bounds these,
+    // but a direct onLaunch caller could pass anything. Out-of-range or
+    // non-integer per-job values fail closed to the global option (which
+    // itself stays 0 = disabled by default).
+    const perJobTimeout =
+      perJob?.wallClockTimeoutMs !== undefined &&
+      Number.isInteger(perJob.wallClockTimeoutMs) &&
+      perJob.wallClockTimeoutMs >= 60_000 &&
+      perJob.wallClockTimeoutMs <= 2_147_483_647
+        ? perJob.wallClockTimeoutMs
+        : undefined;
+    const perJobGrace =
+      perJob?.abortGraceMs !== undefined &&
+      Number.isInteger(perJob.abortGraceMs) &&
+      perJob.abortGraceMs >= 1_000 &&
+      perJob.abortGraceMs <= 60_000
+        ? perJob.abortGraceMs
+        : undefined;
+    const wallClockTimeoutMs = perJobTimeout ?? this.options.wallClockTimeoutMs;
+    const abortGraceMs = perJobGrace ?? this.options.abortGraceMs;
+    if (wallClockTimeoutMs <= 0 || record.state !== 'running') {
       this.clear(record.taskID);
       return;
     }
@@ -61,13 +104,12 @@ export class BackgroundJobSupervisor {
     const run: RunTimers = {
       generation: record.generation,
       parentSessionID: record.parentSessionID,
+      wallClockTimeoutMs,
+      abortGraceMs,
     };
     run.deadlineTimer = this.setTimer(
       () => this.onDeadline(record.taskID, record.generation),
-      Math.max(
-        0,
-        record.runStartedAt + this.options.wallClockTimeoutMs - this.now(),
-      ),
+      Math.max(0, record.runStartedAt + wallClockTimeoutMs - this.now()),
     );
     this.runs.set(record.taskID, run);
   }
@@ -153,9 +195,10 @@ export class BackgroundJobSupervisor {
 
     // The grace timer is armed before abort is invoked. A rejected or hanging
     // SDK promise must never prevent the bounded terminal transition.
+    // Per-job runs use their own grace; global runs use the global grace.
     run.graceTimer = this.setTimer(
       () => this.onGraceExpired(taskID, generation),
-      this.options.abortGraceMs,
+      run.abortGraceMs,
     );
     Promise.resolve()
       .then(() => this.options.abort(taskID))

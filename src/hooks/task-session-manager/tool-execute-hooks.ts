@@ -24,7 +24,10 @@ import { isRecord as isObjectRecord } from '../../utils/guards';
 import { log } from '../../utils/logger';
 import { SESSION_ID_PATTERN } from '../../utils/session';
 import { isMissingRememberedSessionError } from './board-injection';
-import type { PendingTaskCall } from './pending-call-tracker';
+import type {
+  PendingTaskCall,
+  PerJobSupervision,
+} from './pending-call-tracker';
 import { convertSameProviderBackgroundTask } from './same-provider-policy';
 import { normalizeLateCancelledTaskOutput } from './status-utils';
 import { extractReadFiles } from './task-context-tracker';
@@ -35,6 +38,63 @@ interface TaskArgs {
   subagent_type?: unknown;
   task_id?: unknown;
   background?: unknown;
+  wallClockTimeoutMs?: unknown;
+  abortGraceMs?: unknown;
+}
+
+/**
+ * Per-job opt-in wall-clock deadline bounds. Mirrors the global
+ * backgroundJobs schema: 0/undefined disables supervision (global default
+ * stays 0); finite timeouts are 60s–2^31-1ms, grace is 1s–60s. Invalid
+ * values fail closed to disabled (undefined), never to a shortened global.
+ */
+export const PER_JOB_WALL_CLOCK_TIMEOUT_MIN_MS = 60_000;
+export const PER_JOB_WALL_CLOCK_TIMEOUT_MAX_MS = 2_147_483_647;
+export const PER_JOB_ABORT_GRACE_MIN_MS = 1_000;
+export const PER_JOB_ABORT_GRACE_MAX_MS = 60_000;
+
+function finiteIntInRange(
+  value: unknown,
+  min: number,
+  max: number,
+): number | undefined {
+  if (typeof value !== 'number' || !Number.isInteger(value)) return undefined;
+  if (value < min || value > max) return undefined;
+  return value;
+}
+
+export function parsePerJobSupervision(
+  args: TaskArgs,
+): PerJobSupervision {
+  const rawTimeout = args.wallClockTimeoutMs;
+  const rawGrace = args.abortGraceMs;
+  // 0/undefined/absent disables: default path stays global 0 (disabled).
+  const wallClockTimeoutMs =
+    rawTimeout === undefined || rawTimeout === 0
+      ? undefined
+      : finiteIntInRange(
+          rawTimeout,
+          PER_JOB_WALL_CLOCK_TIMEOUT_MIN_MS,
+          PER_JOB_WALL_CLOCK_TIMEOUT_MAX_MS,
+        );
+  if (rawTimeout !== undefined && rawTimeout !== 0 && wallClockTimeoutMs === undefined) {
+    return {};
+  }
+  if (wallClockTimeoutMs === undefined) return {};
+  const abortGraceMs =
+    rawGrace === undefined
+      ? undefined
+      : finiteIntInRange(
+          rawGrace,
+          PER_JOB_ABORT_GRACE_MIN_MS,
+          PER_JOB_ABORT_GRACE_MAX_MS,
+        );
+  if (rawGrace !== undefined && abortGraceMs === undefined) {
+    return { wallClockTimeoutMs };
+  }
+  return abortGraceMs === undefined
+    ? { wallClockTimeoutMs }
+    : { wallClockTimeoutMs, abortGraceMs };
 }
 
 interface ResumeRefusalJob {
@@ -161,6 +221,7 @@ export async function handleToolExecuteBefore(
 
   const agentType = args.subagent_type.trim();
   let background = args.background === true;
+  const supervision = parsePerJobSupervision(args);
   if (background) {
     const conversion = convertSameProviderBackgroundTask({
       agentType,
@@ -200,6 +261,8 @@ export async function handleToolExecuteBefore(
     agentType,
     label,
     background,
+    supervision:
+      supervision.wallClockTimeoutMs !== undefined ? supervision : undefined,
     lifecycleEpoch: deps.getLifecycleEpoch?.() ?? 0,
     releaseLease: (lease) => deps.backgroundJobBoard.releaseLease(lease),
   };
@@ -500,7 +563,8 @@ export async function handleToolExecuteAfter(
       if (!record) return;
       deps.bindConcurrencyTicket?.(record.taskID, pending);
       deps.clearRehydrateTombstone?.(launch.taskID);
-      if (exactCallConfirmed) deps.backgroundJobSupervisor?.onLaunch(record);
+      if (exactCallConfirmed)
+        deps.backgroundJobSupervisor?.onLaunch(record, pending.supervision);
       log('[task-session-manager] background task launch registered', {
         taskID: record.taskID,
         alias: record.alias,
@@ -529,7 +593,8 @@ export async function handleToolExecuteAfter(
       deps.bindConcurrencyTicket?.(record.taskID, pending);
       deps.clearRehydrateTombstone?.(status.taskID);
       normalizeLateCancelledTaskOutput(output, deps.backgroundJobBoard);
-      if (exactCallConfirmed) deps.backgroundJobSupervisor?.onLaunch(record);
+      if (exactCallConfirmed)
+        deps.backgroundJobSupervisor?.onLaunch(record, pending.supervision);
       const guarded = guardCompletedStatusText(
         status.state,
         status.result,
