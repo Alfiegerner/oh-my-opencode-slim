@@ -63,9 +63,7 @@ function finiteIntInRange(
   return value;
 }
 
-export function parsePerJobSupervision(
-  args: TaskArgs,
-): PerJobSupervision {
+export function parsePerJobSupervision(args: TaskArgs): PerJobSupervision {
   const rawTimeout = args.wallClockTimeoutMs;
   const rawGrace = args.abortGraceMs;
   // 0/undefined/absent disables: default path stays global 0 (disabled).
@@ -77,7 +75,11 @@ export function parsePerJobSupervision(
           PER_JOB_WALL_CLOCK_TIMEOUT_MIN_MS,
           PER_JOB_WALL_CLOCK_TIMEOUT_MAX_MS,
         );
-  if (rawTimeout !== undefined && rawTimeout !== 0 && wallClockTimeoutMs === undefined) {
+  if (
+    rawTimeout !== undefined &&
+    rawTimeout !== 0 &&
+    wallClockTimeoutMs === undefined
+  ) {
     return {};
   }
   if (wallClockTimeoutMs === undefined) return {};

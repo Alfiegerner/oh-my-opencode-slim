@@ -1,6 +1,6 @@
+import type { PerJobSupervision } from '../hooks/task-session-manager/pending-call-tracker';
 import type { BackgroundJobRecord } from './background-job-board';
 import type { BackgroundJobStore } from './background-job-store';
-import type { PerJobSupervision } from '../hooks/task-session-manager/pending-call-tracker';
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 

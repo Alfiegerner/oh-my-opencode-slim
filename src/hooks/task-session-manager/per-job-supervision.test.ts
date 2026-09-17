@@ -2,12 +2,12 @@ import { describe, expect, mock, test } from 'bun:test';
 import { BackgroundJobBoard } from '../../utils/background-job-board';
 import { BackgroundJobSupervisor } from '../../utils/background-job-supervisor';
 import {
+  handleToolExecuteAfter,
+  handleToolExecuteBefore,
   PER_JOB_ABORT_GRACE_MAX_MS,
   PER_JOB_ABORT_GRACE_MIN_MS,
   PER_JOB_WALL_CLOCK_TIMEOUT_MAX_MS,
   PER_JOB_WALL_CLOCK_TIMEOUT_MIN_MS,
-  handleToolExecuteAfter,
-  handleToolExecuteBefore,
   parsePerJobSupervision,
 } from './tool-execute-hooks';
 
@@ -30,8 +30,7 @@ describe('parsePerJobSupervision bounds matrix', () => {
   test('timeout bounds: 59999/max+1 reject, 60000/max accept', () => {
     expect(
       parsePerJobSupervision({
-        wallClockTimeoutMs:
-          PER_JOB_WALL_CLOCK_TIMEOUT_MIN_MS - 1,
+        wallClockTimeoutMs: PER_JOB_WALL_CLOCK_TIMEOUT_MIN_MS - 1,
       }),
     ).toEqual({});
     expect(
@@ -119,7 +118,15 @@ describe('parsePerJobSupervision bounds matrix', () => {
           timers.delete(id as number);
         }) as unknown as typeof clearTimeout,
       });
-      return { board, supervisor, abort, timers, setNow: (v: number) => { now = v; } };
+      return {
+        board,
+        supervisor,
+        abort,
+        timers,
+        setNow: (v: number) => {
+          now = v;
+        },
+      };
     }
     // Global disabled: a hostile direct caller passing 1ms must not arm.
     {
@@ -171,7 +178,14 @@ describe('parsePerJobSupervision bounds matrix', () => {
         seen.push({ record, perJob });
       },
     };
-    const pendingCalls = new Map<string, Parameters<typeof handleToolExecuteBefore>[2]['pendingCallTracker'] extends never ? never : import('./pending-call-tracker').PendingTaskCall>();
+    const pendingCalls = new Map<
+      string,
+      Parameters<
+        typeof handleToolExecuteBefore
+      >[2]['pendingCallTracker'] extends never
+        ? never
+        : import('./pending-call-tracker').PendingTaskCall
+    >();
     const deps = {
       shouldManageSession: () => true,
       backgroundJobBoard: board,
@@ -231,10 +245,9 @@ describe('parsePerJobSupervision bounds matrix', () => {
       afterDeps,
     );
     expect(seen).toHaveLength(1);
-    expect(
-      (seen[0]?.record as { taskID?: string }).taskID,
-    ).toBe('ora-child-1');
-    expect(seen[0]?.perJob).toEqual({
+    expect(seen[0]).toBeDefined();
+    expect((seen[0].record as { taskID?: string }).taskID).toBe('ora-child-1');
+    expect(seen[0].perJob).toEqual({
       wallClockTimeoutMs: 120_000,
       abortGraceMs: 5_000,
     });
@@ -254,7 +267,10 @@ describe('parsePerJobSupervision bounds matrix', () => {
           seen.push({ record, perJob });
         },
       };
-      const pendingCalls = new Map<string, import('./pending-call-tracker').PendingTaskCall>();
+      const pendingCalls = new Map<
+        string,
+        import('./pending-call-tracker').PendingTaskCall
+      >();
       const deps = {
         shouldManageSession: () => true,
         backgroundJobBoard: board,
@@ -313,7 +329,7 @@ describe('parsePerJobSupervision bounds matrix', () => {
         afterDeps,
       );
       expect(seen).toHaveLength(1);
-      expect(seen[0]?.perJob).toBeUndefined();
+      expect(seen[0].perJob).toBeUndefined();
     }
   });
 
