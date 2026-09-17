@@ -620,8 +620,20 @@ describe('createV2Setup e2e', () => {
     expect(calls.hooks).toContain('session:prompt');
     expect(calls.contextHookCb).toBeFunction();
 
+    // Abort-path unwinding: every registration saved before the failure
+    // is disposed — LIFO, so the most recent registration (the prompt
+    // hook) is disposed before the earliest (the agent transform) — and
+    // the v1 dispose hook runs before the original error is rethrown.
+    expect(calls.disposed).toContain('agent:1');
+    expect(calls.disposed).toContain('session.hook:context');
+    expect(calls.disposed).toContain('session.hook:prompt');
+    expect(calls.disposed.indexOf('session.hook:prompt')).toBeLessThan(
+      calls.disposed.indexOf('agent:1'),
+    );
+
     await flushLoggerForTesting();
     const logText = readPluginLog();
     expect(logText).not.toContain('chat.headers not bridged');
+    expect(logText).toContain('[v2] v1 dispose hook invoked (abort path)');
   }, 20_000);
 });

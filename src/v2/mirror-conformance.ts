@@ -126,6 +126,20 @@ type _sessionUpdateInput = Expect<
     ? true
     : false
 >;
+/** The permission-rules bridge (createPermissionRulesBridge in setup.ts)
+ * relies on the `permissions` field and its rule element shape — pin both
+ * so an upstream change fails typecheck here instead of at runtime. */
+type _sessionUpdatePermissions = Expect<
+  SessionUpdateInput extends {
+    permissions?: ReadonlyArray<{
+      action: string;
+      resource: string;
+      effect: 'allow' | 'deny' | 'ask';
+    }>;
+  }
+    ? true
+    : false
+>;
 
 type SessionInterruptInput = Parameters<SessionDomain['interrupt']>[0];
 type _sessionInterruptResume = Expect<
