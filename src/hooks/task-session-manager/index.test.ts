@@ -10,8 +10,8 @@ import {
 } from '../../utils';
 import { BackgroundJobBoard } from '../../utils/background-job-fixture';
 import {
-  createBackgroundJobTerminalGate,
   type BackgroundJobTerminalGate,
+  createBackgroundJobTerminalGate,
 } from '../../utils/background-job-terminal-gate';
 import {
   createPhaseReminderHook,
