@@ -99,7 +99,11 @@ name for the chat.headers bridge; the event stream, bridges, and
 orchestrator-wake children-driven degraded mode are exercised end-to-end
 on the stable host — live mock-driven re-verification on 2026-09-09
 included a queued wake firing after 60 s of parent idle with a stalled
-background child). Every v2 API the adapter touches is
+background child). That live verification pre-dates v2.0.5 (it ran on
+the v2.0.3 stable host); v2.0.5 conformance is compile-time-pinned by
+the mirror-conformance guard against the `@opencode/plugin` 2.0.5
+devDependency, backed by git-history facts and the mock-driven bridge
+tests. Every v2 API the adapter touches is
 capability-probed at runtime (`typeof ctx.mcp?.transform === 'function'`,
 `s.switchModel`, `ctx.generate`, …), so a host lacking one capability
 degrades that single feature with a log line instead of breaking the load.

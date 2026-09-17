@@ -1634,7 +1634,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
     const handler = createSessionContextHandler({
       interviewHandleContext: (event) => interviewBridge.handleContext(event),
       commandBefore,
-      chatMessage: promptBridge ? undefined : chatMessage,
+      chatMessage: undefined,
       observeContextAgent: promptBridge?.observeContext,
       // chat.headers: trailing user-message marker state for the
       // model.request bridge below.
