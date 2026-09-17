@@ -16,6 +16,13 @@ import { BackgroundTaskConcurrency } from './background-task-concurrency';
 import { classifyTerminalEvidence } from './child-transcript';
 import { COMPLETED_WITHOUT_TEXT_DIAGNOSTIC } from './task';
 
+// Other test files mock the shared opencode-client module process-globally
+// (Bun mock.module is never auto-restored). Re-pin it to a passthrough so
+// this file always exercises the client each test provides via input.
+mock.module('./opencode-client', () => ({
+  getClient: (input: { client: unknown }) => input.client as never,
+}));
+
 const gates: BackgroundJobTerminalGate[] = [];
 afterEach(() => {
   for (const gate of gates.splice(0)) gate.dispose();

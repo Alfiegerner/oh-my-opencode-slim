@@ -961,9 +961,85 @@ describe('plugin TUI agent activity', () => {
       } as never,
     );
 
+    // #1215: a callID-confirmed foreground native terminal return is itself
+    // terminal evidence, so the active session clears immediately.
     const snapshot = readTuiSnapshot(projectDir);
     expect(snapshot.activeSessions['child-fg-1']).toBeUndefined();
     expect(snapshot.sessionDetails['child-fg-1']).toBeUndefined();
+  });
+
+  test('unattributed terminal output defers until idle evidence clears it', async () => {
+    await hooks?.['chat.message']?.(
+      { sessionID: 'parent-4', agent: 'orchestrator' } as never,
+      {} as never,
+    );
+    // The pending call is registered under a different callID than the
+    // returning output, so attribution is text-parsed, never
+    // callID-confirmed: the #1215 fast path must not fire. The child's
+    // session.created early-registers the pending for this task ID, so
+    // the mismatched return still resolves identity — unconfirmed.
+    await hooks?.['tool.execute.before']?.(
+      { tool: 'task', sessionID: 'parent-4', callID: 'call-fg-2a' } as never,
+      {
+        args: {
+          background: false,
+          subagent_type: 'oracle',
+          description: 'foreground child',
+        },
+      } as never,
+    );
+    await hooks?.event?.({
+      event: {
+        type: 'session.created',
+        properties: {
+          info: { id: 'child-fg-2', parentID: 'parent-4', agent: 'oracle' },
+        },
+      },
+    } as never);
+    await hooks?.['chat.message']?.(
+      { sessionID: 'child-fg-2', agent: 'oracle' } as never,
+      {} as never,
+    );
+    await busy('child-fg-2');
+
+    expect(readTuiSnapshot(projectDir).activeSessions['child-fg-2']).toBe(
+      'oracle',
+    );
+
+    await hooks?.['tool.execute.after']?.(
+      { tool: 'task', sessionID: 'parent-4', callID: 'call-fg-2b' } as never,
+      {
+        output: [
+          'task_id: child-fg-2',
+          'state: completed',
+          '',
+          '<task_result>',
+          'Analysis finished.',
+          '</task_result>',
+        ].join('\n'),
+      } as never,
+    );
+
+    // Unconfirmed attribution keeps the full runtime discipline: the
+    // terminal text alone must not clear the active session yet.
+    expect(readTuiSnapshot(projectDir).activeSessions['child-fg-2']).toBe(
+      'oracle',
+    );
+
+    // Idle runtime evidence is what publishes the terminal state.
+    await hooks?.event?.({
+      event: {
+        type: 'session.status',
+        properties: { sessionID: 'child-fg-2', status: { type: 'idle' } },
+      },
+    } as never);
+    for (let i = 0; i < 3; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    const snapshot = readTuiSnapshot(projectDir);
+    expect(snapshot.activeSessions['child-fg-2']).toBeUndefined();
+    expect(snapshot.sessionDetails['child-fg-2']).toBeUndefined();
   });
 
   test('string status idle clears active sessions', async () => {
