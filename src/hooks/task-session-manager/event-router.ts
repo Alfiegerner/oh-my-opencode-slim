@@ -289,11 +289,7 @@ export async function handleEvent(
         sessionID: string,
         idleObservedAt: number,
         observedGeneration: number,
-      ): void;
-      scheduleErrorTerminalize(
-        sessionID: string,
-        idleObservedAt: number,
-        observedGeneration: number,
+        error?: string,
       ): void;
       clearIdleTimers(sessionID: string): void;
       clearAllTimers(): string[];
@@ -301,6 +297,7 @@ export async function handleEvent(
     /** Sessions with a deferred inline 401/410 awaiting fallback outcome. */
     deferredInlineErrors: Set<string>;
     backgroundJobBoard: BackgroundJobStore;
+    terminalGate: import('../../utils/background-job-terminal-gate').BackgroundJobTerminalGate;
     pendingCallTracker: {
       peekByParentAndAgent(
         parentSessionID: string,
@@ -551,10 +548,11 @@ export async function handleEvent(
         // A persistent 401/410 was deferred for fallback recovery but the
         // session ended without one: terminalize as error instead of the
         // false completion the child-idle path would record.
-        deps.idleReconciler.scheduleErrorTerminalize(
+        deps.idleReconciler.scheduleChildIdleReconciliation(
           sessionId,
           observedAt,
           job.generation,
+          'Session error after failed model fallback (auth/model unavailable)',
         );
       } else {
         deps.idleReconciler.scheduleChildIdleReconciliation(
@@ -630,14 +628,10 @@ export async function handleEvent(
           ) {
             return;
           }
-          const updated = deps.backgroundJobBoard.updateStatus({
-            taskID: sessionId,
-            state: 'error',
-            expectedGeneration: observation?.generation,
-            resultSummary:
-              structuredErrorMessage(props?.error) ?? 'Session error',
+          await deps.terminalGate.reconcile(job, {
+            kind: 'session-error',
+            message: structuredErrorMessage(props?.error) ?? 'Session error',
           });
-          if (updated) deps.revivedRunTracker?.onTerminal(updated);
         }
       } else if (isInlineFailoverError(props.error)) {
         // Recovery possible: defer. The idle backstop terminalizes this
@@ -663,14 +657,10 @@ export async function handleEvent(
         ) {
           return;
         }
-        const updated = deps.backgroundJobBoard.updateStatus({
-          taskID: sessionId,
-          state: 'error',
-          expectedGeneration: observation?.generation,
-          resultSummary:
-            structuredErrorMessage(props?.error) ?? 'Session error',
+        await deps.terminalGate.reconcile(job, {
+          kind: 'session-error',
+          message: structuredErrorMessage(props?.error) ?? 'Session error',
         });
-        if (updated) deps.revivedRunTracker?.onTerminal(updated);
       }
     }
 
@@ -683,7 +673,7 @@ export async function handleEvent(
     const statusType = (
       input.event.properties as { status?: { type?: string } } | undefined
     )?.status?.type;
-    if (statusType !== 'busy') {
+    if (statusType !== 'busy' && statusType !== 'retry') {
       if (sessionId) deps.idleSessionTokens.invalidate(sessionId);
       return;
     }
@@ -721,12 +711,25 @@ export async function handleEvent(
     const before = sessionId
       ? (observation?.job ?? deps.backgroundJobBoard.get(sessionId))
       : undefined;
+    const token = before ? deps.terminalGate.capture(before) : undefined;
+    const eventAt = eventActivityAt(input, Number.NaN);
+    if (before && token) {
+      const result = deps.terminalGate.observe(token, {
+        kind: statusType,
+        origin: 'session.status-event',
+        readStartedAt: token.readStartedAt,
+        observedAt: Number.isFinite(eventAt) ? eventAt : undefined,
+      });
+      // Deferred without recorded activity means the gate needs a contrast.
+      // A stale identity never gets upgraded into a request for the current run.
+      if (
+        result.kind === 'deferred' &&
+        result.record.activityRevision === before.activityRevision
+      )
+        await deps.terminalGate.reconcile(before);
+    }
     const updated = sessionId
-      ? deps.backgroundJobBoard.markRunningFromLiveSession(
-          sessionId,
-          observedAt,
-          observation?.generation,
-        )
+      ? deps.backgroundJobBoard.get(sessionId)
       : undefined;
     if (before?.cancellationRequested) {
       log('[task-session-manager] busy observed after cancel request', {

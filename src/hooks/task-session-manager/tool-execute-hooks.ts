@@ -14,7 +14,6 @@ import type {
 import {
   deriveFullObjective,
   deriveTaskSessionLabel,
-  guardCompletedStatusText,
   maskTaskOutputStructure,
   parseTaskIdFromTaskOutput,
   parseTaskLaunchOutput,
@@ -22,7 +21,7 @@ import {
 } from '../../utils';
 import { isRecord as isObjectRecord } from '../../utils/guards';
 import { log } from '../../utils/logger';
-import { SESSION_ID_PATTERN } from '../../utils/session';
+import type { BackgroundJobTerminalGate } from '../../utils/background-job-terminal-gate';
 import { isMissingRememberedSessionError } from './board-injection';
 import type { PendingTaskCall } from './pending-call-tracker';
 import { convertSameProviderBackgroundTask } from './same-provider-policy';
@@ -235,8 +234,6 @@ export async function handleToolExecuteBefore(
 
       if (knownManagedTask) {
         refuseKnownTaskResume(requested, knownManagedTask, agentType);
-      } else if (SESSION_ID_PATTERN.test(requested)) {
-        pendingCall.resumedTaskId = requested;
       } else {
         refuseExplicitTaskId(
           requested,
@@ -344,6 +341,7 @@ export async function handleToolExecuteAfter(
   deps: {
     directory: string;
     backgroundJobBoard: BackgroundJobStore;
+    terminalGate: BackgroundJobTerminalGate;
     pendingCallTracker: {
       take(
         callID?: string,
@@ -530,22 +528,16 @@ export async function handleToolExecuteAfter(
       deps.clearRehydrateTombstone?.(status.taskID);
       normalizeLateCancelledTaskOutput(output, deps.backgroundJobBoard);
       if (exactCallConfirmed) deps.backgroundJobSupervisor?.onLaunch(record);
-      const guarded = guardCompletedStatusText(
-        status.state,
-        status.result,
-        record.resultSummary,
-      );
-      const updated = deps.backgroundJobBoard.updateStatus({
-        taskID: status.taskID,
-        state: guarded.state,
-        expectedGeneration: record.generation,
-        timedOut: status.timedOut,
-        resultSummary: guarded.resultSummary,
-        lastStatusError: guarded.lastStatusError,
+      await deps.terminalGate.reconcile(record, {
+        kind: 'output',
+        status,
+        origin: { kind: 'native', run: record, callID: pending.callId },
       });
-      if (updated?.state !== 'running') {
-        deps.releaseConcurrencyTask?.(status.taskID);
-      }
+      // The synchronous terminal listener owns release and context settlement.
+      // The returned publication may already have been withdrawn while awaiting.
+      const current = deps.backgroundJobBoard.get(status.taskID);
+      const updated =
+        current?.generation === record.generation ? current : undefined;
       log('[task-session-manager] foreground task status registered', {
         taskID: status.taskID,
         alias: updated?.alias ?? record.alias,
@@ -553,12 +545,6 @@ export async function handleToolExecuteAfter(
         agent: pending.agentType,
         state: updated?.state ?? record.state,
       });
-      deps.taskContextTracker.pendingManagedTaskIds.delete(status.taskID);
-      deps.backgroundJobBoard.addContext(
-        status.taskID,
-        deps.taskContextTracker.contextFilesForPrompt(status.taskID),
-      );
-      deps.taskContextTracker.prune(deps.backgroundJobBoard);
       return;
     }
 

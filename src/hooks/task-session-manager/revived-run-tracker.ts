@@ -6,8 +6,8 @@ import type {
 } from '../../utils/background-job-board';
 import type { BackgroundJobStore } from '../../utils/background-job-store';
 import type { BackgroundJobSupervisor } from '../../utils/background-job-supervisor';
+import type { BackgroundJobTerminalGate } from '../../utils/background-job-terminal-gate';
 import {
-  extractChildTerminalEvidence,
   fetchChildTranscript,
   responseError,
   stringifyError,
@@ -16,13 +16,10 @@ import { isRecord } from '../../utils/guards';
 import { createInternalAgentTextPart } from '../../utils/internal-initiator';
 import { getClient } from '../../utils/opencode-client';
 import type { SessionSelection } from '../../utils/session-selection';
-import { COMPLETED_WITHOUT_TEXT_DIAGNOSTIC } from '../../utils/task';
 
 const DEFAULT_NOTIFICATION_RETRIES = 3;
 const DEFAULT_RETRY_DELAY_MS = 1_000;
 const TERMINAL_NOTIFICATION_TIMEOUT_MS = 10_000;
-const DEFAULT_STABILIZATION_PROBES = 3;
-const DEFAULT_STABILIZATION_DELAY_MS = 150;
 const DEFAULT_HANDOFF_EXPIRY_MS = 30_000;
 
 type SessionMessage = {
@@ -56,10 +53,8 @@ type RevivedRun = {
     pending: boolean;
     retryTimer?: ReturnType<typeof setTimeout>;
   };
-  stabilizationProbes: number;
-  stabilizationTimer?: ReturnType<typeof setTimeout>;
   terminalState?: 'completed' | 'error';
-  probeInFlight?: Promise<boolean>;
+  terminalRevision?: number;
 };
 
 export interface RevivedRunTracker {
@@ -115,11 +110,10 @@ export interface RevivedRunTracker {
 export function createRevivedRunTracker(options: {
   input: PluginInput;
   backgroundJobBoard: BackgroundJobStore;
+  terminalGate: BackgroundJobTerminalGate;
   backgroundJobSupervisor?: BackgroundJobSupervisor;
   maxNotificationRetries?: number;
   notificationRetryDelayMs?: number;
-  maxStabilizationProbes?: number;
-  stabilizationProbeDelayMs?: number;
   handoffExpiryMs?: number;
   onRegister?: (taskID: string) => void;
   onSettled?: (taskID: string) => void;
@@ -140,10 +134,6 @@ export function createRevivedRunTracker(options: {
     options.maxNotificationRetries ?? DEFAULT_NOTIFICATION_RETRIES;
   const retryDelayMs =
     options.notificationRetryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
-  const maxStabilizationProbes =
-    options.maxStabilizationProbes ?? DEFAULT_STABILIZATION_PROBES;
-  const stabilizationProbeDelayMs =
-    options.stabilizationProbeDelayMs ?? DEFAULT_STABILIZATION_DELAY_MS;
   let disposed = false;
 
   const captureBaseline = async (
@@ -172,21 +162,29 @@ export function createRevivedRunTracker(options: {
   ): Promise<boolean> => {
     const run = runs.get(taskID);
     if (!run || run.generation !== generation || disposed) return false;
-    if (run.probeInFlight) return run.probeInFlight;
-
-    run.probeInFlight = probeRun(run).finally(() => {
-      run.probeInFlight = undefined;
+    const result = await options.terminalGate.reconcile(run, {
+      kind: 'inspect',
     });
-    return run.probeInFlight;
+    if (disposed || runs.get(taskID) !== run || result.kind === 'stale')
+      return false;
+    onTerminal(result.record);
+    return result.record.state !== 'running';
   };
 
   const onTerminal = (record: BackgroundJobRecord): void => {
     const run = runs.get(record.taskID);
     if (!run || run.generation !== record.generation) return;
+    const current = options.backgroundJobBoard.get(record.taskID);
+    if (
+      !current ||
+      current.generation !== record.generation ||
+      current.terminalRevision !== record.terminalRevision ||
+      current.state === 'running'
+    )
+      return;
     if (record.state === 'cancelled') {
       settleRun(run, record);
       options.backgroundJobSupervisor?.onTerminal(record);
-      discardRun(run);
       return;
     }
     if (record.state !== 'completed' && record.state !== 'error') {
@@ -201,87 +199,19 @@ export function createRevivedRunTracker(options: {
       if (run.notification.retryTimer) {
         clearTimeout(run.notification.retryTimer);
       }
-      if (run.stabilizationTimer) {
-        clearTimeout(run.stabilizationTimer);
-      }
     }
     runs.clear();
   };
 
-  async function probeRun(run: RevivedRun): Promise<boolean> {
-    let response: unknown;
-    try {
-      response = await fetchChildTranscript(
-        getClient(options.input),
-        run.taskID,
-        options.input.directory,
-      );
-    } catch {
-      // Transport failures and error payloads both degrade to "not yet
-      // settled" — the probe retries on its stabilization schedule.
-      return false;
-    }
-    // Identity fencing after the await: a same-taskID re-registration
-    // (e.g. a second fallback in the SAME generation) replaces this run
-    // object; its stale transcript read must not terminalize the job.
-    if (disposed || runs.get(run.taskID) !== run) return false;
-    if (response === undefined) return false;
-
-    const evidence = extractChildTerminalEvidence(response, {
-      baselineMessageID: run.baselineMessageID,
-    });
-    switch (evidence.kind) {
-      case 'no-new-messages':
-      case 'no-assistant':
-      case 'pending':
-        return false;
-      case 'error': {
-        const updated = options.backgroundJobBoard.updateStatus({
-          taskID: run.taskID,
-          expectedGeneration: run.generation,
-          state: 'error',
-          resultSummary: evidence.errorText || 'Revived child session failed.',
-        });
-        return updated?.generation === run.generation && finish(run, updated);
-      }
-      case 'ready': {
-        const updated = options.backgroundJobBoard.updateStatus({
-          taskID: run.taskID,
-          expectedGeneration: run.generation,
-          state: 'completed',
-          resultSummary: evidence.text,
-        });
-        return updated?.generation === run.generation && finish(run, updated);
-      }
-      case 'textless':
-        break;
-    }
-
-    if (disposed || runs.get(run.taskID) !== run) return false;
-    if (run.stabilizationProbes >= maxStabilizationProbes) {
-      const updated = options.backgroundJobBoard.updateStatus({
-        taskID: run.taskID,
-        expectedGeneration: run.generation,
-        state: 'error',
-        resultSummary: COMPLETED_WITHOUT_TEXT_DIAGNOSTIC,
-        lastStatusError: COMPLETED_WITHOUT_TEXT_DIAGNOSTIC,
-      });
-      return updated?.generation === run.generation && finish(run, updated);
-    }
-
-    run.stabilizationProbes += 1;
-    scheduleStabilizationProbe(run);
-    return false;
-  }
-
   function finish(run: RevivedRun, record: BackgroundJobRecord): boolean {
     if (disposed || runs.get(run.taskID) !== run) return false;
     if (record.state !== 'completed' && record.state !== 'error') return false;
-    if (run.stabilizationTimer) {
-      clearTimeout(run.stabilizationTimer);
-      run.stabilizationTimer = undefined;
+    if (run.terminalRevision !== record.terminalRevision) {
+      if (run.notification.retryTimer)
+        clearTimeout(run.notification.retryTimer);
+      run.notification = { attempts: 0, sent: false, pending: false };
+      run.terminalRevision = record.terminalRevision;
     }
-    if (run.terminalState && run.terminalState !== record.state) return true;
     run.terminalState = record.state;
     settleRun(run, record);
     options.backgroundJobSupervisor?.onTerminal(record);
@@ -305,6 +235,8 @@ export function createRevivedRunTracker(options: {
     record: BackgroundJobRecord,
   ): Promise<void> {
     if (disposed || run.notification.sent || run.notification.pending) return;
+    if (run.terminalRevision !== record.terminalRevision) return;
+    const notification = run.notification;
     run.notification.pending = true;
     run.notification.attempts += 1;
     try {
@@ -320,10 +252,10 @@ export function createRevivedRunTracker(options: {
       if (
         !current ||
         current.generation !== run.generation ||
+        current.terminalRevision !== record.terminalRevision ||
         terminalOutcome(current) !== run.terminalState ||
         record.state !== run.terminalState
       ) {
-        discardRun(run);
         return;
       }
       const state = record.state === 'completed' ? 'completed' : 'error';
@@ -341,7 +273,12 @@ export function createRevivedRunTracker(options: {
             .resolveSelection(run.parentSessionID)
             .catch((): undefined => undefined)
         : undefined;
-      if (disposed || runs.get(run.taskID) !== run || run.notification.sent) {
+      if (
+        disposed ||
+        runs.get(run.taskID) !== run ||
+        notification.sent ||
+        run.notification !== notification
+      ) {
         return;
       }
       // Revalidate AFTER the selection await: a late success from a
@@ -352,16 +289,20 @@ export function createRevivedRunTracker(options: {
       if (
         !latestBeforeSend ||
         latestBeforeSend.generation !== run.generation ||
+        latestBeforeSend.terminalRevision !== record.terminalRevision ||
         terminalOutcome(latestBeforeSend) !== run.terminalState
       ) {
-        discardRun(run);
         return;
       }
       const lease = options.backgroundJobBoard.acquireTerminalNotificationLease(
         run.taskID,
         run.generation,
+        record.terminalRevision,
       );
       if (!lease) {
+        // Waiting for an older publication's transport does not spend this
+        // publication's send budget: no transport attempt has started.
+        notification.attempts -= 1;
         scheduleNotificationRetry(run, record);
         return;
       }
@@ -414,6 +355,13 @@ export function createRevivedRunTracker(options: {
         (outcome) => {
           if (!outcome.ok) return;
           if (disposed || runs.get(run.taskID) !== run) return;
+          const current = options.backgroundJobBoard.get(run.taskID);
+          if (
+            run.notification !== notification ||
+            current?.generation !== record.generation ||
+            current.terminalRevision !== record.terminalRevision
+          )
+            return;
           run.notification.sent = true;
           if (run.notification.retryTimer) {
             clearTimeout(run.notification.retryTimer);
@@ -427,16 +375,16 @@ export function createRevivedRunTracker(options: {
       if (
         !latest ||
         latest.generation !== run.generation ||
+        latest.terminalRevision !== record.terminalRevision ||
         terminalOutcome(latest) !== run.terminalState
       ) {
-        discardRun(run);
         return;
       }
       run.notification.sent = true;
     } catch {
       scheduleNotificationRetry(run, record);
     } finally {
-      run.notification.pending = false;
+      notification.pending = false;
     }
   }
 
@@ -447,6 +395,7 @@ export function createRevivedRunTracker(options: {
     if (
       disposed ||
       runs.get(run.taskID) !== run ||
+      run.terminalRevision !== record.terminalRevision ||
       run.notification.attempts >= maxNotificationRetries ||
       run.notification.retryTimer
     ) {
@@ -457,17 +406,6 @@ export function createRevivedRunTracker(options: {
       void notifyParent(run, record);
     }, retryDelayMs);
     run.notification.retryTimer.unref?.();
-  }
-
-  function scheduleStabilizationProbe(run: RevivedRun): void {
-    if (disposed || runs.get(run.taskID) !== run || run.stabilizationTimer) {
-      return;
-    }
-    run.stabilizationTimer = setTimeout(() => {
-      run.stabilizationTimer = undefined;
-      void probe(run.taskID, run.generation);
-    }, stabilizationProbeDelayMs);
-    run.stabilizationTimer.unref?.();
   }
 
   function register(input: {
@@ -487,7 +425,6 @@ export function createRevivedRunTracker(options: {
   function discardRun(run: RevivedRun): void {
     if (runs.get(run.taskID) !== run) return;
     if (run.notification.retryTimer) clearTimeout(run.notification.retryTimer);
-    if (run.stabilizationTimer) clearTimeout(run.stabilizationTimer);
     runs.delete(run.taskID);
   }
 
@@ -558,12 +495,10 @@ export function createRevivedRunTracker(options: {
   }): void {
     const old = runs.get(input.taskID);
     if (old?.notification.retryTimer) clearTimeout(old.notification.retryTimer);
-    if (old?.stabilizationTimer) clearTimeout(old.stabilizationTimer);
     runs.set(input.taskID, {
       ...input,
       revision: ++revisionSequence,
       notification: { attempts: 0, sent: false, pending: false },
-      stabilizationProbes: 0,
     });
     options.onRegister?.(input.taskID);
   }
@@ -584,12 +519,8 @@ export function createRevivedRunTracker(options: {
       if (current?.state !== 'promoted' || current.generation !== generation) {
         return;
       }
-      void probe(taskID, generation).finally(() => {
-        const still = pendingHandoffs.get(taskID);
-        if (still?.state === 'promoted' && still.generation === generation) {
-          deleteHandoff(taskID);
-        }
-      });
+      deleteHandoff(taskID);
+      void probe(taskID, generation);
     }, handoffExpiryMs);
     pending.expiryTimer.unref?.();
   }

@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from 'bun:test';
-import { BackgroundJobBoard } from './background-job-board';
+import { BackgroundJobBoard, boardFixture } from './background-job-fixture';
 import { BackgroundJobCoordinator } from './background-job-coordinator';
 
 function createMockBoard(isRunning = false) {
@@ -184,11 +184,17 @@ describe('BackgroundJobCoordinator', () => {
     if (!lease) throw new Error('cancellation lease was not acquired');
     expect(coordinator.validateLease(lease)).toBe(true);
     expect(
-      coordinator.markCancelled(first.taskID, 'wrong generation', Date.now(), {
-        force: true,
-        expectedGeneration: first.generation + 1,
-        cancellationLease: lease,
-      })?.state,
+      boardFixture.markCancelled(
+        coordinator,
+        first.taskID,
+        'wrong generation',
+        Date.now(),
+        {
+          force: true,
+          expectedGeneration: first.generation + 1,
+          cancellationLease: lease,
+        },
+      )?.state,
     ).toBe('running');
     expect(coordinator.releaseLease(lease)).toBe(true);
     expect(coordinator.validateLease(lease)).toBe(false);

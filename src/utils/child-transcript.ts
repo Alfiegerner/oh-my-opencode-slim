@@ -112,6 +112,120 @@ interface LooseMessage {
 
 export type TranscriptMessage = LooseMessage;
 
+export type TerminalEvidenceVerdict =
+  | { verdict: 'completed'; text: string }
+  | { verdict: 'error'; text: string }
+  | { verdict: 'absent' }
+  | { verdict: 'retry'; reason: string };
+
+function verdictFromEvidence(
+  evidence: ChildTerminalEvidence,
+): TerminalEvidenceVerdict {
+  switch (evidence.kind) {
+    case 'ready':
+      return { verdict: 'completed', text: evidence.text };
+    case 'error':
+      return { verdict: 'error', text: evidence.errorText };
+    case 'pending':
+      return { verdict: 'retry', reason: 'pending' };
+    case 'textless':
+      return { verdict: 'retry', reason: 'textless' };
+    default:
+      return { verdict: 'retry', reason: 'unrecognized segment shape' };
+  }
+}
+
+/** A valid absence is not unknown evidence. Never scan through a user prompt
+ * or pending assistant placeholder to recover the previous attempt's answer. */
+export function classifyTerminalEvidence(
+  response: unknown,
+  options: {
+    baselineMessageID?: string;
+    runStartedAt?: number;
+    terminalOutcomeConfirmed?: boolean;
+  } = {},
+): TerminalEvidenceVerdict {
+  if (response === undefined)
+    return { verdict: 'retry', reason: 'transcript source unavailable' };
+  if (responseError(response) !== undefined)
+    return { verdict: 'retry', reason: 'transcript read failed' };
+  if (!isRecord(response) || !Array.isArray(response.data))
+    return { verdict: 'retry', reason: 'malformed transcript response' };
+  const all: TranscriptMessage[] = [];
+  for (const entry of response.data) {
+    if (
+      !isRecord(entry) ||
+      !isRecord(entry.info) ||
+      (!['assistant', 'user', 'system'].includes(String(entry.info.role)) &&
+        typeof entry.info.id !== 'string')
+    ) {
+      return { verdict: 'retry', reason: 'malformed transcript entries' };
+    }
+    all.push(entry);
+    if (
+      entry.parts !== undefined &&
+      (!Array.isArray(entry.parts) ||
+        entry.parts.some(
+          (part) => !isRecord(part) || typeof part.type !== 'string',
+        ))
+    )
+      return { verdict: 'retry', reason: 'malformed transcript parts' };
+  }
+  if (options.baselineMessageID) {
+    const baseline = all.findIndex(
+      (message) => message.info?.id === options.baselineMessageID,
+    );
+    if (baseline < 0)
+      return { verdict: 'retry', reason: 'baseline message missing' };
+    const segment = all.slice(baseline + 1);
+    let target = segment.length - 1;
+    while (target >= 0) {
+      const role = segment[target].info?.role;
+      if (typeof role !== 'string' || role === 'assistant' || role === 'user')
+        break;
+      target -= 1;
+    }
+    if (target < 0) return { verdict: 'absent' };
+    if (segment[target].info?.role === 'user') {
+      return segment.some((message) => message.info?.role === 'assistant')
+        ? { verdict: 'retry', reason: 'user message after last assistant' }
+        : { verdict: 'absent' };
+    }
+    return verdictFromEvidence(
+      classifyAssistantTurnEvidence(
+        all,
+        baseline + 1 + target,
+        baseline,
+        !options.terminalOutcomeConfirmed,
+      ),
+    );
+  }
+  let target = all.length - 1;
+  while (target >= 0 && all[target].info?.role === 'system') target--;
+  const trailing = all[target];
+  if (!trailing || trailing.info?.role === 'user') return { verdict: 'absent' };
+  if (trailing.info?.role !== 'assistant')
+    return {
+      verdict: 'retry',
+      reason: 'no baseline; cannot attribute a historical assistant turn',
+    };
+  const completedAt = trailing.info?.time?.completed;
+  if (
+    options.runStartedAt !== undefined &&
+    typeof completedAt === 'number' &&
+    completedAt < options.runStartedAt
+  )
+    return { verdict: 'absent' };
+  return verdictFromEvidence(
+    classifyAssistantTurnEvidence(
+      all,
+      target,
+      -1,
+      !options.terminalOutcomeConfirmed,
+    ),
+  );
+}
+
 export function extractChildTerminalEvidence(
   response: unknown,
   options: ChildTranscriptOptions = {},
@@ -173,7 +287,7 @@ export function classifyAssistantTurnEvidence(
   requireCompletionTime = true,
 ): ChildTerminalEvidence {
   const last = messages[targetIndex];
-  if (!last || last.info?.role !== 'assistant') return { kind: 'no-assistant' };
+  if (last?.info?.role !== 'assistant') return { kind: 'no-assistant' };
 
   // Terminal error precedence: an assistant turn that carries a
   // terminal error is an error EVEN when a residual `finish` value

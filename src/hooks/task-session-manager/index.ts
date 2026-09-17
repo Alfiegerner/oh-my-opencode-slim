@@ -5,23 +5,18 @@ import {
   type BackgroundJobStore,
   type BackgroundJobSupervisor,
   type BackgroundTaskConcurrency,
-  COMPLETED_WITHOUT_TEXT_DIAGNOSTIC,
   clearBackgroundJobSuppression,
   deriveFullObjective,
   deriveTaskSessionLabel,
   getBackgroundJobLifecycleLedger,
-  isHostTerminalOutcome,
   isInternalInitiatorPart,
   log,
   parseTaskIdFromTaskOutput,
   parseTaskStateFromOutput,
   recordBackgroundJobSuppression,
 } from '../../utils';
-import {
-  extractChildTerminalEvidence,
-  fetchChildTranscript,
-} from '../../utils/child-transcript';
 import { isRecord as isObjectRecord } from '../../utils/guards';
+import { fetchChildTranscript } from '../../utils/child-transcript';
 import { getClient } from '../../utils/opencode-client';
 import type { SessionLifecycle } from '../session-lifecycle';
 import { isMessageWithParts, isUserMessageWithParts } from '../types';
@@ -45,52 +40,22 @@ import {
 } from './pending-call-tracker';
 import type { RevivedRunTracker } from './revived-run-tracker';
 import { createRuntimeStatusReconciler } from './runtime-status-reconciliation';
-import { createStopEvidenceGate } from './stop-confirmation';
+import {
+  createBackgroundJobTerminalGate,
+  type BackgroundJobTerminalGate,
+  readSessionInfoForObservation,
+} from '../../utils/background-job-terminal-gate';
 import { createTaskContextTracker } from './task-context-tracker';
 import {
   handleToolExecuteAfter,
   handleToolExecuteBefore,
 } from './tool-execute-hooks';
 
-/** Extract the final assistant text from a child session transcript
- * (v1-shaped {data:[{info,parts}]} via the client shim's messages). Used
- * by the quiescent-outcome settle path so completed jobs reconcile with a
- * usable result summary instead of a placeholder. Delegates the fetch to
- * the shared `fetchChildTranscript` (which surfaces `response.error` as
- * a thrown Error — absorbed here, the settle path degrades to no text)
- * and classification to the shared extractor; the v2 shim shape drops
- * `info.time`, so the strict completion-time requirement is off
- * (terminality is confirmed via the host outcome gate before this
- * runs). */
-async function readFinalAssistantText(
-  client: ReturnType<typeof getClient>,
-  sessionID: string,
-  directory: string,
-): Promise<string | undefined> {
-  try {
-    const response = await fetchChildTranscript(client, sessionID, directory);
-    if (response === undefined) return undefined;
-    const evidence = extractChildTerminalEvidence(response, {
-      // v2 shim shape: flat {id, role} info without time/finish.
-      requireCompletionTime: false,
-      // v2 sessions can end with structurally valid non-assistant tails
-      // (synthetic/system/skill); the result lives in the last assistant
-      // message, so scan back to it instead of requiring an assistant
-      // tail.
-      scanBackToLastAssistant: true,
-    });
-    return evidence.kind === 'ready' ? evidence.text : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 export { BACKGROUND_JOB_BOARD_METADATA_KEY } from './board-injection';
 
 /**
- * Delay before recording an idle observation on a child job. The observation
- * remains provisional; terminal task output is the only path that establishes
- * completed/error/cancelled state.
+ * Delay for the parent's acknowledgement of already confirmed publications.
+ * Child evidence retries belong exclusively to the terminal gate.
  */
 const IDLE_RECONCILE_DELAY_MS = 2_000;
 
@@ -212,6 +177,7 @@ export function createTaskSessionManagerHook(
     readContextMinLines?: number;
     readContextMaxFiles?: number;
     backgroundJobBoard?: BackgroundJobStore;
+    terminalGate?: BackgroundJobTerminalGate;
     backgroundJobSupervisor?: BackgroundJobSupervisor;
     backgroundTaskConcurrency?: BackgroundTaskConcurrency;
     /** Shared by plugin generations for one admission runtime. */
@@ -265,20 +231,23 @@ export function createTaskSessionManagerHook(
   // transcript already holds the terminal result. Unknown reads never
   // terminate into stopped; the #1157 guarantee lives on a valid
   // transcript that provably holds no result for this run.
-  const stopEvidenceGate = createStopEvidenceGate({
-    backgroundJobBoard,
-    readTerminalEvidence: async (taskID) =>
-      fetchChildTranscript(getClient(_ctx), taskID, _ctx.directory).catch(
-        () => undefined,
-      ),
-    baselineFor: (taskID, generation) =>
-      options.revivedRunTracker?.baselineFor(taskID, generation),
-    observationRevisionFor: (taskID, generation) =>
-      options.revivedRunTracker?.revisionFor(taskID, generation),
-    isObservationPending: (taskID, generation) =>
-      options.revivedRunTracker?.isObservationPending(taskID, generation) ??
-      false,
-  });
+  const terminalGate =
+    options.terminalGate ??
+    createBackgroundJobTerminalGate({
+      backgroundJobBoard,
+      input: _ctx,
+      readTerminalEvidence: async (taskID) =>
+        fetchChildTranscript(getClient(_ctx), taskID, _ctx.directory).catch(
+          () => undefined,
+        ),
+      baselineFor: (taskID, generation) =>
+        options.revivedRunTracker?.baselineFor(taskID, generation),
+      observationRevisionFor: (taskID, generation) =>
+        options.revivedRunTracker?.revisionFor(taskID, generation),
+      isObservationPending: (taskID, generation) =>
+        options.revivedRunTracker?.isObservationPending(taskID, generation) ??
+        false,
+    });
 
   const rememberDeletedSession = (sessionID: string): void => {
     const remember = (taskID: string): void => {
@@ -329,54 +298,17 @@ export function createTaskSessionManagerHook(
       // not tombstone+drop the live relaunched record.
       const generationAtProbeStart = backgroundJobBoard.get(taskID)?.generation;
       if (generationAtProbeStart === undefined) return;
+      const token = terminalGate.capture({
+        taskID,
+        generation: generationAtProbeStart,
+      });
+      if (!token) return;
       try {
-        const response = (await client.session.get({
-          path: { id: taskID },
-          query: { directory: _ctx.directory },
-        })) as {
-          data?: { outcome?: unknown };
-          outcome?: unknown;
-        };
-        const info = response?.data ?? response;
-        const outcome =
-          typeof info?.outcome === 'string' ? info.outcome : undefined;
-        if (!isHostTerminalOutcome(outcome)) return;
-        const existing = backgroundJobBoard.get(taskID);
-        if (existing?.state !== 'running') return;
-        // Settle through the same updateStatus semantics the
-        // readSessionOutcome consumers use (idle-reconciliation): a
-        // succeeded outcome is only reconciled with usable final text.
-        // The settle is bound to the generation captured at probe start
-        // (same freshness anchor as the NotFound guard below): a probe
-        // that started at gen N must not terminalize a same-ID relaunch
-        // (gen N+1) that landed while the get was in flight.
-        let resultText: string | undefined;
-        if (outcome === 'succeeded') {
-          resultText = await readFinalAssistantText(
-            client,
-            taskID,
-            _ctx.directory,
-          );
-        }
-        const settled = backgroundJobBoard.updateStatus({
+        await readSessionInfoForObservation(_ctx, token);
+        await terminalGate.reconcile({
           taskID,
-          expectedGeneration: generationAtProbeStart,
-          state: outcome === 'succeeded' && resultText ? 'completed' : 'error',
-          resultSummary:
-            outcome === 'succeeded'
-              ? resultText || COMPLETED_WITHOUT_TEXT_DIAGNOSTIC
-              : `Host reported outcome: ${outcome}.`,
+          generation: generationAtProbeStart,
         });
-        if (settled !== undefined && settled.state !== 'running') {
-          backgroundJobBoard.markReconciled(taskID);
-          log('[task-session-manager] settled rehydrated task from host', {
-            taskID,
-            alias: settled.alias,
-            parentSessionID: settled.parentSessionID,
-            outcome,
-            hasResultText: Boolean(resultText),
-          });
-        }
         return;
       } catch (err) {
         if ((err as { _tag?: string })?._tag === 'Session.NotFoundError') {
@@ -450,66 +382,21 @@ export function createTaskSessionManagerHook(
   let hasInputWait: (sessionID: string) => boolean = () => false;
 
   const idleReconciler = createIdleReconciler({
-    backgroundJobBoard,
+    terminalGate,
     reconcileInjectedTerminalJobs: (parentSessionID: string) =>
       reconcileInjectedTerminalJobs(injectionState, parentSessionID),
-    // Fallback could not recover a deferred 401/410; drop the deferred
-    // error and its injected-terminal tracking so the board shows the
-    // failure and follow-up reconciliation keeps consistent state.
-    onErrorTerminalize: (sessionID: string) => {
-      deferredInlineErrors.delete(sessionID);
-      terminalJobsInjectedByParent.delete(sessionID);
-      pendingInjectedTerminalJobsByParent.delete(sessionID);
-    },
     idleReconcileDelayMs:
       options.idleReconcileDelayMs ?? IDLE_RECONCILE_DELAY_MS,
     isFallbackInProgress: options.isFallbackInProgress,
     hasInputWait: (s) => hasInputWait(s),
     getIdleSessionToken: (s) => getIdleSessionToken(s),
     isCurrentIdleSessionToken: (s, t) => isCurrentIdleSessionToken(s, t),
-    taskContextTracker,
-    revivedRunTracker: options.revivedRunTracker,
-    stopEvidenceGate,
-    // v2: no live session-status map exists, but Session.Info.outcome
-    // publishes the terminal transition — use it to settle quiescent jobs
-    // to their accurate terminal state (v1 hosts keep the status-map
-    // confirmation and simply never hit this probe).
-    readSessionOutcome: async (sessionID) => {
-      try {
-        const client = getClient(_ctx);
-        if (typeof client.session?.get !== 'function') return undefined;
-        const response = (await client.session.get({
-          path: { id: sessionID },
-          query: { directory: _ctx.directory },
-        })) as {
-          data?: { outcome?: unknown };
-          outcome?: unknown;
-        };
-        const info = response?.data ?? response;
-        const outcome = info?.outcome;
-        if (typeof outcome !== 'string') return undefined;
-        if (outcome !== 'succeeded') return { outcome };
-        // Usable-result requirement (#1115 precedent): a completed job is
-        // only reconciled with its final assistant text. Extract it from
-        // the transcript; absent text falls back to the reconciler's
-        // stabilization probes.
-        const resultText = await readFinalAssistantText(
-          client,
-          sessionID,
-          _ctx.directory,
-        );
-        return { outcome, resultText };
-      } catch {
-        return undefined;
-      }
-    },
   });
   const runtimeStatusReconciler = createRuntimeStatusReconciler({
     input: _ctx,
     backgroundJobBoard,
     delayMs: options.runtimeStatusReconcileDelayMs,
-    taskContextTracker,
-    stopEvidenceGate,
+    terminalGate,
   });
 
   const idleSessionTokens = createIdleSessionTokens({
@@ -575,6 +462,7 @@ export function createTaskSessionManagerHook(
 
   const injectionState: InjectionState = {
     backgroundJobBoard,
+    terminalGate,
     maxRetainedSnapshots: options.maxRetainedSnapshots,
     strategy: options.strategy ?? 'latest',
     lifecycleLedger: rehydrateState,
@@ -698,6 +586,7 @@ export function createTaskSessionManagerHook(
       await handleToolExecuteAfter(input, output, {
         directory: _ctx.directory,
         backgroundJobBoard,
+        terminalGate,
         backgroundJobSupervisor: options.backgroundJobSupervisor,
         bindConcurrencyTicket: (taskID, pending) =>
           pending.concurrencyTicket?.bind(taskID),
@@ -742,6 +631,10 @@ export function createTaskSessionManagerHook(
         probeRehydratedTaskSession(taskID);
       }
 
+      if (rehydratedTaskIDs.length > 0) {
+        await runtimeStatusReconciler.reconcile();
+      }
+
       for (const [messageIndex, message] of messages.entries()) {
         if (!isUserMessageWithParts(message)) continue;
         if (message.info.agent && message.info.agent !== 'orchestrator') {
@@ -760,7 +653,7 @@ export function createTaskSessionManagerHook(
         }
 
         for (const [partIndex, part] of message.parts.entries()) {
-          updateFromInjectedCompletion(
+          await updateFromInjectedCompletion(
             injectionState,
             part,
             message,
@@ -768,10 +661,6 @@ export function createTaskSessionManagerHook(
             partIndex,
           );
         }
-      }
-
-      if (rehydratedTaskIDs.length > 0) {
-        await runtimeStatusReconciler.reconcile();
       }
     },
 
@@ -810,7 +699,7 @@ export function createTaskSessionManagerHook(
 
       if (input.event.type === 'server.instance.disposed') {
         runtimeStatusReconciler.dispose();
-        stopEvidenceGate.dispose();
+        if (!options.terminalGate) terminalGate.dispose();
       }
       return handleEvent(input, {
         inputWaits,
@@ -819,6 +708,7 @@ export function createTaskSessionManagerHook(
         idleReconciler,
         deferredInlineErrors,
         backgroundJobBoard,
+        terminalGate,
         pendingCallTracker,
         taskContextTracker,
         terminalJobsInjectedByParent,

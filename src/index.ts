@@ -48,6 +48,10 @@ import {
 import { processImageAttachments } from './hooks/image-hook';
 import { createBackgroundFallbackHandoff } from './hooks/task-session-manager/fallback-observation-transfer';
 import { createRevivedRunTracker } from './hooks/task-session-manager/revived-run-tracker';
+import {
+  createBackgroundJobTerminalGate,
+  type BackgroundJobTerminalGate,
+} from './utils/background-job-terminal-gate';
 import type { ToolLoopGuardHook } from './hooks/tool-loop-guard/hook';
 import { isMessageWithParts, type MessageWithParts } from './hooks/types';
 import { handleTaskSessionEvent } from './index-event';
@@ -397,6 +401,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   let taskResultTools: ReturnType<typeof createTaskResultTool>;
   let taskReviveTools: ReturnType<typeof createTaskReviveTool>;
   let revivedRunTracker: ReturnType<typeof createRevivedRunTracker>;
+  let terminalGate: BackgroundJobTerminalGate | undefined;
   let markRevivedRunPending: (taskID: string) => void = () => {};
   let markRevivedRunSettled: (taskID: string) => void = () => {};
   let getRevivedContextFiles = (_taskID: string): ContextFile[] => [];
@@ -559,8 +564,29 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         clearTuiSessionAlias(event.taskID, directory);
       }
     });
+    terminalGate = createBackgroundJobTerminalGate({
+      backgroundJobBoard: backgroundJobCoordinator,
+      input: ctx,
+      baselineFor: (taskID, generation) =>
+        revivedRunTracker?.baselineFor(taskID, generation),
+      observationRevisionFor: (taskID, generation) =>
+        revivedRunTracker?.revisionFor(taskID, generation),
+      isObservationPending: (taskID, generation) =>
+        revivedRunTracker?.isObservationPending(taskID, generation) ?? false,
+      onRunning: (record) => {
+        if (record.background)
+          backgroundTaskConcurrency.restoreTask(
+            record.taskID,
+            sessionMetadata.getModel(record.taskID) ??
+              resolvePrimaryModelFromFinalHostConfig(record.agent) ??
+              sessionMetadata.getModel(record.parentSessionID),
+          );
+        backgroundJobSupervisor?.onLaunch(record);
+      },
+    });
     backgroundJobSupervisor = new BackgroundJobSupervisor({
       backgroundJobStore: backgroundJobCoordinator,
+      terminalGate,
       wallClockTimeoutMs: runtime.backgroundJobs.wallClockTimeoutMs,
       abortGraceMs: runtime.backgroundJobs.abortGraceMs,
       abort: (taskID) =>
@@ -569,12 +595,26 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         }),
     });
     backgroundJobCoordinator.addTerminalOutcomeListener((record) => {
+      const current = backgroundJobCoordinator.get(record.taskID);
+      if (
+        current?.generation !== record.generation ||
+        current.terminalRevision !== record.terminalRevision ||
+        current.state === 'running'
+      )
+        return;
+      backgroundJobCoordinator.addContext(
+        record.taskID,
+        getRevivedContextFiles(record.taskID),
+      );
+      markRevivedRunSettled(record.taskID);
+      pruneRevivedContext();
       backgroundJobSupervisor.onTerminal(record);
       backgroundTaskConcurrency.releaseTask(record.taskID);
     });
     revivedRunTracker = createRevivedRunTracker({
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
+      terminalGate,
       backgroundJobSupervisor,
       resolveSelection: lifecycleSelectionResolver,
       onRegister: (taskID) => markRevivedRunPending(taskID),
@@ -660,6 +700,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     reflectCommandHook = createReflectCommandHook();
     loopCommandHook = createLoopCommandHook();
     taskSessionManagerHook = createTaskSessionManagerHook(ctx, {
+      terminalGate,
       strategy: runtime.backgroundJobs.strategy,
       maxSessionsPerAgent: runtime.backgroundJobs.maxSessionsPerAgent,
       maxRetainedSnapshots: runtime.backgroundJobs.maxRetainedSnapshots,
@@ -818,6 +859,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     taskCancelTools = createCancelTaskTool({
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
+      terminalGate,
       shouldManageSession: (sessionID) =>
         sessionMetadata.getAgent(sessionID) === 'orchestrator' ||
         sessionMetadata.isTaskManaged(sessionID),
@@ -829,8 +871,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     taskResultTools = createTaskResultTool({
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
+      terminalGate,
     });
     taskReviveTools = createTaskReviveTool({
+      terminalGate,
       input: ctx,
       backgroundJobBoard: backgroundJobCoordinator,
       shouldManageSession: (sessionID) =>
@@ -884,6 +928,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
     toolCount = Object.keys(tools).length;
   } catch (err) {
+    terminalGate?.dispose();
     admissionRuntimeLease?.release();
     // Plugin init failed: log visibly before re-throwing so the user
     // sees something actionable instead of a silent "loaded but empty".
@@ -1310,6 +1355,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
 
     event: async (input) => {
+      if (input.event.type === 'server.instance.disposed')
+        terminalGate?.dispose();
       // Token-stream deltas fire on every reasoning/text chunk. Slim
       // has no work for them except the multiplexer activity heartbeat
       // that keeps a child pane from looking idle mid-stream. Skip the
@@ -1570,6 +1617,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
 
     dispose: async () => {
+      terminalGate?.dispose();
       await taskSessionManagerHook.event({
         event: { type: 'server.instance.disposed' },
       });
