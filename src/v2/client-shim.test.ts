@@ -451,24 +451,6 @@ describe('v2 client shim delegation', () => {
     expect((seq[0].i as { files: unknown[] }).files).toHaveLength(1);
   });
 
-  test('abort delegates to interrupt', async () => {
-    const calls: unknown[] = [];
-    const input = buildPluginInput(
-      makeCtx({
-        interrupt: async (i: unknown) => {
-          calls.push(i);
-          return { interrupted: true };
-        },
-      } as never),
-    );
-    await (
-      input.client as {
-        session: { abort: (a: unknown) => Promise<unknown> };
-      }
-    ).session.abort({ path: { id: 'ses_1' } });
-    expect(calls).toEqual([{ sessionID: 'ses_1', resume: false }]);
-  });
-
   test('abort sends interrupt with resume:false', async () => {
     const calls: Array<Record<string, unknown>> = [];
     const input = buildPluginInput(

@@ -20,7 +20,7 @@ export interface V2AgentDraft {
  * definitions — everything else is reachable only inside the `execute`
  * tool's confined JS runtime, so session tool catalogs yield
  * `Unknown tool: <name>` even though registration succeeded. The field
- * is additive: older hosts ignore it. */
+ * is additive: hosts that don't recognize the field ignore it. */
 export interface V2ToolOptions {
   codemode?: boolean;
   namespace?: string;

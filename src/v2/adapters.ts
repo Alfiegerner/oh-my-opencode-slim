@@ -156,7 +156,7 @@ export function adaptTool(
     // model-visible tool definitions. Without this flag the tool registers
     // cleanly but is confined to the `execute` tool's JS runtime — session
     // tool catalogs then yield `Unknown tool: <name>`. Additive field;
-    // older hosts ignore it.
+    // hosts that don't recognize the field ignore it.
     options: { codemode: false },
     execute: async (input: unknown, context: unknown) => {
       if (!execute) return { output: {} };
