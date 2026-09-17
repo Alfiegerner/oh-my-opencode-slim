@@ -5,11 +5,15 @@ and OpenCode v2 (`opencode2`) from a single published package. This document
 describes how each host loads the plugin, what is supported where, and how to
 register it.
 
-The verified compatibility baseline is **OpenCode v2.0.3 stable** (Sep 12,
-2026). The stable line so far — v2.0.0 (Sep 11) through v2.0.3 — shipped 35
-commits with **zero `packages/plugin` API changes** (every fix landed
-elsewhere), so the plugin's shim targets are valid across the whole v2.0.x
-range, not just the newest patch release.
+The verified compatibility baseline is **OpenCode v2.0.5**. Unlike the
+earlier stable line (v2.0.0–v2.0.3 shipped zero
+`packages/plugin` API changes), v2.0.5 changed the plugin API surface —
+`session.rename` and per-session `permission.rules` were removed (both
+merged into `session.update`), and `session.interrupt`'s input field
+`continue` was renamed to `resume` (see
+[v2.0.5 API migrations](#v205-api-migrations)). The adapter targets the
+2.0.5 surface, and the compile-time mirror guard below is pinned to
+`@opencode/plugin` 2.0.5.
 
 ## How it works
 
@@ -99,6 +103,10 @@ background child). Every v2 API the adapter touches is
 capability-probed at runtime (`typeof ctx.mcp?.transform === 'function'`,
 `s.switchModel`, `ctx.generate`, …), so a host lacking one capability
 degrades that single feature with a log line instead of breaking the load.
+The session hooks are the deliberate exception under the v2.0.5-only
+posture: on full contexts they register unconditionally and a
+registration failure fails setup (see
+[The v2 adapter](#the-v2-adapter-srcv2setupts)).
 `ctx.mcp.transform` in particular is present in **all** v2.0.x stable hosts;
 its probe only ever matters on pre-stable beta builds.
 
@@ -109,9 +117,11 @@ its probe only ever matters on pre-stable beta builds.
 1. Builds a v1-shaped `PluginInput` from the v2 context
    (`src/v2/client-shim.ts`): the project directory from `ctx.location`,
    and a shim `client` that **really delegates** the v1 SDK call shapes to
-   v2 flat session calls — `session.get`, `session.abort`→`interrupt`,
-   `session.messages`→`context`, `session.prompt` (as `delivery: "steer"`),
-   `session.update`→`rename`, `session.delete`→`remove` (same
+   v2 flat session calls — `session.get`, `session.abort`→`interrupt`
+   (`resume: false` aborts the active run), `session.messages`→`context`,
+   `session.prompt` (as `delivery: "steer"`), `session.update`→
+   `session.update` (`{sessionID, title}` — v2.0.5 removed
+   `session.rename`), `session.delete`→`remove` (same
    `DELETE /api/session/:id`; stops the smartfetch secondary-model temp
    sessions leaking), and `session.list` (v2 `Session.Info` page → the v1
    `{data}` envelope with `directory` derived from `location` and `outcome`
@@ -252,8 +262,13 @@ its probe only ever matters on pre-stable beta builds.
      secondary-model summaries without a temp session
    - `dispose` → returned cleanup
 
-Each bridge is independently try/catch-guarded so one failure cannot disable
-the rest, and a zero-registration load logs a loud health-check warning.
+Each domain-transform bridge (agent/tool/mcp/command) is independently
+try/catch-guarded so one failure cannot disable the rest, and a
+zero-registration load logs a loud health-check warning. The session hooks
+(`prompt`, `context`, `model.request`, `compaction`) register
+**unconditionally** on full v2 contexts: a registration failure fails
+setup loudly instead of degrading — consistent with the v2.0.5-only
+posture (older-host hook-name fallbacks were removed).
 
 ## Feature matrix
 
@@ -334,16 +349,16 @@ currently break this plugin:
 - **Runtime status reconciliation is capability-gated.** v2 has no
   equivalent of the v1 live session-status map (`client.session.status`
   is not a function on v2 hosts; `session.status` is not exposed to
-  plugins as of v2.0.3), so the task-session-manager's
+  plugins as of v2.0.5), so the task-session-manager's
   runtime-status reconciliation poll is disabled entirely on hosts
   without the method — a single per-instance log line notes the
   disabled reconciliation instead of logging uncertainty every ~5s poll.
   v1 hosts expose the method and keep the exact historical polling
   behavior. Background job stop-confirmation was never obtainable from
   the v2 poll anyway (the lookup failed every time).
-- **Stable-line plugin API additions (verified in v2.0.3).** Between the
-  pre-stable betas and v2.0.0, upstream grew the plugin surface with
-  session hooks `compaction`, `generate`, and `title` (the title and
+- **Stable-line plugin API additions (historical, verified in v2.0.3).**
+  Between the pre-stable betas and v2.0.0, upstream grew the plugin surface
+  with session hooks `compaction`, `generate`, and `title` (the title and
   compaction hooks may set `result` to skip the model call entirely),
   per-session `permission.rules`, and TUI `ui.tabs.move()` (with
   `tabs.open` no longer focusing a tab and `tabs.focus` now opening the
@@ -353,11 +368,16 @@ currently break this plugin:
   system/messages, and cache hints ride `ContentPart.cache`, which is
   unchanged. Adoption status: the **compaction hook is adopted** — the
   plugin strips its tagged synthetic parts from the compaction input
-  (new in this release); **`permission.rules` is adopted** —
-  plugin-managed child sessions receive exact-match task-policy rules
-  once at creation (`createPermissionRulesBridge` in
-  `src/v2/setup.ts`; exact-match strings only, no wildcards, while
-  upstream matching semantics settle — PRs #48194/#46495/#46871); the
+  (new in this release); **child-session permission rules are applied** —
+  v2.0.5 removed per-session `permission.rules` (merged into
+  `session.update`), so plugin-managed child sessions now receive
+  exact-match task-policy rules once at creation via
+  `ctx.session.update({sessionID, permissions})`
+  (`createPermissionRulesBridge` in `src/v2/setup.ts`; exact-match
+  strings only, no wildcards, while upstream matching semantics settle —
+  PRs #48194/#46495/#46871; still triggered on plugin-managed child
+  `session.created` and fail-soft with a one-time warning on reduced
+  hosts without the method); the
   `generate` session hook (not the `ctx.generate` text channel the
   webfetch summaries use), the `title` hook, and the new `tabs`
   methods are not used.
@@ -368,7 +388,7 @@ currently break this plugin:
   "deterministic child titles" future-work item is closed as natively
   covered; the hook only matters if custom title formats are wanted.
   Upstream is still actively fixing compaction×hook plumbing and
-  compaction×cache behavior after v2.0.3, so compaction-hook semantics
+  compaction×cache behavior after v2.0.5, so compaction-hook semantics
   may evolve; the plugin's hook callback is written shape-tolerant
   (messages-only mutation) to ride those changes.
 - **Duplicate idle delivery.** The adapter synthesizes both an idle
@@ -393,6 +413,36 @@ currently break this plugin:
   matches raw MCP tool names: MCP access is granted per server name
   (`"mcps": ["context7", "!gh_grep"]` in agent config), and registration
   uses its own server names via `draft.set(name, ...)`.
+
+### v2.0.5 API migrations
+
+What changed in `packages/plugin` at v2.0.5 and how the adapter followed:
+
+- **`session.rename` → `session.update`.** v2.0.5 removed `session.rename`
+  and merged it into `session.update({sessionID, title?, permissions?})`.
+  The client shim's v1-facing `session.update({body: {title}})` and the
+  v2 interview bridge's session renames both call `session.update` now.
+- **`permission.rules` → `session.update`.** The per-session
+  `permission.rules` method was removed; child-session permission rules
+  are applied through `session.update({sessionID, permissions})`
+  (see the adoption-status bullet above).
+- **`interrupt.continue` → `interrupt.resume`.** `session.interrupt`'s
+  input field was renamed; the shim's abort path sends
+  `{sessionID, resume: false}` (`resume: false` aborts the active run).
+- **New `experimental.ws.handshake` session hook.** Pinned in the
+  mirror-conformance guard's official hook set; **not used** by this
+  plugin.
+- **Core `# Your Model` identity system part.** v2.0.5 core splices a
+  `# Your Model` identity part at `system[1]` on every LLM request. The
+  plugin's system transform keeps appending the orchestrator prompt to
+  `system[0]` and collapses all parts into one — locked by a regression
+  test in `src/index.test.ts`.
+- **Subagent `model` param.** v2.0.5's built-in `subagent` tool gained an
+  optional `model` argument (`"providerID/modelID"`). The delegation
+  vocabulary exposes it (`modelParam`) and the orchestrator/council
+  prompts carry a one-sentence guardrail: only set it when the user
+  explicitly asks for a specific model or variant; never guess the ID —
+  look it up with the models tool first.
 
 ## Installing on v2
 
@@ -604,11 +654,11 @@ Q&A history.
 The v2 plugin session domain (`packages/plugin/src/promise/session.ts`,
 `SessionDomain`, mirrored by the runtime object the promise adapter
 builds) exposes exactly `create`/`get`/`switchAgent`/`switchModel`/
-`prompt`/`generate`/`command`/`synthetic`/`interrupt`/`rename`/`move`/
+`prompt`/`generate`/`command`/`synthetic`/`interrupt`/`update`/`move`/
 `wait`/`context` — **`list` and `remove` are not handed to plugins**
-(as of v2.0.3). Both endpoints exist on the host's HTTP API, but the
+(as of v2.0.5). Both endpoints exist on the host's HTTP API, but the
 plugin context never receives them. `session.status`, `session.todo`, and
-`session.children` are likewise not exposed as of v2.0.3 — the wake
+`session.children` are likewise not exposed as of v2.0.5 — the wake
 scheduler's fallback enumeration, the delete no-op below, and the disabled
 runtime-status reconciliation (see
 [Upstream behaviors](#upstream-behaviors-to-know)) all follow from these
@@ -652,7 +702,7 @@ The wake scheduler is **active on v2** in a degraded mode, configured with
 `backgroundJobs.orchestratorWake.mode` (`"auto"` | `"todo"` | `"children"`,
 default `"auto"`: todo-gating on v1, children-driven on v2; an explicit
 `"todo"` degrades to children because v2 has no todo surface exposed to
-plugins as of v2.0.3 — logged once).
+plugins as of v2.0.5 — logged once).
 
 How it differs from the v1 path:
 
@@ -668,7 +718,7 @@ How it differs from the v1 path:
   child). A finished child is therefore terminal immediately instead of
   reading active for the whole staleness window, and a live child stays
   visible on its host evidence rather than dropping out on stale local
-  evidence. As of v2.0.3, `session.list` is not exposed to plugins on any
+  evidence. As of v2.0.5, `session.list` is not exposed to plugins on any
   stable host
   (see
   [Not exposed to plugins](#not-exposed-to-plugins-sessionlist-sessionremove)),
