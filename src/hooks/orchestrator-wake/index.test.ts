@@ -1348,6 +1348,66 @@ describe('orchestrator wake scheduler', () => {
     expect(promptAsync).toHaveBeenCalledTimes(1);
   });
 
+  test('inject-no-rearm: injected non-operator nudges do not rearm the no-progress cap', async () => {
+    const promptAsync = mock(async () => ({}));
+    const { scheduler } = createScheduler({
+      intervalMs: 60_000,
+      sessionClient: makeClient({ promptAsync }),
+    });
+
+    await scheduler.event({
+      event: { type: 'session.idle', properties: { sessionID: 'p1' } },
+    });
+    await clock.advance(60_000);
+    await clock.advance(60_000);
+    expect(promptAsync).toHaveBeenCalledTimes(2);
+    expect(getWakeProgress('p1').stopped).toBe(true);
+
+    // task_message-style noReply nudge with an operator-looking text part.
+    scheduler.observeChatMessage(
+      { sessionID: 'p1', messageID: 'nudge-1', noReply: true },
+      {
+        message: { id: 'nudge-1', role: 'user', sessionID: 'p1' },
+        parts: [{ type: 'text', text: 'status nudge' }],
+      },
+    );
+    // v2 command-marker submit: plain text with no message identity.
+    scheduler.observeChatMessage(
+      { sessionID: 'p1' },
+      {
+        message: { role: 'user', sessionID: 'p1' },
+        parts: [{ type: 'text', text: '/deepwork marker' }],
+      },
+    );
+    // Board-tagged injection that lost its synthetic flag.
+    scheduler.observeChatMessage(
+      { sessionID: 'p1', messageID: 'nudge-2' },
+      {
+        message: { id: 'nudge-2', role: 'user', sessionID: 'p1' },
+        parts: [
+          {
+            type: 'text',
+            text: 'board snapshot',
+            metadata: { 'oh-my-opencode-slim.backgroundJobBoard': true },
+          },
+        ],
+      },
+    );
+    expect(getWakeProgress('p1').stopped).toBe(true);
+    expect(getWakeProgress('p1').unchangedWakeCount).toBe(2);
+
+    // A genuine external operator message still rearms.
+    scheduler.observeChatMessage(
+      { sessionID: 'p1', messageID: 'user-real' },
+      {
+        message: { id: 'user-real', role: 'user', sessionID: 'p1' },
+        parts: [{ type: 'text', text: 'keep going' }],
+      },
+    );
+    expect(getWakeProgress('p1').stopped).toBe(false);
+    expect(getWakeProgress('p1').unchangedWakeCount).toBe(0);
+  });
+
   test('wake→busy→idle preserves the two-wake no-progress cap', async () => {
     const promptAsync = mock(async () => ({}));
     const { scheduler } = createScheduler({

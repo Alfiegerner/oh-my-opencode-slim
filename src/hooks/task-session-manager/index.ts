@@ -23,6 +23,7 @@ import {
 } from '../../utils/child-transcript';
 import { isRecord as isObjectRecord } from '../../utils/guards';
 import { getClient } from '../../utils/opencode-client';
+import { isGenuineOperatorMessage } from '../orchestrator-wake/index';
 import type { SessionLifecycle } from '../session-lifecycle';
 import { isMessageWithParts, isUserMessageWithParts } from '../types';
 import {
@@ -658,6 +659,16 @@ export function createTaskSessionManagerHook(
         !options.shouldManageSession(sessionID) ||
         !Array.isArray(parts) ||
         parts.some(isInternalInitiatorPart) ||
+        // Shared genuine-operator gate with orchestrator-wake (single
+        // source of truth in ../orchestrator-wake/index.ts): noReply
+        // injections, identity-less v2 command-marker submits, and
+        // board/phase-tagged injections must not clear wait_for_user or
+        // invalidate idle timers. The local direct-synthetic and
+        // messageIdentity checks above stay as cheap pre-filters and the
+        // defense-in-depth identity seam (callers must still compute a
+        // messageIdentity); the shared helper owns the full genuineness
+        // verdict that neither seam reaches alone.
+        !isGenuineOperatorMessage(inputMessage, outputMessage, parts) ||
         !parts.some(
           (part) =>
             isObjectRecord(part) &&
