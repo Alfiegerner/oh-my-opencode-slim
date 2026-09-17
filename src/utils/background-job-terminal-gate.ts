@@ -19,6 +19,7 @@ import {
 } from './session-runtime-status';
 import {
   COMPLETED_WITHOUT_TEXT_DIAGNOSTIC,
+  guardCompletedStatusText,
   type TaskStatusOutput,
 } from './task';
 
@@ -844,16 +845,24 @@ export function createBackgroundJobTerminalGate(options: {
       return commit(token, signal.status.state, signal.status.result);
     }
     if (
+      foregroundNativeTerminal &&
       signal?.kind === 'output' &&
-      signal.origin.kind === 'native' &&
-      signal.status.state !== 'running' &&
-      foregroundNativeTerminal
+      signal.status.state !== 'running'
     ) {
+      const { state, result } = signal.status;
+      // A textless completion is an error, same rule as every other
+      // completed publication (guardCompletedStatusText): never invent a
+      // success summary for a finished run that produced no text.
+      const guarded = guardCompletedStatusText(
+        state,
+        result,
+        board.get(run.taskID)?.resultSummary,
+      );
       return commit(
         token,
-        signal.status.state,
-        signal.status.result?.trim() ||
-          'Foreground task finished without a terminal result.',
+        guarded.state,
+        guarded.resultSummary ??
+          `Foreground task ended with state ${guarded.state}.`,
       );
     }
     const stable = now() - (value.quiescentSince ?? now()) >= graceMs;

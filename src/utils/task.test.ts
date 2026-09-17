@@ -344,6 +344,24 @@ describe('parseTaskResultFromOutput', () => {
     ).toBe('hello');
   });
 
+  test('quoted gt in a subagent attribute does not leak into the result', () => {
+    // The opening tag must be scanned quote-aware: a `>` inside an
+    // attribute value (description="Check a > b") cannot close the tag.
+    expect(
+      parseTaskResultFromOutput(
+        '<subagent sessionID="ses_A" state="completed" description="Check a > b">done</subagent>',
+      ),
+    ).toBe('done');
+  });
+
+  test('unterminated subagent tag yields no result', () => {
+    expect(
+      parseTaskResultFromOutput(
+        '<subagent sessionID="ses_A" state="completed" description="Fix 3" display">no close',
+      ),
+    ).toBeUndefined();
+  });
+
   test('extracts task error block', () => {
     expect(
       parseTaskResultFromOutput(

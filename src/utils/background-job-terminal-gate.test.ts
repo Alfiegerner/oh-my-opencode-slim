@@ -14,6 +14,7 @@ import {
 } from './background-job-terminal-gate';
 import { BackgroundTaskConcurrency } from './background-task-concurrency';
 import { classifyTerminalEvidence } from './child-transcript';
+import { COMPLETED_WITHOUT_TEXT_DIAGNOSTIC } from './task';
 
 const gates: BackgroundJobTerminalGate[] = [];
 afterEach(() => {
@@ -1092,5 +1093,35 @@ describe('foreground native terminal fast path (r2 hardening)', () => {
     const after = await gate.reconcile(run);
     expect(after.kind).toBe('deferred');
     expect(board.get(run.taskID)?.state).toBe('running');
+  });
+
+  test('confirmed foreground textless completion publishes error, not invented success', async () => {
+    const board = new BackgroundJobBoard();
+    const run = board.registerLaunch({
+      taskID: 'ses_fg_textless',
+      parentSessionID: 'parent',
+      agent: 'fixer',
+      background: false,
+      now: 0,
+    });
+    const gate = createBackgroundJobTerminalGate({
+      backgroundJobBoard: board,
+      // No terminal transcript evidence: the native return is the only
+      // evidence, so guardCompletedStatusText decides the publication.
+      readTerminalEvidence: async () => ({ data: [] }),
+      graceMs: 5,
+      now: () => 1,
+    });
+    gates.push(gate);
+    const result = await gate.reconcile(run, {
+      kind: 'output',
+      origin: { kind: 'native', run, callID: 'call', callIDConfirmed: true },
+      status: { taskID: run.taskID, state: 'completed', timedOut: false },
+    });
+    expect(result.kind).toBe('committed');
+    expect(board.get(run.taskID)).toMatchObject({
+      state: 'error',
+      resultSummary: COMPLETED_WITHOUT_TEXT_DIAGNOSTIC,
+    });
   });
 });

@@ -203,17 +203,19 @@ export function parseTaskStateFromOutput(
 export const COMPLETED_WITHOUT_TEXT_DIAGNOSTIC =
   'Task ended without a public text result; completion is not confirmed';
 
-export interface GuardedTaskStatus {
-  state: TaskOutputState;
+export interface GuardedTaskStatus<
+  S extends TaskOutputState = TaskOutputState,
+> {
+  state: S | 'error';
   resultSummary?: string;
   lastStatusError?: string;
 }
 
-export function guardCompletedStatusText(
-  state: TaskOutputState,
+export function guardCompletedStatusText<S extends TaskOutputState>(
+  state: S,
   result: string | undefined,
   existingResultSummary: string | undefined,
-): GuardedTaskStatus {
+): GuardedTaskStatus<S> {
   if (
     state === 'completed' &&
     !result?.trim() &&
@@ -236,10 +238,30 @@ export function parseTaskResultFromOutput(output: string): string | undefined {
   const result = match?.[2]?.trim();
   if (result) return result;
 
-  // v2 `subagent` wraps its final text directly inside the tag.
-  const subagent = /<subagent[^>]*>\s*([\s\S]*?)\s*<\/subagent>/m.exec(output);
-  const subagentResult = subagent?.[1]?.trim();
-  if (subagentResult) return subagentResult;
+  // v2 `subagent` wraps its final text directly inside the tag. The
+  // opening tag is scanned quote-aware — same boundary rule as the header
+  // parser — so a quoted `>` inside an attribute (description="a > b")
+  // cannot truncate the tag and leak into the result text.
+  const tagStart = output.indexOf('<subagent');
+  if (tagStart !== -1) {
+    let quote: string | undefined;
+    let tagEnd = -1;
+    for (let i = tagStart + 1; i < output.length; i += 1) {
+      const ch = output[i] as string;
+      if (quote) {
+        if (ch === quote) quote = undefined;
+      } else if (ch === '"' || ch === "'") quote = ch;
+      else if (ch === '>') {
+        tagEnd = i;
+        break;
+      }
+    }
+    const close = tagEnd === -1 ? -1 : output.indexOf('</subagent>', tagEnd);
+    if (close !== -1) {
+      const subagentResult = output.slice(tagEnd + 1, close).trim();
+      if (subagentResult) return subagentResult;
+    }
+  }
 
   return undefined;
 }
