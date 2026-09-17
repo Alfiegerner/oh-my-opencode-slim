@@ -350,6 +350,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     }
   };
   const markTuiAgentInactive = (sessionID: string): void => {
+    pendingTuiBusySessions.delete(sessionID);
     const directory =
       ownedTuiActivitySessions.get(sessionID) ??
       tuiActivityDirectory(sessionID);
@@ -584,6 +585,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     });
     backgroundJobCoordinator.addTerminalOutcomeListener((record) => {
       revivedRunTracker.onTerminal(record);
+      markTuiAgentInactive(record.taskID);
     });
 
     // Initialize MultiplexerSessionManager to handle OpenCode's built-in
@@ -598,6 +600,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     );
     backgroundJobCoordinator.addTerminalStateListener((taskID) => {
       void multiplexerSessionManager.closeSessionFromCoordinator(taskID);
+      markTuiAgentInactive(taskID);
     });
     backgroundJobCoordinator.addTerminalOutcomeListener((record) => {
       if (record.deadlineExceededAt === undefined) return;
@@ -1356,7 +1359,16 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // message id in info.id and the session id in info.sessionID. Resolve
       // by session so child activity refreshes the correct stuck timer.
       const eventSessionID = resolveEventSessionID(event);
-      const statusType = event.properties?.status?.type;
+      const rawStatus = event.properties?.status;
+      const statusType =
+        typeof rawStatus === 'string'
+          ? rawStatus
+          : typeof rawStatus === 'object' &&
+              rawStatus !== null &&
+              'type' in rawStatus &&
+              typeof (rawStatus as { type?: unknown }).type === 'string'
+            ? (rawStatus as { type: string }).type
+            : undefined;
       if (
         eventSessionID &&
         sessionMetadata.getAgent(eventSessionID) === 'orchestrator' &&
@@ -1384,8 +1396,14 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           }
         } else if (
           event.type === 'session.idle' ||
-          (event.type === 'session.status' && statusType === 'idle') ||
-          event.type === 'session.deleted'
+          (event.type === 'session.status' &&
+            (statusType === 'idle' ||
+              statusType === 'completed' ||
+              statusType === 'stopped' ||
+              statusType === 'error' ||
+              statusType === 'failed')) ||
+          event.type === 'session.deleted' ||
+          event.type === 'session.error'
         ) {
           pendingTuiBusySessions.delete(eventSessionID);
           sessionMetadata.markOrchestratorIdle(eventSessionID);
@@ -1543,13 +1561,24 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
       if (input.event.type === 'session.status') {
         const props = input.event.properties as
-          | { sessionID?: string; status?: { type?: string } }
+          | { sessionID?: string; status?: { type?: string } | string }
           | undefined;
         const sessionID = props?.sessionID;
+        const rawCompanionStatus = props?.status;
+        const companionStatus =
+          typeof rawCompanionStatus === 'string'
+            ? rawCompanionStatus
+            : typeof rawCompanionStatus === 'object' &&
+                rawCompanionStatus !== null &&
+                'type' in rawCompanionStatus &&
+                typeof (rawCompanionStatus as { type?: unknown }).type ===
+                  'string'
+              ? (rawCompanionStatus as { type: string }).type
+              : undefined;
         companionManager.onSessionStatus({
           sessionId: sessionID,
           agent: sessionID ? sessionMetadata.getAgent(sessionID) : undefined,
-          status: props?.status?.type,
+          status: companionStatus,
         });
       }
 

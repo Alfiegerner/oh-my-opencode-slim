@@ -604,6 +604,20 @@ export async function handleToolExecuteAfter(
       return;
     }
 
+    if (!pending.background) {
+      const existing = deps.backgroundJobBoard.get(taskId);
+      if (existing && existing.state === 'running') {
+        const updated = deps.backgroundJobBoard.updateStatus({
+          taskID: taskId,
+          state: 'completed',
+          expectedGeneration: existing.generation,
+        });
+        if (updated?.state !== 'running') {
+          deps.releaseConcurrencyTask?.(taskId);
+        }
+      }
+    }
+
     deps.taskContextTracker.pendingManagedTaskIds.delete(taskId);
     deps.backgroundJobBoard.addContext(
       taskId,
