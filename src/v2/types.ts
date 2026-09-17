@@ -279,8 +279,6 @@ export interface V2Context {
       delivery?: 'steer' | 'queue';
       resume?: boolean;
     }): Promise<unknown>;
-    /** v2 session.rename ({sessionID, title}). */
-    rename?(input: Record<string, unknown>): Promise<unknown>;
     /** v2 session.switchAgent ({sessionID, agent}). */
     switchAgent?(input: Record<string, unknown>): Promise<unknown>;
   };

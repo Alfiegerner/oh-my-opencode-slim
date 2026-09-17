@@ -490,6 +490,26 @@ describe('v2 client shim delegation', () => {
     expect(res.data).toEqual({ id: 'ses_1', parentID: 'ses_0', title: 't' });
   });
 
+  test('session.update maps v1 rename body to v2 session.update', async () => {
+    const calls: unknown[] = [];
+    const input = buildPluginInput(
+      makeCtx({
+        update: async (i: unknown) => {
+          calls.push(i);
+        },
+      } as never),
+    );
+    await (
+      input.client as {
+        session: { update: (a: unknown) => Promise<unknown> };
+      }
+    ).session.update({
+      path: { id: 'ses_1' },
+      body: { title: 'New title' },
+    });
+    expect(calls).toEqual([{ sessionID: 'ses_1', title: 'New title' }]);
+  });
+
   test('delete delegates to session.remove with the flat {sessionID}', async () => {
     const calls: unknown[] = [];
     const input = buildPluginInput(
