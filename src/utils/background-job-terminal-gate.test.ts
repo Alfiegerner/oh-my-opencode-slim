@@ -1,19 +1,19 @@
 import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { createTaskSessionManagerHook } from '../hooks/task-session-manager';
 import { createRevivedRunTracker } from '../hooks/task-session-manager/revived-run-tracker';
+import { createTaskResultTool } from '../tools/task-result';
+import { buildPluginInput } from '../v2/client-shim';
 import { BackgroundJobBoard } from './background-job-board';
 import { BackgroundJobCoordinator } from './background-job-coordinator';
-import { BackgroundTaskConcurrency } from './background-task-concurrency';
 import {
-  createBackgroundJobTerminalGate,
   type BackgroundJobTerminalGate,
-  type RuntimeObservation,
+  createBackgroundJobTerminalGate,
   EVIDENCE_UNAVAILABLE_DIAGNOSTIC,
+  type RuntimeObservation,
   runtimeObservationFromSnapshot,
 } from './background-job-terminal-gate';
+import { BackgroundTaskConcurrency } from './background-task-concurrency';
 import { classifyTerminalEvidence } from './child-transcript';
-import { buildPluginInput } from '../v2/client-shim';
-import { createTaskResultTool } from '../tools/task-result';
 
 const gates: BackgroundJobTerminalGate[] = [];
 afterEach(() => {
@@ -1030,3 +1030,67 @@ test.each(['transcript', 'outcome'])(
     }
   },
 );
+
+describe('foreground native terminal fast path (r2 hardening)', () => {
+  test.each([
+    [
+      'unattributed native return keeps the full runtime discipline',
+      false,
+      false,
+    ],
+    [
+      'ambiguous untimestamped busy kills a held foreground candidate',
+      true,
+      true,
+    ],
+  ] as const)('%s', async (_name, callIDConfirmed, ambiguousBusy) => {
+    const board = new BackgroundJobBoard();
+    const run = board.registerLaunch({
+      taskID: `ses_fg_${ambiguousBusy ? 'ambiguous' : 'unattributed'}`,
+      parentSessionID: 'parent',
+      agent: 'fixer',
+      background: false,
+      now: 0,
+    });
+    // First row runs without a pending handoff so it isolates the
+    // attribution barrier; second row holds the candidate behind one.
+    let observationPending = ambiguousBusy;
+    const gate = createBackgroundJobTerminalGate({
+      backgroundJobBoard: board,
+      readTerminalEvidence: async () => answer(),
+      isObservationPending: () => observationPending,
+      graceMs: 5,
+      now: () => 1,
+    });
+    gates.push(gate);
+    const held = await gate.reconcile(run, {
+      kind: 'output',
+      origin: {
+        kind: 'native',
+        run,
+        callID: 'call',
+        ...(callIDConfirmed ? { callIDConfirmed: true } : {}),
+      },
+      status: {
+        taskID: run.taskID,
+        state: 'completed',
+        timedOut: false,
+        result: 'done',
+      },
+    });
+    expect(held.kind).toBe('deferred');
+    expect(board.get(run.taskID)?.state).toBe('running');
+    if (!ambiguousBusy) return;
+    const token = gate.capture(run);
+    if (!token) throw new Error('missing observation token');
+    gate.observe(token, {
+      kind: 'busy',
+      origin: 'session.status-event',
+      readStartedAt: token.readStartedAt,
+    });
+    observationPending = false;
+    const after = await gate.reconcile(run);
+    expect(after.kind).toBe('deferred');
+    expect(board.get(run.taskID)?.state).toBe('running');
+  });
+});

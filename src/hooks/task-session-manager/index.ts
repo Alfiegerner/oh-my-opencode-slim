@@ -15,8 +15,13 @@ import {
   parseTaskStateFromOutput,
   recordBackgroundJobSuppression,
 } from '../../utils';
-import { isRecord as isObjectRecord } from '../../utils/guards';
+import {
+  type BackgroundJobTerminalGate,
+  createBackgroundJobTerminalGate,
+  readSessionInfoForObservation,
+} from '../../utils/background-job-terminal-gate';
 import { fetchChildTranscript } from '../../utils/child-transcript';
+import { isRecord as isObjectRecord } from '../../utils/guards';
 import { getClient } from '../../utils/opencode-client';
 import { isGenuineOperatorMessage } from '../orchestrator-wake/index';
 import type { SessionLifecycle } from '../session-lifecycle';
@@ -41,11 +46,6 @@ import {
 } from './pending-call-tracker';
 import type { RevivedRunTracker } from './revived-run-tracker';
 import { createRuntimeStatusReconciler } from './runtime-status-reconciliation';
-import {
-  createBackgroundJobTerminalGate,
-  type BackgroundJobTerminalGate,
-  readSessionInfoForObservation,
-} from '../../utils/background-job-terminal-gate';
 import { createTaskContextTracker } from './task-context-tracker';
 import {
   handleToolExecuteAfter,
@@ -601,8 +601,6 @@ export function createTaskSessionManagerHook(
         backgroundJobSupervisor: options.backgroundJobSupervisor,
         bindConcurrencyTicket: (taskID, pending) =>
           pending.concurrencyTicket?.bind(taskID),
-        releaseConcurrencyTask: (taskID) =>
-          options.backgroundTaskConcurrency?.releaseTask(taskID),
         recordLifecycleSuppression: (taskID) =>
           recordBackgroundJobSuppression(backgroundJobBoard, taskID),
         pendingCallTracker,

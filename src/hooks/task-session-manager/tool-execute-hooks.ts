@@ -19,9 +19,9 @@ import {
   parseTaskLaunchOutput,
   parseTaskStatusOutput,
 } from '../../utils';
+import type { BackgroundJobTerminalGate } from '../../utils/background-job-terminal-gate';
 import { isRecord as isObjectRecord } from '../../utils/guards';
 import { log } from '../../utils/logger';
-import type { BackgroundJobTerminalGate } from '../../utils/background-job-terminal-gate';
 import { isMissingRememberedSessionError } from './board-injection';
 import type { PendingTaskCall } from './pending-call-tracker';
 import { convertSameProviderBackgroundTask } from './same-provider-policy';
@@ -372,7 +372,6 @@ export async function handleToolExecuteAfter(
     };
     backgroundJobSupervisor?: BackgroundJobSupervisor;
     bindConcurrencyTicket?: (taskID: string, pending: PendingTaskCall) => void;
-    releaseConcurrencyTask?: (taskID: string) => void;
     /** Record direct task cleanup even when the store is a thin facade. */
     recordLifecycleSuppression?: (taskID: string) => void;
     /** Clear a deletion guard when a new native task output proves a run exists. */
@@ -531,7 +530,12 @@ export async function handleToolExecuteAfter(
       await deps.terminalGate.reconcile(record, {
         kind: 'output',
         status,
-        origin: { kind: 'native', run: record, callID: pending.callId },
+        origin: {
+          kind: 'native',
+          run: record,
+          callID: pending.callId,
+          callIDConfirmed: exactCallConfirmed,
+        },
       });
       // The synchronous terminal listener owns release and context settlement.
       // The returned publication may already have been withdrawn while awaiting.
@@ -588,20 +592,6 @@ export async function handleToolExecuteAfter(
         },
       );
       return;
-    }
-
-    if (!pending.background) {
-      const existing = deps.backgroundJobBoard.get(taskId);
-      if (existing && existing.state === 'running') {
-        const updated = deps.backgroundJobBoard.updateStatus({
-          taskID: taskId,
-          state: 'completed',
-          expectedGeneration: existing.generation,
-        });
-        if (updated?.state !== 'running') {
-          deps.releaseConcurrencyTask?.(taskId);
-        }
-      }
     }
 
     deps.taskContextTracker.pendingManagedTaskIds.delete(taskId);

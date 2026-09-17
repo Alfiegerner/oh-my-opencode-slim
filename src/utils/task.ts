@@ -49,46 +49,127 @@ export function renderRunningTaskPlaceholder(taskID: string): string {
   ].join('\n');
 }
 
-export function parseTaskIdFromTaskOutput(output: string): string | undefined {
-  const xmlMatch = /<task\s+[^>]*\bid=["']([^"']+)["'][^>]*>/i.exec(output);
-  if (xmlMatch) return xmlMatch[1];
+/**
+ * Atomic task-output header: identity and state come from the host's
+ * opening (XML wrapper tag or textual marker) alone — result content can
+ * quote foreign task markup but never supplies attribution.
+ */
+interface TaskOutputHeader {
+  taskID?: string;
+  state?: TaskOutputState;
+}
 
-  // v2 host `subagent` tool output formats.
-  const subagentXml =
-    /<subagent\s+[^>]*\bsessionID=["']([^"']+)["'][^>]*>/i.exec(output);
-  if (subagentXml) return subagentXml[1];
-  const failed =
-    /Subagent (?:failed|cancelled) \(sessionID:\s*([^\s)]+)\)/i.exec(output);
-  if (failed) return failed[1];
-
-  // v1 `task_id:` line before the generic bracket pattern: a v1 output can
-  // quote a foreign `(sessionID: x)` in passing, and the explicit marker
-  // is the authoritative id.
-  const lines = output.split(/\r?\n/);
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    const match = /^task_id:\s*([^\s()]+)(?:\s*\(.*)?$/.exec(trimmed);
-
-    if (!match) {
-      continue;
+/**
+ * Tokenize an opening tag into its attributes, walking complete
+ * name="value" pairs: values are consumed whole between their own quote
+ * delimiters, so text inside one attribute's value can never pose as
+ * another attribute. A duplicated name invalidates the whole header.
+ */
+function parseTagAttributes(tag: string): Map<string, string> | undefined {
+  const attrs = new Map<string, string>();
+  let i = 1; // skip '<'
+  while (i < tag.length && /[^\s/>=]/.test(tag[i] as string)) i += 1;
+  while (i < tag.length) {
+    while (i < tag.length && /[\s/]/.test(tag[i] as string)) i += 1;
+    if (i >= tag.length || tag[i] === '>') break;
+    const nameStart = i;
+    while (i < tag.length && /[^\s=/>]/.test(tag[i] as string)) i += 1;
+    const name = tag.slice(nameStart, i).toLowerCase();
+    while (i < tag.length && /\s/.test(tag[i] as string)) i += 1;
+    if (tag[i] !== '=') continue;
+    i += 1;
+    while (i < tag.length && /\s/.test(tag[i] as string)) i += 1;
+    const quote = tag[i] === '"' || tag[i] === "'" ? tag[i] : undefined;
+    if (quote) i += 1;
+    const valueStart = i;
+    while (
+      i < tag.length &&
+      (quote ? tag[i] !== quote : /[^\s>]/.test(tag[i] as string))
+    ) {
+      i += 1;
     }
-
-    return match[1];
+    const value = tag.slice(valueStart, i);
+    if (quote) i += 1;
+    if (attrs.has(name)) return undefined;
+    attrs.set(name, value);
   }
+  return attrs;
+}
 
-  const background = /\(sessionID:\s*([^\s)]+)\)/.exec(output);
-  if (background) return background[1];
+function parseTaskOutputHeader(output: string): TaskOutputHeader {
+  // XML wrapper: the output opens with the host's wrapper tag. The tag
+  // closes at the first `>` OUTSIDE quoted values; once an XML opening is
+  // detected, any scan failure (inner '<', unterminated quote, exhausted
+  // input) rejects the header outright — never fall back to textual
+  // formats on the body.
+  const start = /^\s*</.exec(output);
+  if (start) {
+    let end = start[0].length;
+    let quote: string | undefined;
+    for (; end < output.length; end += 1) {
+      const ch = output[end] as string;
+      if (quote) {
+        if (ch === quote) quote = undefined;
+      } else if (ch === '"' || ch === "'") quote = ch;
+      else if (ch === '>') break;
+      else if (ch === '<') return {};
+    }
+    if (end === output.length) return {};
+    const tag = output.slice(start[0].length - 1, end + 1);
+    const kind = /^<(task|subagent)\b/i.exec(tag)?.[1]?.toLowerCase();
+    if (kind) {
+      const attrs = parseTagAttributes(tag);
+      if (!attrs) return {};
+      const identity = attrs.get(kind === 'subagent' ? 'sessionid' : 'id');
+      const rawState = attrs.get('state');
+      return {
+        taskID: identity || undefined,
+        state:
+          rawState && /^(running|completed|error|cancelled)$/i.test(rawState)
+            ? (rawState.toLowerCase() as TaskOutputState)
+            : undefined,
+      };
+    }
+  }
+  const failed =
+    /^\s*Subagent (failed|cancelled) \(sessionID:\s*([^\s)]+)\)/i.exec(output);
+  if (failed)
+    return {
+      taskID: failed[2],
+      state: (failed[1].toLowerCase() === 'failed'
+        ? 'error'
+        : 'cancelled') as TaskOutputState,
+    };
+  const working =
+    /^\s*The subagent is working in the background \(sessionID:\s*([^\s)]+)\)/i.exec(
+      output,
+    );
+  if (working) return { taskID: working[1], state: 'running' };
+  // v1 textual header: key/value lines in the header region (before
+  // `<task_result>`/`<task_error>`), never inside the result body.
+  const header = getTaskHeader(output);
+  const parsed: TaskOutputHeader = {};
+  for (const line of header.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    const idMatch = /^task_id:\s*([^\s()]+)(?:\s*\(.*)?$/i.exec(trimmed);
+    if (idMatch) parsed.taskID ??= idMatch[1];
+    const stateMatch =
+      /^state:\s*(running|completed|error|cancelled)\s*$/i.exec(trimmed);
+    if (stateMatch)
+      parsed.state ??= stateMatch[1].toLowerCase() as TaskOutputState;
+  }
+  parsed.taskID ??= /\(sessionID:\s*([^\s)]+)\)/.exec(header)?.[1];
+  return parsed;
+}
 
-  return undefined;
+export function parseTaskIdFromTaskOutput(output: string): string | undefined {
+  return parseTaskOutputHeader(output).taskID;
 }
 
 export function parseTaskLaunchOutput(
   output: string,
 ): TaskLaunchOutput | undefined {
-  const taskID = parseTaskIdFromTaskOutput(output);
-  const state = parseTaskStateFromOutput(output);
-
+  const { taskID, state } = parseTaskOutputHeader(output);
   if (!taskID || state !== 'running') return undefined;
 
   return {
@@ -101,9 +182,7 @@ export function parseTaskLaunchOutput(
 export function parseTaskStatusOutput(
   output: string,
 ): TaskStatusOutput | undefined {
-  const taskID = parseTaskIdFromTaskOutput(output);
-  const state = parseTaskStateFromOutput(output);
-
+  const { taskID, state } = parseTaskOutputHeader(output);
   if (!taskID || !state) return undefined;
 
   return {
@@ -117,34 +196,7 @@ export function parseTaskStatusOutput(
 export function parseTaskStateFromOutput(
   output: string,
 ): TaskOutputState | undefined {
-  const xmlMatch =
-    /<task\s+[^>]*\bstate=["'](running|completed|error|cancelled)["'][^>]*>/i.exec(
-      output,
-    );
-  if (xmlMatch) return xmlMatch[1].toLowerCase() as TaskOutputState;
-
-  // v2 host `subagent` tool output formats.
-  const subagentXml =
-    /<subagent\s+[^>]*\bstate=["'](running|completed|error|cancelled)["'][^>]*>/i.exec(
-      output,
-    );
-  if (subagentXml) return subagentXml[1].toLowerCase() as TaskOutputState;
-
-  if (/Subagent failed \(sessionID:/i.test(output)) return 'error';
-  if (/Subagent cancelled \(sessionID:/i.test(output)) return 'cancelled';
-  if (/The subagent is working in the background \(sessionID:/i.test(output)) {
-    return 'running';
-  }
-
-  for (const line of getTaskHeader(output).split(/\r?\n/)) {
-    const match = /^state:\s*(running|completed|error|cancelled)\s*$/i.exec(
-      line.trim(),
-    );
-
-    if (match) return match[1].toLowerCase() as TaskOutputState;
-  }
-
-  return undefined;
+  return parseTaskOutputHeader(output).state;
 }
 
 /** Diagnostic applied when a terminal `completed` report carries no text. */
