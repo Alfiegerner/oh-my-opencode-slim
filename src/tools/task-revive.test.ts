@@ -99,7 +99,9 @@ const context = { sessionID: 'parent-1', agent: 'orchestrator' } as any;
 beforeEach(() => {
   // Other suites can leave module mocks installed. Override only for this
   // test; mock.restore below restores the previous implementation afterward.
-  spyOn(opencodeClient, 'getClient').mockImplementation((input) => input.client);
+  spyOn(opencodeClient, 'getClient').mockImplementation(
+    (input) => input.client,
+  );
 });
 
 afterEach(() => {
