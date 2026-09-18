@@ -596,7 +596,9 @@ export async function handleToolExecuteAfter(
 
     // An ID-only output still identifies this call's own child: a
     // placeholder is promoted without inventing a run state from it.
-    deps.backgroundJobBoard.promoteProvisional(taskId, input.sessionID);
+    // The pending's parent is always defined, so the fence is
+    // unconditional rather than best-effort on the host input.
+    deps.backgroundJobBoard.promoteProvisional(taskId, pending.parentSessionId);
     deps.taskContextTracker.pendingManagedTaskIds.delete(taskId);
     deps.backgroundJobBoard.addContext(
       taskId,
