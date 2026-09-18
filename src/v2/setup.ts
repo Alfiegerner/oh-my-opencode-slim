@@ -16,6 +16,7 @@
 
 import { loadPluginConfig } from '../config/loader';
 import { InterviewConfigSchema } from '../config/schema';
+import { getBuildInfo } from '../generated/build-info';
 import {
   runWithSyntheticPartCacheHintScope,
   type SyntheticPartCacheHint,
@@ -1329,6 +1330,9 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       .replace(/[-:]/g, '')
       .slice(0, 15);
     initLogger(sessionId);
+    // First logged line: identify the build that produced every following
+    // log entry (logging-only — build info never enters prompt payloads).
+    log('[v2] build info', getBuildInfo());
     // Capability guard: some hosts load this same `setup` with a reduced or
     // TUI-side context where agent/tool/session/event domains are missing.
     // Skip registration instead of crashing the host (and retry-storming).
