@@ -7,6 +7,7 @@ import type { BackgroundJobRecord } from './utils/background-job-board';
 import type { BackgroundJobCoordinator } from './utils/background-job-coordinator';
 import * as gateFactories from './utils/background-job-terminal-gate';
 import { BackgroundTaskConcurrency } from './utils/background-task-concurrency';
+import { mapV2EventToV1 } from './v2/event-adapter';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -46,6 +47,9 @@ async function assembly(
     statusTimeoutMs?: number;
     statusAvailable?: boolean;
     graceMs?: number;
+    /** Whole-client replacement (v2 shim-shaped hosts). Suppresses the
+     * default v1 client so capability probes see honest method absence. */
+    client?: unknown;
   } = {},
 ) {
   const env = { ...process.env };
@@ -147,13 +151,16 @@ async function assembly(
           : (Reflect.get(target, key) ?? noop),
     },
   );
-  const client = new Proxy(
+  const builtClient = new Proxy(
     { session, app: { log: noop } },
     {
       get: (target, key) =>
         Reflect.get(target, key) ?? new Proxy({}, { get: () => noop }),
     },
   );
+  // v2 shim-shaped hosts replace the client wholesale; the default v1
+  // client (with a live session.status) stays for every other test.
+  const client = setup.client ?? builtClient;
   const instance: { hooks?: Awaited<ReturnType<typeof plugin>> } = {};
   cleanups.push(async () => {
     await instance.hooks?.dispose?.();
@@ -573,4 +580,156 @@ test('regression: terminal-context-not-attached consolidates and prunes ordinary
   h.board.drop('child');
   h.taskHook.pruneTaskContext();
   expect(h.taskHook.contextFilesForTask('child')).toEqual([]);
+});
+
+// ── Task 3.5: adapter-driven starvation reproduction (live incident) ──
+//
+// Live 2.0.8 incident (verified twice): a background child whose host
+// had already committed `Session.Info.idle_outcome='succeeded'` at idle
+// time never received a terminal publication — the board stayed
+// `running, status uncertain` until `EVIDENCE_UNAVAILABLE` exhausted
+// its retry budget. This drives the REAL chain, not hand-fed v1 shapes:
+// raw v2 events pumped through `mapV2EventToV1`, every product (raw
+// first, then the synthesized v1 shapes) dispatched to the production
+// event hook in the same order as the v2 pump in `src/v2/setup.ts`,
+// against a shim-shaped client — no `session.status`, no
+// `session.list`, no `session.messages`; `session.get` returns the
+// v2 `Session.Info` with `outcome` + `time.idle` (the envelope
+// `outcomeFromRead`/`attributableHostOutcome` unwraps; the production
+// assembly already wires `hostOutcomeClock: 'shared-unix-ms'` in
+// src/index.ts, and the assembly's gate spy spreads it through).
+//
+// Attribution timing: the gate binds `Date.now` at CONSTRUCTION, so a
+// frozen Date.now mock would desynchronize the attribution window from
+// the timestamps the fixture controls. Instead everything shares the
+// real clock, and the fixture enforces strict ordering (>=2ms sleeps)
+// between the three boundaries the window compares —
+// runStartedAt/lastLiveBusyAt (the execution envelope's `created`) <
+// the host-committed `time.idle` <= the gate's read completion — so
+// no rejection boundary can fire spuriously.
+
+/** v2 host probe: shim-shaped client + the host-side outcome commit. */
+interface V2HostProbe {
+  client: unknown;
+  /** Host commits idle_outcome when it publishes the terminal
+   * execution event (live-verified: outcome already set at idle). */
+  commitTerminalOutcome(idleAt: number): void;
+  readonly get: ReturnType<typeof mock>;
+}
+
+function v2ShimClient(options: { outcome: string }): V2HostProbe {
+  const host = {
+    outcome: options.outcome,
+    idleAt: undefined as number | undefined,
+  };
+  const get = mock(
+    async (_args: unknown): Promise<unknown> => ({
+      // v2 Session.Info carries `outcome`/`time.idle` only after the
+      // terminal transition; a running child has neither.
+      data:
+        host.idleAt === undefined
+          ? { parentID: 'parent' }
+          : {
+              parentID: 'parent',
+              outcome: host.outcome,
+              time: { idle: host.idleAt },
+            },
+    }),
+  );
+  // Shim shape: ONLY session.get. `session` is a plain object so the
+  // absent methods stay absent (capability probes must see honest
+  // absence, never an auto-filled stub); other client domains still
+  // degrade through the outer proxy like the v1 assembly default.
+  const session = { get };
+  const client = new Proxy(
+    { session, app: { log: async () => ({}) } },
+    {
+      get: (target, key) =>
+        Reflect.get(target, key) ??
+        new Proxy({}, { get: () => async () => ({ data: [] }) }),
+    },
+  );
+  return {
+    client,
+    get,
+    commitTerminalOutcome(idleAt: number) {
+      host.idleAt = idleAt;
+    },
+  };
+}
+
+type V2RawEventSpec = {
+  type: string;
+  data: Record<string, unknown>;
+};
+
+async function driveV2Lifecycle(
+  probe: V2HostProbe,
+  events: V2RawEventSpec[],
+): Promise<BackgroundJobCoordinator> {
+  const childID = String(
+    events.find((event) => event.type === 'session.created')?.data.sessionID ??
+      events[0]?.data.sessionID ??
+      'child',
+  );
+  const h = await assembly(undefined, { graceMs: 20, client: probe.client });
+  const dispatch = async (event: Record<string, unknown>) => {
+    await h.hooks.event?.({ event } as never);
+  };
+  // The real chain: the host's task tool call returns after the child
+  // session exists (pending call → session.created → tool.execute.after
+  // with a running-state output), then the durable v2 lifecycle runs.
+  // Each step sleeps >=2ms so the host timestamps it stamps stay
+  // strictly ordered (run start < busy activity < committed idle).
+  await h.requestTask('native', 'v2 adapter lifecycle probe');
+  let notifiedToolReturn = false;
+  for (const spec of events) {
+    await Bun.sleep(2);
+    if (
+      spec.type !== 'session.execution.started' &&
+      spec.type.startsWith('session.execution.')
+    )
+      probe.commitTerminalOutcome(Date.now());
+    const raw: Record<string, unknown> = {
+      id: `evt-${spec.type}-${String(spec.data.sessionID ?? '')}`,
+      created: Date.now(),
+      type: spec.type,
+      data: spec.data,
+    };
+    // Production pump order (src/v2/setup.ts): raw event first, then
+    // every synthesized v1 shape, each through the real event hook.
+    for (const event of mapV2EventToV1(raw)) await dispatch(event);
+    await flush();
+    // After the child is registered, the host's task tool call returns
+    // a running-state output (background:true registration + the
+    // native running candidate signal), before execution starts.
+    if (spec.type === 'session.created' && !notifiedToolReturn) {
+      notifiedToolReturn = true;
+      await Bun.sleep(2);
+      await h.after('running');
+      await flush();
+    }
+  }
+  // Let the gate's evidence-retry schedule (graceMs-bounded timers)
+  // run to publication or exhaustion, whichever comes first; real time
+  // advancing past the quiescence grace keeps the stable branches live
+  // rather than accidentally skipped.
+  for (let i = 0; i < 200 && h.board.get(childID)?.state === 'running'; i++) {
+    await Bun.sleep(5);
+  }
+  return h.board;
+}
+
+// verdict A: reproduces live starvation; un-skipped by the starvation-fix task
+test.skip('v2 lifecycle through the real adapter terminalizes a completed child', async () => {
+  const probe = v2ShimClient({ outcome: 'succeeded' });
+  const board = await driveV2Lifecycle(probe, [
+    {
+      type: 'session.created',
+      data: { sessionID: 'child', parentID: 'parent', agent: 'explorer' },
+    },
+    { type: 'session.execution.started', data: { sessionID: 'child' } },
+    { type: 'session.execution.succeeded', data: { sessionID: 'child' } },
+  ]);
+  expect(board.get('child')?.state).toBe('completed');
 });
