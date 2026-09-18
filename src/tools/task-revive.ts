@@ -1,5 +1,6 @@
 import { type ToolDefinition, tool } from '@opencode-ai/plugin';
 import type { RevivedRunTracker } from '../hooks/task-session-manager/revived-run-tracker';
+import type { BackgroundJobLease } from '../utils/background-job-board';
 import type { BackgroundJobSupervisor } from '../utils/background-job-supervisor';
 import { log } from '../utils/logger';
 import { getClient } from '../utils/opencode-client';
@@ -180,7 +181,7 @@ export function createTaskReviveTool(
         });
         // This captured owner, not the caller's deadline, owns settlement.
         // Keep exclusion while admission is unknown; never retry the write.
-        const owner = { settled: false };
+        const owner = { settled: false, transferred: false };
         admissionOwner = owner;
         const admission = Promise.resolve(request)
           .then((response) => {
@@ -189,6 +190,21 @@ export function createTaskReviveTool(
             const responseError = getApiError(response);
             if (responseError !== undefined) {
               throw new Error(errorText(responseError));
+            }
+            // Deletion wins, but it leaves this write's lease alive. Only
+            // that precise case may compensate; all stale owners/generations
+            // still go through registerLaunch's existing rejection fence.
+            if (
+              !options.backgroundJobBoard.get(captured.taskID) &&
+              options.backgroundJobBoard.validateLease(relaunchLease)
+            ) {
+              owner.transferred = true;
+              // Starts synchronously under the lease, independently of the
+              // admission race. Its abort is never awaited by this caller.
+              void ownInvalidatedAdmission(options, relaunchLease);
+              throw new Error(
+                'admission accepted but invalidated by loss of the record; compensation initiated',
+              );
             }
             launched = options.backgroundJobBoard.registerLaunch({
               taskID: current.taskID,
@@ -210,7 +226,8 @@ export function createTaskReviveTool(
           })
           .finally(() => {
             owner.settled = true;
-            options.backgroundJobBoard.releaseLease(relaunchLease);
+            if (!owner.transferred)
+              options.backgroundJobBoard.releaseLease(relaunchLease);
           });
         const observation = admission
           .then(async () => {
@@ -293,6 +310,72 @@ export function createTaskReviveTool(
   });
 
   return { task_revive };
+}
+
+/**
+ * Owns a single compensating abort after deletion invalidates an accepted
+ * admission. The board retains the token even without a job: no TTL, retry,
+ * terminal publication, or recovery is allowed on this path.
+ */
+async function ownInvalidatedAdmission(
+  options: TaskReviveToolOptions,
+  lease: BackgroundJobLease,
+): Promise<void> {
+  const board = options.backgroundJobBoard;
+  const { taskID, generation } = lease;
+  const stillOwns = () => {
+    const valid = board.validateLease(lease) && !board.get(taskID);
+    if (!valid)
+      log('[task-revive] compensation ownership lost', { taskID, generation });
+    return valid;
+  };
+  try {
+    const session = getClient(options.input).session;
+    // No await between this fence and issuing the only compensating write.
+    if (!stillOwns()) return;
+    const response = await session.abort({ path: { id: taskID } });
+    // No local abort timeout: an idle read cannot retire a token while the
+    // remote write could still execute. Only actual settlement reaches here.
+    if (!stillOwns()) return;
+    const responseError = getApiError(response);
+    if (responseError !== undefined)
+      throw new Error(`abort failed: ${errorText(responseError)}`);
+
+    // Historical session.get outcomes cannot prove the accepted run stopped.
+    // Take fresh live evidence after abort settlement, with a bounded budget.
+    const snapshot = await getRuntimeSessionStatusSnapshot(options.input, {
+      timeoutMs: options.verifyAbortMs ?? 1_500,
+    });
+    if (!stillOwns()) return;
+    const status = snapshot.statuses.get(taskID);
+    if (
+      snapshot.error !== undefined ||
+      snapshot.malformedSessionIDs.has(taskID) ||
+      status === 'busy' ||
+      status === 'retry'
+    ) {
+      throw new Error(
+        `live quiescence not verified: ${snapshot.error ?? status ?? 'malformed entry'}`,
+      );
+    }
+
+    // Valid idle/absence proves current quiescence, not purging queued work.
+    // Revalidate above and release synchronously: never retire a successor.
+    board.releaseLease(lease);
+    log('[task-revive] compensation quiescence verified', {
+      taskID,
+      generation,
+    });
+  } catch (error) {
+    // Explicit quarantine: retain exclusion without fabricating a cancelled
+    // record or notifying a deleted parent. No automatic recovery/retry.
+    log('[task-revive] compensation unconfirmed', {
+      taskID,
+      generation,
+      error: errorText(error),
+      leaseRetained: board.validateLease(lease),
+    });
+  }
 }
 
 function renderReviveOutput(

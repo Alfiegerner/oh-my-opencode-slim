@@ -86,6 +86,23 @@ while the first caller awaits its probe, the first call rejects with
 `revive became stale`. This supersession rejection does not invalidate the newer
 launch; use `task_status` to inspect the current generation.
 
+Deletion wins over pending admission: deleting the child or its parent never
+recreates either record when acceptance arrives. If the original relaunch lease
+still owns the missing child, a separate compensation owner sends exactly one
+abort for that child, without registering a generation, clearing its tombstone,
+notifying the deleted parent, or aborting siblings. A revoked/replaced lease or
+changed generation remains fenced and never triggers an abort of its successor.
+If the caller is still waiting, it receives `admission accepted but invalidated by
+loss of the record; compensation initiated`; an already-returned
+`admission_unknown` is unchanged. Admission rejection needs no compensation.
+The compensation retains exclusion while abort is pending, without a local
+deadline releasing it. Only actual abort settlement followed by a fresh, bounded
+live-status read confirming idle/absence releases that exact lease. An abort
+failure or unverifiable/busy status logs `compensation unconfirmed` and keeps the
+ID excluded indefinitely: no automatic retry or recovery. Historical outcomes
+are not stop evidence; live quiescence does not guarantee queued prompts were
+purged, so future queued execution remains uncertain even after lease release.
+
 `task()` refuses an explicit `task_id` it cannot resume instead of dropping it
 and spawning another session.
 

@@ -14,6 +14,7 @@ import {
 } from '../hooks/task-session-manager/revived-run-tracker';
 import { BackgroundJobBoard as ProductionBoard } from '../utils/background-job-board';
 import { BackgroundJobBoard } from '../utils/background-job-fixture';
+import { getBackgroundJobLifecycleLedger } from '../utils/background-job-store';
 import {
   type BackgroundJobTerminalGate,
   createBackgroundJobTerminalGate,
@@ -142,7 +143,196 @@ function stoppedSession(
   if (acknowledge) board.markReconciled(taskID);
 }
 
+function controlledAdmissionDeadline() {
+  const ready = Promise.withResolvers<() => void>();
+  const timers = new Map<number, () => void>();
+  let nextID = 0;
+  spyOn(globalThis, 'setTimeout').mockImplementation(((
+    callback: () => void,
+    ms: number,
+  ) => {
+    const id = ++nextID;
+    const fire = () => {
+      timers.delete(id);
+      callback();
+    };
+    timers.set(id, fire);
+    if (ms === 1_000) ready.resolve(fire);
+    return id;
+  }) as typeof setTimeout);
+  spyOn(globalThis, 'clearTimeout').mockImplementation(((id: number) => {
+    timers.delete(id);
+  }) as typeof clearTimeout);
+  return {
+    ready: ready.promise,
+    fireRemaining: () => {
+      for (const fire of timers.values()) fire();
+    },
+  };
+}
+
 describe('task_revive tool', () => {
+  test.each([
+    ['early', 'idle'],
+    ['early', 'rejected'],
+    ['early', 'error response'],
+    ['late', 'rejected'],
+    ['late', 'error response'],
+    ...[
+      'idle',
+      'absent',
+      'pending',
+      'abort rejected',
+      'abort error',
+      'abort throw',
+      'status rejected',
+      'status error',
+      'malformed',
+      'busy',
+      'retry',
+      'status timeout',
+      'replaced during abort',
+      'replaced during read',
+    ].map((outcome) => ['late', outcome]),
+  ])('deleted admission %s: %s', async (timing, outcome) => {
+    const deadline = controlledAdmissionDeadline();
+    const send = Promise.withResolvers<unknown>();
+    const stop = Promise.withResolvers<unknown>();
+    const read = Promise.withResolvers<unknown>();
+    const reading = Promise.withResolvers<void>();
+    const admissionLogged = Promise.withResolvers<void>();
+    const compensated = Promise.withResolvers<void>();
+    const log = spyOn(logger, 'log').mockImplementation((message) => {
+      if (message === '[task-revive] admission failed')
+        admissionLogged.resolve();
+      if (message.startsWith('[task-revive] compensation '))
+        compensated.resolve();
+    });
+    const fixture = createTool({
+      admissionTimeoutMs: 1_000,
+      promptAsync: () => send.promise,
+      abort: () => {
+        if (outcome === 'abort throw') throw new Error('abort failed');
+        return stop.promise;
+      },
+    });
+    const { board, taskRevive, abort, status, promptAsync, onLaunch } = fixture;
+    acknowledgedCompleted(board);
+    const acquire = spyOn(ProductionBoard.prototype, 'acquireRelaunchLease');
+    const release = spyOn(ProductionBoard.prototype, 'releaseLease');
+    const launch = spyOn(ProductionBoard.prototype, 'registerLaunch');
+    const register = spyOn(fixture.revivedRunTracker, 'register');
+    const probe = spyOn(fixture.revivedRunTracker, 'probe');
+    const terminal = mock(() => {});
+    board.addTerminalStateListener(terminal);
+    const result = taskRevive
+      .execute({ task_id: 'ses_1', prompt: 'continue' }, context)
+      .then(String, (error: Error) => error);
+    const fireDeadline = await deadline.ready;
+    const lease = acquire.mock.results[0]?.value;
+    if (!lease) throw new Error('missing relaunch lease');
+    if (timing === 'late') {
+      fireDeadline();
+      expect(await result).toContain('status: admission_unknown');
+    }
+    board.drop('ses_1');
+    const tombstones = getBackgroundJobLifecycleLedger(board).tombstones;
+    expect(tombstones.has('ses_1')).toBe(true);
+    status.mockImplementation(() => {
+      reading.resolve();
+      return read.promise;
+    });
+    const rejected = ['rejected', 'error response'].includes(outcome);
+    if (outcome === 'rejected') send.reject(new Error('host refused'));
+    else send.resolve(rejected ? { error: 'host refused' } : {});
+    await admissionLogged.promise;
+    if (timing === 'early') {
+      expect(String(await result)).toContain(
+        rejected
+          ? 'host refused'
+          : 'admission accepted but invalidated by loss of the record; compensation initiated',
+      );
+    }
+    expect(abort).toHaveBeenCalledTimes(rejected ? 0 : 1);
+    expect(launch).not.toHaveBeenCalled();
+    expect(register).not.toHaveBeenCalled();
+    expect(onLaunch).not.toHaveBeenCalled();
+    expect(probe).not.toHaveBeenCalled();
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    expect(status).toHaveBeenCalledTimes(1); // no pre-settlement idle proof
+    if (!rejected) {
+      expect(abort).toHaveBeenCalledWith({ path: { id: 'ses_1' } });
+      expect(board.validateLease(lease)).toBe(true);
+      expect(release).not.toHaveBeenCalled();
+      expect(() => acknowledgedCompleted(board)).toThrow(/lease/);
+      deadline.fireRemaining(); // no local deadline can retire a pending abort
+      expect(board.validateLease(lease)).toBe(true);
+      if (outcome === 'replaced during abort') board.releaseLease(lease);
+      if (outcome === 'abort rejected' || outcome === 'pending')
+        stop.reject(new Error('abort failed'));
+      else
+        stop.resolve(
+          outcome === 'abort error' ? { error: 'abort failed' } : {},
+        );
+      if (!outcome.startsWith('abort ') && outcome !== 'pending') {
+        if (outcome !== 'replaced during abort') await reading.promise;
+        if (outcome === 'replaced during read') board.releaseLease(lease);
+        if (outcome.startsWith('replaced')) {
+          acknowledgedCompleted(board);
+          const successor = board.get('ses_1');
+          if (!successor) throw new Error('missing successor');
+          const replacement = board.acquireRelaunchLease(
+            'ses_1',
+            successor.generation,
+          );
+          if (!replacement) throw new Error('missing replacement');
+          read.resolve({ data: {} });
+          // Read settlement must not retire a replacement's token.
+          await compensated.promise;
+          expect(board.validateLease(replacement)).toBe(true);
+          expect(board.get('ses_1')).toEqual(successor);
+          return;
+        }
+        if (outcome === 'status rejected')
+          read.reject(new Error('read failed'));
+        else if (outcome === 'status timeout') deadline.fireRemaining();
+        else
+          read.resolve(
+            outcome === 'status error'
+              ? { error: 'read failed' }
+              : {
+                  data:
+                    outcome === 'absent'
+                      ? {}
+                      : {
+                          ses_1: {
+                            type: outcome === 'malformed' ? 'unknown' : outcome,
+                          },
+                        },
+                },
+          );
+      }
+      await compensated.promise;
+    }
+    const released = rejected || outcome === 'idle' || outcome === 'absent';
+    expect(board.validateLease(lease)).toBe(!released);
+    expect(release).toHaveBeenCalledTimes(released ? 1 : 0);
+    if (released) expect(release).toHaveBeenCalledWith(lease);
+    else
+      expect(log).toHaveBeenCalledWith(
+        '[task-revive] compensation unconfirmed',
+        expect.objectContaining({ taskID: 'ses_1' }),
+      );
+    expect(board.get('ses_1')).toBeUndefined();
+    expect(tombstones.has('ses_1')).toBe(true);
+    expect(terminal).not.toHaveBeenCalled();
+    if (outcome === 'status timeout') {
+      read.reject(new Error('late read failure')); // timeout loser is observed
+      await read.promise.catch(() => {});
+      expect(board.validateLease(lease)).toBe(true);
+    }
+  });
+
   test.each(['success', 'rejection', 'error envelope'])(
     'notification timeout permits a real revive; old %s leaves the new generation and lease intact',
     async (outcome) => {
@@ -445,7 +635,7 @@ describe('task_revive tool', () => {
       if (!replacement) throw new Error('missing replacement lease');
       if (settlement === 'resolve') baseline.resolve('late-baseline');
       else baseline.reject(new Error('late read failure'));
-      await Bun.sleep(0);
+      await baseline.promise.catch(() => {});
       expect(promptAsync).not.toHaveBeenCalled();
       expect(board.get('ses_1')?.generation).toBe(1);
       expect(board.validateLease(replacement)).toBe(true);
@@ -668,10 +858,16 @@ describe('task_revive tool', () => {
         },
       );
       const log = spyOn(logger, 'log').mockImplementation(() => {});
+      const observed = Promise.withResolvers<void>();
       const { board, taskRevive, revivedRunTracker, onLaunch } = createTool({
         admissionTimeoutMs,
         promptAsync: () => send.promise,
-        revivedRunTracker: { probe: async () => false },
+        revivedRunTracker: {
+          probe: async () => {
+            observed.resolve();
+            return false;
+          },
+        },
       });
       acknowledgedCompleted(board);
       const launch = spyOn(ProductionBoard.prototype, 'registerLaunch');
@@ -690,7 +886,7 @@ describe('task_revive tool', () => {
         admissionDeadline();
       }
       const output = String(await pending);
-      await Bun.sleep(0);
+      await observed.promise;
       expect(output).toContain('status: admission_unknown');
       expect(output).toContain('do not retry task_revive');
       expect(output).toContain('Use task_status');
@@ -716,36 +912,46 @@ describe('task_revive tool', () => {
     'error response',
     'tracker error',
     'supervisor error',
-    'dropped',
     'revoked',
+    'dropped revoked',
     'superseded',
   ])('owns unknown admission until late settlement: %s', async (outcome) => {
+    const deadline = controlledAdmissionDeadline();
     const send = Promise.withResolvers<unknown>();
-    const log = spyOn(logger, 'log').mockImplementation(() => {});
-    const { board, taskRevive, revivedRunTracker, onLaunch } = createTool({
-      admissionTimeoutMs: 5,
-      promptAsync: () => send.promise,
-      onLaunch: () => {
-        if (outcome === 'supervisor error')
-          throw new Error('supervisor failed');
-      },
-      revivedRunTracker: {
-        captureBaseline: async () => 'baseline',
-        register: () => {
-          if (outcome === 'tracker error') throw new Error('tracker failed');
+    const settled = Promise.withResolvers<void>();
+    const log = spyOn(logger, 'log').mockImplementation(() =>
+      settled.resolve(),
+    );
+    const { board, taskRevive, revivedRunTracker, onLaunch, abort } =
+      createTool({
+        admissionTimeoutMs: 1_000,
+        promptAsync: () => send.promise,
+        onLaunch: () => {
+          if (outcome === 'supervisor error')
+            throw new Error('supervisor failed');
         },
-        probe: async () => false,
-      },
-    });
+        revivedRunTracker: {
+          captureBaseline: async () => 'baseline',
+          register: () => {
+            if (outcome === 'tracker error') throw new Error('tracker failed');
+          },
+          probe: async () => {
+            settled.resolve();
+            return false;
+          },
+        },
+      });
     acknowledgedCompleted(board);
     const acquire = spyOn(ProductionBoard.prototype, 'acquireRelaunchLease');
     const launch = spyOn(ProductionBoard.prototype, 'registerLaunch');
     const register = spyOn(revivedRunTracker, 'register');
     const probe = spyOn(revivedRunTracker, 'probe');
-    const output = await taskRevive.execute(
+    const pending = taskRevive.execute(
       { task_id: 'ses_1', prompt: 'continue' },
       context,
     );
+    (await deadline.ready)();
+    const output = await pending;
     expect(String(output)).toContain('status: admission_unknown');
     expect(String(output)).not.toContain('<task_result>');
     expect(launch).not.toHaveBeenCalled();
@@ -758,8 +964,12 @@ describe('task_revive tool', () => {
     if (outcome === 'pending') return;
 
     let replacement: typeof lease | undefined;
-    if (outcome === 'dropped') board.drop('ses_1');
-    if (outcome === 'revoked' || outcome === 'superseded') {
+    if (outcome === 'dropped revoked') board.drop('ses_1');
+    if (
+      outcome === 'revoked' ||
+      outcome === 'dropped revoked' ||
+      outcome === 'superseded'
+    ) {
       board.releaseLease(lease);
       if (outcome === 'superseded') acknowledgedCompleted(board);
       replacement = board.acquireRelaunchLease(
@@ -777,7 +987,8 @@ describe('task_revive tool', () => {
     // Repeated and conflicting settlements must never register twice.
     send.resolve({});
     send.reject(new Error('duplicate settlement'));
-    await Bun.sleep(0);
+    await settled.promise;
+    expect(abort).not.toHaveBeenCalled();
     const admitted = ['accepted', 'tracker error', 'supervisor error'].includes(
       outcome,
     );
@@ -791,6 +1002,12 @@ describe('task_revive tool', () => {
     expect(probe).toHaveBeenCalledTimes(outcome === 'accepted' ? 1 : 0);
     expect(board.get('ses_1')?.generation).toBe(admitted ? 2 : generation);
     if (outcome === 'accepted') {
+      expect(launch.mock.invocationCallOrder[0]).toBeLessThan(
+        Number(register.mock.invocationCallOrder[0]),
+      );
+      expect(register.mock.invocationCallOrder[0]).toBeLessThan(
+        Number(onLaunch.mock.invocationCallOrder[0]),
+      );
       expect(register).toHaveBeenCalledWith(
         expect.objectContaining({
           taskID: 'ses_1',
@@ -809,7 +1026,13 @@ describe('task_revive tool', () => {
       expect(board.validateLease(replacement)).toBe(true);
       board.releaseLease(replacement);
     }
-    if (outcome === 'dropped') acknowledgedCompleted(board);
+    if (outcome === 'dropped revoked') {
+      expect(board.get('ses_1')).toBeUndefined();
+      expect(
+        getBackgroundJobLifecycleLedger(board).tombstones.has('ses_1'),
+      ).toBe(true);
+      return;
+    }
     const available = board.acquireRelaunchLease(
       'ses_1',
       board.get('ses_1')?.generation ?? -1,
@@ -824,7 +1047,10 @@ describe('task_revive tool', () => {
       const send = Promise.withResolvers<unknown>();
       const probing = Promise.withResolvers<void>();
       const observation = Promise.withResolvers<boolean>();
-      const log = spyOn(logger, 'log').mockImplementation(() => {});
+      const observed = Promise.withResolvers<void>();
+      const log = spyOn(logger, 'log').mockImplementation(() =>
+        observed.resolve(),
+      );
       const { board, taskRevive, promptAsync, abort } = createTool({
         admissionTimeoutMs: 5,
         promptAsync: () =>
@@ -875,7 +1101,7 @@ describe('task_revive tool', () => {
       observation.reject(new Error('probe failed'));
       if (timing === 'immediate')
         expect(String(await pending)).toContain('status: started');
-      await Bun.sleep(0);
+      await observed.promise;
       expect(board.get('ses_1')).toMatchObject({
         generation: 2,
         state: 'running',
