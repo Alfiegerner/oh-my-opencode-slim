@@ -100,6 +100,10 @@
                 "type": "string"
               }
             },
+            "skills_include_local": {
+              "description": "When true, adds every valid skill under the current project's `.opencode/skills/**/SKILL.md` tree to this agent's effective skills list before `skills_remove` is applied. Global and external skill sources are not included.",
+              "type": "boolean"
+            },
             "mcps": {
               "type": "array",
               "items": {
@@ -580,6 +584,10 @@
             "items": {
               "type": "string"
             }
+          },
+          "skills_include_local": {
+            "description": "When true, adds every valid skill under the current project's `.opencode/skills/**/SKILL.md` tree to this agent's effective skills list before `skills_remove` is applied. Global and external skill sources are not included.",
+            "type": "boolean"
           },
           "mcps": {
             "type": "array",
