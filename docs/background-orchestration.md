@@ -177,6 +177,18 @@ the orchestrator session. That lifecycle state is not proof the output was used;
 the orchestrator must still verify it consumed the relevant result before
 finalizing.
 
+Parent terminal notifications are best-effort, with retries bounded by the
+existing notification policy (a zero retry budget still permits the initial
+send). Each transport wait is limited to 10 seconds. No notification attempt
+retains its lifecycle lease after that local wait ends, even if the host call
+never settles; other lifecycle operations still enforce their own safety checks.
+A timeout does not cancel a notification already queued by the host, so an
+ambiguous outcome can produce duplicate deliveries if a retry also succeeds.
+Acceptance of any attempt for the same current publication suppresses further
+retries, including a late acceptance while another attempt is pending. This
+records host acceptance, not parent consumption or job-board reconciliation;
+it is not an exactly-once delivery guarantee.
+
 To stop self-reinforcing acknowledgment loops, a brand-new `task` spawn is
 refused while the parent still owns an unreconciled terminal job with the same
 agent and an exactly matching objective. The refusal names the existing task ID
