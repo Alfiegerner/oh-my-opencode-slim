@@ -92,6 +92,12 @@ export const AgentOverrideConfigSchema = z
       .describe(
         "Skill names to remove from this agent's effective skills list. Applied after `skills_add` during config resolution, so removal wins over addition. Folded into `skills` at resolution time.",
       ),
+    skills_include_local: z
+      .boolean()
+      .optional()
+      .describe(
+        "When true, adds every valid skill under the current project's `.opencode/skills/**/SKILL.md` tree to this agent's effective skills list before `skills_remove` is applied. Global and external skill sources are not included.",
+      ),
     mcps: z.array(z.string()).optional(), // MCPs this agent can use ("*" = all, "!item" = exclude)
     prompt: z.string().min(1).optional(),
     orchestratorPrompt: z.string().min(1).optional(),
@@ -136,7 +142,7 @@ export type ZellijPaneMode = z.infer<typeof ZellijPaneModeSchema>;
 export const MultiplexerConfigSchema = z.object({
   type: MultiplexerTypeSchema.default('none'),
   layout: MultiplexerLayoutSchema.default('main-vertical'),
-  main_pane_size: z.number().min(20).max(80).default(60), // percentage for main pane
+  main_pane_size: z.number().min(20).max(80).default(60), // percentage
   zellij_pane_mode: ZellijPaneModeSchema.default('agent-tab'),
 });
 
