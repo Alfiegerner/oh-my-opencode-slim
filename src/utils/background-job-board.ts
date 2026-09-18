@@ -64,6 +64,8 @@ export interface BackgroundJobRecord {
   description: string;
   objective?: string;
   state: BackgroundJobState;
+  /** Unattributed lifecycle placeholder, not yet delegated work. */
+  provisional?: boolean;
   /** True only when the native task call explicitly supplied background:true. */
   background: boolean;
   timedOut: boolean;
@@ -119,6 +121,8 @@ export interface BackgroundJobLaunchInput {
   description?: string;
   objective?: string;
   background?: boolean;
+  /** Only unattributed session.created placeholders opt in. */
+  provisional?: true;
   /** Preserve the current run when this is a duplicate lifecycle observation. */
   preserveRun?: boolean;
   /** Lease proving that this is an authorized same-ID relaunch observation. */
@@ -287,6 +291,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
         if (existing.state !== 'running') return existing;
         const observed = {
           ...existing,
+          provisional: false,
           agent: input.agent || existing.agent,
           description: input.description || existing.description,
           objective: input.objective ?? existing.objective,
@@ -298,6 +303,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
 
       const updated = {
         ...existing,
+        provisional: false,
         generation,
         terminalRevision: 0,
         activityRevision: 0,
@@ -332,6 +338,8 @@ export class BackgroundJobBoard implements BackgroundJobStore {
 
     const record: BackgroundJobRecord = {
       taskID: input.taskID,
+      // Keep the property absent for ordinary launches and legacy records.
+      ...(input.provisional === true ? { provisional: true } : {}),
       generation,
       terminalRevision: 0,
       activityRevision: 0,
@@ -1140,7 +1148,11 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     parentSessionID: string,
     _now?: number,
   ): BackgroundJobPromptMetadata | undefined {
-    const jobs = this.list(parentSessionID);
+    // Keep placeholders resolvable, but out of every operational section
+    // and the corresponding terminal-consumption metadata.
+    const jobs = this.list(parentSessionID).filter(
+      (job) => job.provisional !== true,
+    );
     const active = jobs.filter(
       (job) => job.state === 'running' || job.terminalUnreconciled,
     );

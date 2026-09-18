@@ -1,9 +1,18 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { stateFilePath } from './companion/manager';
 import type { MultiplexerConfig } from './config';
+import * as wakeHooks from './hooks';
 import {
   getWakeProgress,
   resetOrchestratorWakeGateForTests,
@@ -14,6 +23,8 @@ import pluginModuleDefault, {
   shouldEnableMultiplexer,
 } from './index';
 import { readTuiSnapshot, snapshotSectionsEqual } from './tui-state';
+import { BackgroundJobCoordinator } from './utils/background-job-coordinator';
+import { BackgroundJobBoard } from './utils/background-job-fixture';
 import { createInternalAgentTextPart } from './utils/internal-initiator';
 
 function createPluginClient(
@@ -411,6 +422,65 @@ describe('plugin reload generation cleanup', () => {
       resetOrchestratorWakeGateForTests();
     }
   });
+
+  test.each(['provisional', 'promoted', 'preserveRun', 'attributed'])(
+    'stopped recovery listener respects explicit provenance: %s',
+    async (kind) => {
+      const wake = mock(() => {});
+      const createScheduler = wakeHooks.createOrchestratorWakeScheduler;
+      const scheduler = spyOn(
+        wakeHooks,
+        'createOrchestratorWakeScheduler',
+      ).mockImplementation((...args) => ({
+        ...createScheduler(...args),
+        triggerStoppedJobRecovery: wake,
+      }));
+      const subscriptions = spyOn(
+        BackgroundJobCoordinator.prototype,
+        'addTerminalOutcomeListener',
+      );
+      let hooks: Awaited<ReturnType<typeof plugin>> | undefined;
+      try {
+        hooks = await createHooks();
+        const board = new BackgroundJobBoard();
+        const launch = {
+          taskID: 'child-1',
+          parentSessionID: 'parent-1',
+          agent: 'unknown',
+          description: 'unattributed unknown task',
+          now: 100,
+        };
+        const initial = board.registerLaunch({
+          ...launch,
+          ...(kind === 'attributed' ? {} : { provisional: true as const }),
+        });
+        if (kind === 'attributed')
+          expect(initial).not.toHaveProperty('provisional');
+        if (kind === 'promoted' || kind === 'preserveRun')
+          board.registerLaunch({
+            ...launch,
+            preserveRun: kind === 'preserveRun',
+          });
+        const stopped = board.markStopped(launch.taskID, 'no outcome', 200);
+        if (!stopped) throw new Error('missing stopped record');
+        expect(stopped).toMatchObject({
+          state: 'stopped',
+          terminalUnreconciled: true,
+        });
+        // Invoke the real subscriptions installed by the plugin composition.
+        for (const [listener] of subscriptions.mock.calls) listener(stopped);
+        expect(wake).toHaveBeenCalledTimes(kind === 'provisional' ? 0 : 1);
+        if (kind !== 'provisional') {
+          expect(wake.mock.calls[0]?.[0]).toBe('parent-1');
+          expect(board.formatForPrompt('parent-1')).toContain(launch.taskID);
+        }
+      } finally {
+        await hooks?.dispose?.();
+        scheduler.mockRestore();
+        subscriptions.mockRestore();
+      }
+    },
+  );
 
   test('v1 dispose releases this generation companion manager', async () => {
     // Enabled with a custom (missing) binaryPath: registration and state
