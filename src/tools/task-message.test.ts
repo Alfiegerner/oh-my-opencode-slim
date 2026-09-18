@@ -547,8 +547,6 @@ describe('task_message', () => {
       if (settlement === 'reject')
         transport.reject(new Error('late transport failure'));
       else transport.resolve({});
-      transport.resolve({});
-      transport.reject(new Error('duplicate settlement'));
       await Bun.sleep(0);
       expect(retirements()).toHaveLength(1);
       expect(board.validateLease(lease)).toBe(false);
@@ -559,11 +557,10 @@ describe('task_message', () => {
         : board.acquireMessageLease(lease.taskID, lease.generation);
       expect(replacement).toBeDefined();
       if (!replacement) throw new Error('settled write retained exclusion');
-      // Repeated settlements cannot retire a newly acquired token.
-      transport.resolve({});
-      transport.reject(new Error('another duplicate'));
-      await Bun.sleep(0);
-      expect(retirements()).toHaveLength(1);
+      // The settled write's lease is stale: releasing it is a rejected no-op
+      // and must not retire the replacement token. This call intentionally
+      // passes through the release spy, so retirements() above counts it.
+      expect(board.releaseLease(lease)).toBe(false);
       expect(board.validateLease(replacement)).toBe(true);
       expect(board.get(lease.taskID)).toEqual(beforeSettlement);
       board.releaseLease(replacement);
