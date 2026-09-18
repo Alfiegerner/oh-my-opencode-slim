@@ -1037,6 +1037,15 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "kumar-shivang",
+      "name": "Shivang Kumar",
+      "avatar_url": "https://avatars.githubusercontent.com/u/89011717?v=4",
+      "profile": "https://github.com/kumar-shivang",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "commitConvention": "angular"
