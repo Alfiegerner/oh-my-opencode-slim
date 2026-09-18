@@ -407,7 +407,12 @@ currently break this plugin:
   once at creation via `ctx.session.update({sessionID, permissions})`
   (`createPermissionRulesBridge` in `src/v2/setup.ts`; exact-match
   strings only, no wildcards, while upstream matching semantics settle —
-  PRs #48194/#46495/#46871; triggered on plugin-managed child
+  PRs #48194/#46495/#46871; whole-tool declarations (the read-class
+  `read`/`glob`/`grep` allows read-only agents declare) derive
+  action-scoped rules with the declared tool key as the exact resource,
+  so every agent with any declaration gets a non-empty replacing
+  ruleset instead of keeping the parent's inherited session rules;
+  triggered on plugin-managed child
   `session.created` and fail-soft with a one-time warning on reduced
   hosts without the method); the `generate` session hook (not the
   `ctx.generate` text channel the webfetch summaries use), the `title`
