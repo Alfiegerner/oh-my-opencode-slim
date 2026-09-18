@@ -100,7 +100,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.4",
-    "@opencode/plugin": "2.0.3",
+    "@opencode/plugin": "2.0.5",
     "@types/jsdom": "28",
     "@types/node": "^26.1.1",
     "@types/turndown": "^5.0.6",

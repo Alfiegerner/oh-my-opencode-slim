@@ -16,6 +16,13 @@ import { BackgroundTaskConcurrency } from './background-task-concurrency';
 import { classifyTerminalEvidence } from './child-transcript';
 import { COMPLETED_WITHOUT_TEXT_DIAGNOSTIC } from './task';
 
+// Other test files mock the shared opencode-client module process-globally
+// (Bun mock.module is never auto-restored). Re-pin it to a passthrough so
+// this file always exercises the client each test provides via input.
+mock.module('./opencode-client', () => ({
+  getClient: (input: { client: unknown }) => input.client as never,
+}));
+
 const gates: BackgroundJobTerminalGate[] = [];
 afterEach(() => {
   for (const gate of gates.splice(0)) gate.dispose();
@@ -1123,5 +1130,72 @@ describe('foreground native terminal fast path (r2 hardening)', () => {
       state: 'error',
       resultSummary: COMPLETED_WITHOUT_TEXT_DIAGNOSTIC,
     });
+  });
+});
+
+describe('background reconcile failure containment', () => {
+  test('a failing scheduled reconcile is logged and contained, never an unhandled rejection', async () => {
+    // Regression (CI-only flake): a scheduled retry reconcile still in
+    // flight when another test file swaps the process-global getClient
+    // mock used to reject inside the fire-and-forget `void reconcile(run)`
+    // timer callback; the escaping rejection crashed whichever test was
+    // running by then. Background reconciliation is fail-soft: failures
+    // are logged and swallowed.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      // Throw on every getClient resolution only while armed — i.e. from
+      // the moment the first (awaited) reconcile has scheduled the retry
+      // timer until we re-arm recovery. Exactly the CI scenario: the
+      // scheduled reconcile resolves its client after another test file
+      // swapped the process-global getClient mock.
+      let armed = false;
+      let armedThrows = 0;
+      let clientReads = 0;
+      const input = {
+        directory: '/tmp',
+        get client() {
+          clientReads += 1;
+          if (armed) {
+            armedThrows += 1;
+            throw new Error('client vanished mid-flight');
+          }
+          return {
+            session: { status: async () => ({}) },
+          };
+        },
+      } as never;
+      const h = harness({ graceMs: 1, input });
+
+      // Awaited reconcile: the status read yields an invalid-response
+      // snapshot → unknown runtime → a retry is scheduled (timer) and the
+      // result is deferred, not a rejection.
+      const first = await h.gate.reconcile(h.run);
+      expect(first.kind).toBe('deferred');
+      expect(clientReads).toBeGreaterThanOrEqual(2);
+
+      armed = true;
+      // Flush the scheduled timer plus pending microtask/macrotask turns
+      // so the fire-and-forget reconcile has fully settled.
+      for (let i = 0; i < 8; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 2));
+      }
+      // The scheduled reconcile really did hit the throwing client...
+      expect(armedThrows).toBeGreaterThanOrEqual(1);
+
+      // ...but the failure never escaped as an unhandled rejection.
+      expect(unhandled).toEqual([]);
+
+      // The gate still operates afterwards (client recovered).
+      armed = false;
+      const next = await h.gate.reconcile(h.run);
+      expect(['deferred', 'stale']).toContain(next.kind);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
   });
 });

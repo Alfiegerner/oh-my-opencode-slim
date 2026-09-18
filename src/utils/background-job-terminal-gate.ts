@@ -11,6 +11,7 @@ import {
   responseError,
 } from './child-transcript';
 import { isRecord } from './guards';
+import { log } from './logger';
 import { getClient } from './opencode-client';
 import {
   getRuntimeSessionStatusSnapshot,
@@ -373,7 +374,11 @@ export function createBackgroundJobTerminalGate(options: {
         () => {
           value.timer = undefined;
           if (observation(run) !== value) return;
-          void reconcile(run);
+          // Background reconciliation is fail-soft: a failure must be
+          // logged and swallowed, never escape as an unhandled rejection.
+          void reconcile(run).catch((err) => {
+            log('[terminal-gate] scheduled reconcile failed', String(err));
+          });
         },
         Math.max(1, graceMs),
       );
@@ -564,21 +569,27 @@ export function createBackgroundJobTerminalGate(options: {
     }
     const pending = { token, readSettled };
     value.pendingRuntimeContrast = pending;
-    void readSettled.then(async () => {
-      if (!current(pending.token)) return;
-      const key = JSON.stringify([
-        pending.token.taskID,
-        observationIdentity(pending.token),
-      ]);
-      // The slot can be released before the deferred inspection's finally.
-      // Wait for that existing flight, so reconcile cannot just rejoin it.
-      await inFlight.get(key);
-      if (value.pendingRuntimeContrast !== pending || !current(pending.token))
-        return;
-      value.pendingRuntimeContrast = undefined;
-      value.pendingRuntime = false;
-      await reconcile(pending.token);
-    });
+    void readSettled
+      .then(async () => {
+        if (!current(pending.token)) return;
+        const key = JSON.stringify([
+          pending.token.taskID,
+          observationIdentity(pending.token),
+        ]);
+        // The slot can be released before the deferred inspection's finally.
+        // Wait for that existing flight, so reconcile cannot just rejoin it.
+        await inFlight.get(key);
+        if (value.pendingRuntimeContrast !== pending || !current(pending.token))
+          return;
+        value.pendingRuntimeContrast = undefined;
+        value.pendingRuntime = false;
+        await reconcile(pending.token);
+      })
+      .catch((err) => {
+        // Background reconciliation is fail-soft: a failure must be
+        // logged and swallowed, never escape as an unhandled rejection.
+        log('[terminal-gate] runtime-contrast reconcile failed', String(err));
+      });
     return deferred(token, diagnostic);
   }
 

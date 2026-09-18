@@ -126,7 +126,7 @@ function toV1Message(m: Record<string, unknown>) {
  * domain does not expose. Verified against the upstream promise-plugin
  * adapter (`packages/plugin/src/promise/{session,adapter}.ts`): the
  * domain is built with exactly create/get/switchAgent/switchModel/
- * prompt/generate/command/synthetic/interrupt/rename/move/wait/context —
+ * prompt/generate/command/synthetic/interrupt/update/move/wait/context —
  * NO `list` and NO `remove`. On such hosts the `list` shim used to
  * return the empty page silently (children enumeration quietly fell
  * back to event tracking) and `delete` logged a no-op notice per call.
@@ -304,7 +304,7 @@ export function buildPluginInput(
         : {}),
       abort: s.interrupt
         ? async (args: Record<string, unknown>) =>
-            s.interrupt?.({ sessionID: sessionIDOf(args), continue: false })
+            s.interrupt?.({ sessionID: sessionIDOf(args), resume: false })
         : async (args: Record<string, unknown>) => {
             log('[v2][shim] session.interrupt unavailable', {
               id: sessionIDOf(args),
@@ -525,16 +525,16 @@ export function buildPluginInput(
         // the result are unaffected.
         return isRecord(result) ? { ...result, switched } : { switched };
       },
-      update: s.rename
+      update: s.update
         ? async (args: Record<string, unknown>) => {
             const body = (args?.body ?? {}) as { title?: string };
-            return s.rename?.({
+            return s.update?.({
               sessionID: sessionIDOf(args),
               ...(typeof body.title === 'string' ? { title: body.title } : {}),
             });
           }
         : async (args: Record<string, unknown>) => {
-            log('[v2][shim] session.rename unavailable', {
+            log('[v2][shim] session.update unavailable', {
               id: sessionIDOf(args),
             });
           },

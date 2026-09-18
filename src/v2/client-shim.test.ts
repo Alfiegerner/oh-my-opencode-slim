@@ -451,13 +451,12 @@ describe('v2 client shim delegation', () => {
     expect((seq[0].i as { files: unknown[] }).files).toHaveLength(1);
   });
 
-  test('abort delegates to interrupt', async () => {
-    const calls: unknown[] = [];
+  test('abort sends interrupt with resume:false', async () => {
+    const calls: Array<Record<string, unknown>> = [];
     const input = buildPluginInput(
       makeCtx({
-        interrupt: async (i: unknown) => {
+        interrupt: async (i: Record<string, unknown>) => {
           calls.push(i);
-          return { interrupted: true };
         },
       } as never),
     );
@@ -466,7 +465,7 @@ describe('v2 client shim delegation', () => {
         session: { abort: (a: unknown) => Promise<unknown> };
       }
     ).session.abort({ path: { id: 'ses_1' } });
-    expect(calls).toEqual([{ sessionID: 'ses_1', continue: false }]);
+    expect(calls).toEqual([{ sessionID: 'ses_1', resume: false }]);
   });
 
   test('get delegates to session.get and wraps into {data}', async () => {
@@ -488,6 +487,26 @@ describe('v2 client shim delegation', () => {
     ).session.get({ path: { id: 'ses_1' }, query: { directory: '/proj' } });
     expect(calls).toEqual([{ sessionID: 'ses_1' }]);
     expect(res.data).toEqual({ id: 'ses_1', parentID: 'ses_0', title: 't' });
+  });
+
+  test('session.update maps v1 rename body to v2 session.update', async () => {
+    const calls: unknown[] = [];
+    const input = buildPluginInput(
+      makeCtx({
+        update: async (i: unknown) => {
+          calls.push(i);
+        },
+      } as never),
+    );
+    await (
+      input.client as {
+        session: { update: (a: unknown) => Promise<unknown> };
+      }
+    ).session.update({
+      path: { id: 'ses_1' },
+      body: { title: 'New title' },
+    });
+    expect(calls).toEqual([{ sessionID: 'ses_1', title: 'New title' }]);
   });
 
   test('delete delegates to session.remove with the flat {sessionID}', async () => {
@@ -1217,11 +1236,11 @@ describe('v2 client shim foreground-fallback integration', () => {
       'The previous model request failed',
     );
 
-    // Step 3: abort maps to interrupt with continue:false.
+    // Step 3: abort maps to interrupt with resume:false.
     await session.abort({ path: { id: 'ses_1' } });
     expect(seq[2]).toEqual({
       m: 'interrupt',
-      i: { sessionID: 'ses_1', continue: false },
+      i: { sessionID: 'ses_1', resume: false },
     });
   });
 
