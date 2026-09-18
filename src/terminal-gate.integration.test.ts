@@ -1,6 +1,9 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import * as hookFactories from './hooks';
+import { isVolatileTaggedMessage } from './hooks/cache-safe-injection';
+import { resetOrchestratorWakeGateForTests } from './hooks/orchestrator-wake/wake-gate';
+import { BACKGROUND_JOB_BOARD_METADATA_KEY } from './hooks/task-session-manager/board-injection';
 import * as runtimeFactories from './hooks/task-session-manager/runtime-status-reconciliation';
 import { OhMyOpenCodeLite as plugin } from './index';
 import type { BackgroundJobRecord } from './utils/background-job-board';
@@ -51,6 +54,13 @@ async function assembly(
     /** Whole-client replacement (v2 shim-shaped hosts). Suppresses the
      * default v1 client so capability probes see honest method absence. */
     client?: unknown;
+    /** Host flavor stamp forwarded to the plugin input exactly as the v2
+     * client shim does (`buildPluginInput` stamps `hostFlavor: 'v2'`). */
+    hostFlavor?: string;
+    /** Flat `backgroundJobs` config overrides merged into the written
+     * config file (e.g. orchestrator-wake knobs for wake-sensitive
+     * fixtures). */
+    configOverrides?: Record<string, unknown>;
     /** Build the gate WITHOUT the production `hostOutcomeClock`
      * contract, pinning the #1225 dependency: no shared clock, no
      * attribution window, no host-outcome publication. */
@@ -70,6 +80,7 @@ async function assembly(
       backgroundJobs: {
         concurrency: { defaultConcurrency: 1 },
         readContextMinLines: 1,
+        ...(setup.configOverrides ?? {}),
       },
     }),
   );
@@ -182,6 +193,7 @@ async function assembly(
     directory,
     worktree: directory,
     serverUrl: new URL('http://127.0.0.1:4096'),
+    ...(setup.hostFlavor ? { hostFlavor: setup.hostFlavor } : {}),
   } as never);
   instance.hooks = hooks;
   expect(gate).toBeDefined();
@@ -624,6 +636,10 @@ interface V2HostProbe {
   /** Present ONLY on hosts that expose a transcript source; the
    * starving shim shape (live incident) has none at all. */
   readonly messages?: ReturnType<typeof mock>;
+  /** The wake surface's promptAsync mock (present only when
+   * `wakeSurface` was requested — live v2 hosts expose it via the
+   * client shim). */
+  readonly promptAsync?: ReturnType<typeof mock>;
 }
 
 function v2ShimClient(options: {
@@ -635,6 +651,17 @@ function v2ShimClient(options: {
    * outcome/idle) for the first N reads even after the host committed
    * its terminal outcome; reveal it only on read N+1 onward. */
   hideOutcomeForReads?: number;
+  /** Live-v2 wake surface: `session.list` + `session.promptAsync`, the
+   * exact pair the client shim exposes and `probeSessionApis` requires
+   * for the v2 wake capability. Absent by default — the starving shim
+   * shape (live incident) exposes neither, so the wake capability must
+   * stay honestly not-ready there. `listChildren` is re-evaluated on
+   * every list call so host-side state changes (running → terminal)
+   * surface like a live host. */
+  wakeSurface?: {
+    listChildren?: () => Array<Record<string, unknown>>;
+    promptAsync?: ReturnType<typeof mock>;
+  };
 }): V2HostProbe {
   const host = {
     outcome: options.outcome,
@@ -661,12 +688,25 @@ function v2ShimClient(options: {
   const messages = options.transcript
     ? mock(async (_args: unknown): Promise<unknown> => options.transcript?.())
     : undefined;
-  // Shim shape: ONLY session.get (plus the optional transcript source).
-  // `session` is a plain object so absent methods stay absent (capability
-  // probes must see honest absence, never an auto-filled stub); other
-  // client domains still degrade through the outer proxy like the v1
-  // assembly default.
-  const session = { get, ...(messages ? { messages } : {}) };
+  const promptAsync =
+    options.wakeSurface?.promptAsync ?? mock(async () => ({}));
+  // Shim shape: ONLY session.get (plus the optional transcript source
+  // and wake surface). `session` is a plain object so absent methods
+  // stay absent (capability probes must see honest absence, never an
+  // auto-filled stub); other client domains still degrade through the
+  // outer proxy like the v1 assembly default.
+  const session = {
+    get,
+    ...(messages ? { messages } : {}),
+    ...(options.wakeSurface
+      ? {
+          list: mock(async () => ({
+            data: options.wakeSurface?.listChildren?.() ?? [],
+          })),
+          promptAsync,
+        }
+      : {}),
+  };
   const client = new Proxy(
     { session, app: { log: async () => ({}) } },
     {
@@ -679,6 +719,7 @@ function v2ShimClient(options: {
     client,
     get,
     ...(messages ? { messages } : {}),
+    ...(options.wakeSurface ? { promptAsync } : {}),
     commitTerminalOutcome(idleAt: number) {
       host.idleAt = idleAt;
     },
@@ -1066,6 +1107,303 @@ test.skip('probe: late-attributable outcome after exhaustion terminalizes the st
       { type: 'session.execution.succeeded', data: { sessionID: 'child' } },
     ]);
     expect(board.get('child')?.state).toBe('completed');
+  } finally {
+    capture.restore();
+  }
+});
+
+// ── Task 7: reopen-after-reconcile full chain (CameraFTP pattern) ──
+//
+// The live pattern: a background child completes → the gate publishes →
+// the parent consumes and reconciles the report → the child is later
+// resumed by its own background-shell notification → runs again →
+// completes again. This locks the WHOLE loop through the real chain:
+// raw v2 envelopes pumped through `mapV2EventToV1` (the resume busy
+// carries the host envelope `created` timestamp, so the gate's
+// ambiguous-event demotion cannot pass vacuously), the parent's real
+// request cycle (`experimental.chat.messages.transform`) performing the
+// injection-time reconcile and the Task 6 reopen corrective notice, and
+// the second publication firing the Task 6 terminal-publication wake
+// for the idle parent through the production listener wiring.
+
+/** Interactive v2 driver: the SAME production pump order as
+ * `driveV2Lifecycle` (host outcome committed before terminal execution
+ * events; raw event first, then every synthesized v1 shape, each through
+ * the real event hook; the host task tool returns a running-state output
+ * right after session.created), but controllable event-by-event so a
+ * test can interleave parent request cycles and later runs. */
+async function openV2Lifecycle(
+  probe: V2HostProbe,
+  setup: {
+    hostFlavor?: string;
+    configOverrides?: Record<string, unknown>;
+  } = {},
+) {
+  const h = await assembly(undefined, {
+    graceMs: 20,
+    client: probe.client,
+    ...(setup.hostFlavor ? { hostFlavor: setup.hostFlavor } : {}),
+    ...(setup.configOverrides
+      ? { configOverrides: setup.configOverrides }
+      : {}),
+  });
+  let pumped = 0;
+  let notifiedToolReturn = false;
+  const dispatch = async (event: Record<string, unknown>) => {
+    await h.hooks.event?.({ event } as never);
+  };
+  const pump = async (spec: V2RawEventSpec) => {
+    pumped += 1;
+    await Bun.sleep(2);
+    if (
+      spec.type !== 'session.execution.started' &&
+      spec.type.startsWith('session.execution.')
+    )
+      probe.commitTerminalOutcome(Date.now());
+    const raw: Record<string, unknown> = {
+      id: `evt-${pumped}-${spec.type}-${String(spec.data.sessionID ?? '')}`,
+      created: Date.now(),
+      type: spec.type,
+      data: spec.data,
+    };
+    // Production pump order (src/v2/setup.ts): raw event first, then
+    // every synthesized v1 shape, each through the real event hook.
+    for (const event of mapV2EventToV1(raw)) await dispatch(event);
+    await flush();
+    // After the child is registered, the host's task tool call returns
+    // a running-state output, before execution starts.
+    if (spec.type === 'session.created' && !notifiedToolReturn) {
+      notifiedToolReturn = true;
+      await Bun.sleep(2);
+      await h.after('running');
+      await flush();
+    }
+  };
+  const awaitPublication = async (
+    taskID: string,
+    sinceRevision: number,
+  ): Promise<BackgroundJobRecord> => {
+    for (let i = 0; i < 400; i++) {
+      const record = h.board.get(taskID);
+      if (
+        record &&
+        record.state !== 'running' &&
+        record.terminalRevision > sinceRevision
+      )
+        return record;
+      await Bun.sleep(5);
+    }
+    throw new Error(
+      `publication beyond revision ${sinceRevision} never landed`,
+    );
+  };
+  return { h, pump, awaitPublication };
+}
+
+/** Terminal-part metadata of a message, when it has exactly one part
+ * (same shape contract as the reopen-correction suite). */
+function solePartMetadata(
+  message: unknown,
+): Record<string, unknown> | undefined {
+  const parts = (message as { parts?: Array<Record<string, unknown>> })?.parts;
+  if (parts?.length !== 1) return undefined;
+  return parts[0]?.metadata as Record<string, unknown> | undefined;
+}
+
+test('reopen-after-reconcile: child self-continuation republishes, wakes the idle parent, and corrects the parent', async () => {
+  resetOrchestratorWakeGateForTests();
+  const capture = captureGateLogs();
+  try {
+    const promptAsync = mock(async () => ({}));
+    // Live v2 host: get (host outcome) + the wake surface pair the v2
+    // client shim exposes (list + promptAsync); transcript source absent
+    // (the starving shim shape), so publication rides the attributed
+    // host outcome on both runs.
+    let hostChildren: Array<Record<string, unknown>> = [
+      { id: 'child', parentID: 'parent' },
+    ];
+    const probe = v2ShimClient({
+      outcome: 'succeeded',
+      wakeSurface: {
+        listChildren: () => hostChildren,
+        promptAsync,
+      },
+    });
+    const { h, pump, awaitPublication } = await openV2Lifecycle(probe, {
+      hostFlavor: 'v2',
+      // Schema floor (1s) instead of the 30s default so the SECOND
+      // publication wake is observable without a half-minute sleep.
+      configOverrides: {
+        orchestratorWake: { publicationWakeMinIntervalMs: 1_000 },
+      },
+    });
+
+    // Run 1: launch → execution → terminal → publication #1.
+    await h.requestTask('native', 'v2 reopen chain probe');
+    await pump({
+      type: 'session.created',
+      data: { sessionID: 'child', parentID: 'parent', agent: 'explorer' },
+    });
+    await pump({
+      type: 'session.execution.started',
+      data: { sessionID: 'child' },
+    });
+    hostChildren = [
+      {
+        id: 'child',
+        parentID: 'parent',
+        outcome: 'succeeded',
+        time: { updated: Date.now() },
+      },
+    ];
+    await pump({
+      type: 'session.execution.succeeded',
+      data: { sessionID: 'child' },
+    });
+    const first = await awaitPublication('child', 0);
+    expect(first).toMatchObject({ state: 'completed' });
+
+    const wakingPublicationWakes = () =>
+      capture
+        .of('[orchestrator-wake] terminal publication wake', 'child')
+        .filter(
+          (entry) =>
+            (entry.data as { verdict?: string } | undefined)?.verdict ===
+            'waking',
+        );
+
+    // Wake #1: the first publication reached an idle parent.
+    await flush();
+    await Bun.sleep(30);
+    expect(wakingPublicationWakes()).toHaveLength(1);
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+
+    // The parent consumes the report: two real request cycles (deliver,
+    // then reconcile once the prompt shape advanced past the delivery).
+    const userMsg = (id: string, text: string) => ({
+      info: {
+        id,
+        sessionID: 'parent',
+        role: 'user',
+        agent: 'orchestrator',
+        time: { created: Date.now() },
+      },
+      parts: [{ type: 'text', text }],
+    });
+    const assistantMsg = (id: string, text: string) => ({
+      info: {
+        id,
+        sessionID: 'parent',
+        role: 'assistant',
+        time: { completed: Date.now() },
+      },
+      parts: [{ type: 'text', text }],
+    });
+    const requestCycle = async (messages: Array<Record<string, unknown>>) => {
+      await h.hooks['experimental.chat.messages.transform']?.(
+        {} as never,
+        { messages } as never,
+      );
+      await flush();
+    };
+    await requestCycle([userMsg('u1', 'check the background result')]);
+    await requestCycle([
+      userMsg('u1', 'check the background result'),
+      assistantMsg('a1', 'consumed the report'),
+      userMsg('u2', 'next step'),
+    ]);
+    expect(h.board.getState('child')).toBe('reconciled');
+
+    // Past the publication-wake throttle window (and strictly past every
+    // host timestamp so far — the resume busy must be unambiguous).
+    await Bun.sleep(1_100);
+
+    // Run 2: the child's own background-shell notification resumes it.
+    // The busy event rides the RAW v2 envelope (created = host time),
+    // which mapV2EventToV1 preserves as activityAt — without it the
+    // gate's ambiguous-event demotion would make this pass vacuously.
+    hostChildren = [
+      { id: 'child', parentID: 'parent', time: { updated: Date.now() } },
+    ];
+    await pump({
+      type: 'session.execution.started',
+      data: { sessionID: 'child' },
+    });
+    expectReopened(h, first);
+
+    // The parent's next request cycle delivers EXACTLY ONE reopen
+    // corrective notice (Task 6's injection-time detection), as a
+    // trailing volatile message in the cache-safe tail zone.
+    const correctedCycle = [userMsg('u3', 'meanwhile the child resumed')];
+    await requestCycle(correctedCycle);
+    const corrections = correctedCycle.filter(
+      (message) => solePartMetadata(message)?.reopenCorrection === true,
+    );
+    expect(corrections).toHaveLength(1);
+    const correction = corrections[0];
+    expect(
+      isVolatileTaggedMessage(correction, BACKGROUND_JOB_BOARD_METADATA_KEY),
+    ).toBe(true);
+    expect(correctedCycle.at(-1)).toBe(correction);
+    const correctionText = (correction as { parts: Array<{ text: string }> })
+      .parts[0].text;
+    expect(correctionText).toContain('child');
+    expect(correctionText).toContain('running again');
+    expect(correctionText).toContain('superseded');
+    // ...and never repeats on a later cycle.
+    const laterCycle = [
+      userMsg('u3', 'meanwhile the child resumed'),
+      assistantMsg('a3', 'noted the correction'),
+      userMsg('u4', 'carry on'),
+    ];
+    await requestCycle(laterCycle);
+    expect(
+      laterCycle.filter(
+        (message) => solePartMetadata(message)?.reopenCorrection === true,
+      ),
+    ).toHaveLength(0);
+
+    // Run 2 completes again: a second terminal publication for the SAME
+    // generation (new attempt, advanced terminalRevision).
+    hostChildren = [
+      {
+        id: 'child',
+        parentID: 'parent',
+        outcome: 'succeeded',
+        time: { updated: Date.now() },
+      },
+    ];
+    await pump({
+      type: 'session.execution.succeeded',
+      data: { sessionID: 'child' },
+    });
+    const second = await awaitPublication('child', first.terminalRevision + 1);
+    expect(second).toMatchObject({
+      state: 'completed',
+      generation: first.generation,
+    });
+    expect(
+      capture.of('[terminal-gate] terminal published', 'child'),
+    ).toHaveLength(2);
+
+    // Wake #2: the second publication re-fires the Task 6 wake for the
+    // idle parent — the queue delivery the CameraFTP loop depends on.
+    await flush();
+    await Bun.sleep(30);
+    expect(wakingPublicationWakes()).toHaveLength(2);
+    expect(promptAsync).toHaveBeenCalledTimes(2);
+    const lastWakeCall = promptAsync.mock.calls.at(-1)?.[0] as {
+      path?: { id?: string };
+      delivery?: string;
+      modelSelection?: string;
+      body?: { agent?: string };
+    };
+    expect(lastWakeCall).toMatchObject({
+      path: { id: 'parent' },
+      delivery: 'queue',
+      modelSelection: 'inherit',
+    });
+    expect(lastWakeCall?.body?.agent).toBe('orchestrator');
   } finally {
     capture.restore();
   }
