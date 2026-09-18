@@ -1037,6 +1037,88 @@ describe('BackgroundJobBoard', () => {
     });
   });
 
+  test('preserveRun terminal promotion re-fires the suppressed recovery wake', () => {
+    const board = new BackgroundJobBoard();
+    const listener = mock(() => {});
+    board.setTerminalStateListener(listener);
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'unattributed oracle task',
+      provisional: true,
+      now: 100,
+    });
+    board.markStopped('child-1', 'no outcome', 200);
+    const stops = listener.mock.calls.length;
+    expect(stops).toBeGreaterThan(0);
+
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'unattributed oracle task',
+      preserveRun: true,
+      now: 300,
+    });
+
+    expect(listener).toHaveBeenLastCalledWith('child-1');
+    expect(listener.mock.calls.length).toBe(stops + 1);
+  });
+
+  test('promoteProvisional re-fires the wake for a terminal placeholder and stays silent for a running one', () => {
+    const board = new BackgroundJobBoard();
+    const listener = mock(() => {});
+    board.setTerminalStateListener(listener);
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      provisional: true,
+      now: 100,
+    });
+    board.registerLaunch({
+      taskID: 'child-2',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      provisional: true,
+      now: 100,
+    });
+    board.markStopped('child-1', 'no outcome', 200);
+    const stops = listener.mock.calls.length;
+
+    board.promoteProvisional('child-1', 'parent-1');
+    expect(listener.mock.calls.length).toBe(stops + 1);
+    expect(listener).toHaveBeenLastCalledWith('child-1');
+
+    board.promoteProvisional('child-2', 'parent-1');
+    expect(listener.mock.calls.length).toBe(stops + 1);
+  });
+
+  test('promoteProvisional paints the owning call metadata', () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      provisional: true,
+      now: 100,
+    });
+
+    const promoted = board.promoteProvisional('child-1', 'parent-1', {
+      agent: 'explorer',
+      description: 'owned call',
+      objective: 'full objective text',
+      background: true,
+    });
+
+    expect(promoted?.provisional).toBe(false);
+    expect(promoted?.agent).toBe('explorer');
+    expect(promoted?.description).toBe('owned call');
+    expect(promoted?.objective).toBe('full objective text');
+    expect(promoted?.background).toBe(true);
+  });
+
   test('notifies terminal listener on updateStatus terminal transition', () => {
     const board = new BackgroundJobBoard();
     const listener = mock(() => {});

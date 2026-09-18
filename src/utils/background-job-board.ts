@@ -295,6 +295,9 @@ export class BackgroundJobBoard implements BackgroundJobStore {
           if (!existing.provisional) return existing;
           const promoted = { ...existing, provisional: false };
           this.jobs.set(input.taskID, promoted);
+          // The stop-time notification skipped this record while it was
+          // still provisional; the attributed record owes the wake.
+          this.notifyTerminalStateListeners(input.taskID);
           return promoted;
         }
         const observed = {
@@ -1157,6 +1160,12 @@ export class BackgroundJobBoard implements BackgroundJobStore {
   promoteProvisional(
     taskID: string,
     expectedParentSessionID?: string,
+    metadata?: {
+      agent?: string;
+      description?: string;
+      objective?: string;
+      background?: boolean;
+    },
   ): BackgroundJobRecord | undefined {
     const record = this.jobs.get(taskID);
     if (!record?.provisional) return record;
@@ -1166,8 +1175,22 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     ) {
       return record;
     }
-    const promoted = { ...record, provisional: false };
+    const promoted = metadata
+      ? {
+          ...record,
+          provisional: false,
+          agent: metadata.agent || record.agent,
+          description: metadata.description || record.description,
+          objective: metadata.objective ?? record.objective,
+          background: record.background || metadata.background === true,
+        }
+      : { ...record, provisional: false };
     this.jobs.set(taskID, promoted);
+    if (promoted.state !== 'running') {
+      // The stop-time notification skipped this record while it was
+      // still provisional; the attributed record owes the wake.
+      this.notifyTerminalStateListeners(taskID);
+    }
     return promoted;
   }
 

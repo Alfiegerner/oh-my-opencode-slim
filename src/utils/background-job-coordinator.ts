@@ -395,8 +395,18 @@ export class BackgroundJobCoordinator implements BackgroundJobStore {
   promoteProvisional(
     taskID: string,
     expectedParentSessionID?: string,
+    metadata?: {
+      agent?: string;
+      description?: string;
+      objective?: string;
+      background?: boolean;
+    },
   ): BackgroundJobRecord | undefined {
-    return this.board.promoteProvisional(taskID, expectedParentSessionID);
+    return this.board.promoteProvisional(
+      taskID,
+      expectedParentSessionID,
+      metadata,
+    );
   }
 
   hasConvergenceSignals(taskID: string, threshold = 3): boolean {
