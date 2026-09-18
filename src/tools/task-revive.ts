@@ -4,8 +4,7 @@ import type { BackgroundJobLease } from '../utils/background-job-board';
 import type { BackgroundJobSupervisor } from '../utils/background-job-supervisor';
 import { log } from '../utils/logger';
 import { getClient } from '../utils/opencode-client';
-import { withTimeout } from '../utils/session';
-import { OperationTimeoutError } from '../utils/session';
+import { OperationTimeoutError, withTimeout } from '../utils/session';
 import { getRuntimeSessionStatusSnapshot } from '../utils/session-runtime-status';
 import type { ExperimentalV2 } from '../v2/client-shim';
 import {
