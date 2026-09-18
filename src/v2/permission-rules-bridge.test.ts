@@ -29,10 +29,10 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import * as path from 'node:path';
 import {
-  __resetPermissionRulesWarningForTesting,
   createPermissionRulesBridge,
   createV2Setup,
   deriveExactPermissionRules,
+  resetV2GenerationWarnings,
 } from './setup';
 import type { V2Context, V2PermissionRule, V2Session } from './types';
 
@@ -139,7 +139,7 @@ describe('deriveExactPermissionRules', () => {
 
 describe('createPermissionRulesBridge', () => {
   beforeEach(() => {
-    __resetPermissionRulesWarningForTesting();
+    resetV2GenerationWarnings();
   });
 
   test('(a) applies exact-match rules on a plugin-managed child session', async () => {
@@ -213,7 +213,7 @@ describe('createPermissionRulesBridge', () => {
 
     // The latch is the only repeat-suppressor: after a reset the next
     // degraded host observation warns again (once).
-    __resetPermissionRulesWarningForTesting();
+    resetV2GenerationWarnings();
     await updateless.observeSessionCreated(
       makeChildCreatedEvent({ sessionID: 'ses_child_3' }),
     );
@@ -430,7 +430,7 @@ describe('createV2Setup permission rules wiring', () => {
       OPENCODE_LOG_DIR: path.join(fixtureRoot, 'logs'),
     };
     delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
-    __resetPermissionRulesWarningForTesting();
+    resetV2GenerationWarnings();
   });
 
   afterEach(async () => {

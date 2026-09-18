@@ -130,13 +130,23 @@ function toV1Message(m: Record<string, unknown>) {
  * NO `list` and NO `remove`. On such hosts the `list` shim used to
  * return the empty page silently (children enumeration quietly fell
  * back to event tracking) and `delete` logged a no-op notice per call.
- * Both now emit ONE deterministic warning per plugin process
- * (module-level guard; fixed text, no timestamps or per-call ids) so a
- * missing host capability is observable in the plugin log without
- * per-poll noise.
+ * Both now emit ONE deterministic warning per setup generation
+ * (module-level latch, rearmed by resetClientShimGenerationWarnings —
+ * `opencode reload` reuses the process, so a new generation must not
+ * inherit the previous one's silence; fixed text, no timestamps or
+ * per-call ids) so a missing host capability stays observable in the
+ * plugin log without per-poll noise.
  */
 let warnedListUnavailable = false;
 let warnedRemoveUnavailable = false;
+
+/** Rearm the one-time degradation notices for a new setup generation.
+ *  Called by resetV2GenerationWarnings at setup entry (and directly by
+ *  tests): module state survives instance disposal inside one process. */
+export function resetClientShimGenerationWarnings(): void {
+  warnedListUnavailable = false;
+  warnedRemoveUnavailable = false;
+}
 
 /** v1 body model (`{providerID, modelID}`) → v2 model ref
  * (`{id, providerID}`). */
@@ -238,7 +248,7 @@ function toV1SessionInfo(
  * `null` normalized to it) — and wraps the mapped page in the v1
  * `{data}` envelope. Hosts without `session.list` keep the v1-parity
  * empty page (honest absence, not a fake success) after a one-time
- * process-level warning — stock v2 hosts match this path because the
+ * per-generation warning — stock v2 hosts match this path because the
  * plugin session domain does not expose `list` (see the notice above).
  */
 export function createSessionListShim(
@@ -544,7 +554,7 @@ export function buildPluginInput(
       // relies on this to not leak temp sessions on v2. Hosts without
       // `remove` (the stock v2 plugin session domain — see the one-time
       // notice block near the top of this file) degrade to a no-op with
-      // a single process-level warning (no fake success, no per-call
+      // a single per-generation warning (no fake success, no per-call
       // noise).
       delete: s.remove
         ? async (args: Record<string, unknown>) => {
