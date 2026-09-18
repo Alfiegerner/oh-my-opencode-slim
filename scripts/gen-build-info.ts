@@ -25,6 +25,10 @@ if (typeof pkg.version !== 'string' || pkg.version === '') {
   throw new Error('package.json has no usable "version" field');
 }
 
+if (/['\\]/.test(pkg.version)) {
+  throw new Error('package.json "version" contains a quote or backslash');
+}
+
 const buildTime = new Date().toISOString();
 
 const contents = `/**

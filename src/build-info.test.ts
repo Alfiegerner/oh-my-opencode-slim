@@ -8,6 +8,8 @@ describe('build info', () => {
   });
 
   test('buildTime is an ISO-8601 timestamp string', () => {
-    expect(getBuildInfo().buildTime).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(getBuildInfo().buildTime).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/,
+    );
   });
 });
