@@ -423,9 +423,11 @@ currently break this plugin:
   survives the reload (the module instance is reused); a
   local-directory plugin is forced onto a fresh module instance
   whenever its files change. The plugin handles the in-process re-entry
-  explicitly: the v1 `dispose` hook cancels
-  pending foreground-fallback initial-delay timers
-  (`foregroundFallback.dispose()`), clears the process-global wake-gate
+  explicitly: the v1 `dispose` hook cancels pending foreground-fallback
+  initial-delay timers and fences off in-flight fallback chains at
+  their suspension points (`foregroundFallback.dispose()` — no replay,
+  abort, or transcript read continues through the destroyed client),
+  clears the process-global wake-gate
   progress so the next generation does not inherit the previous
   generation's two-wake no-progress caps (`clearAllWakeSessions()`),
   and explicitly releases companion ownership
