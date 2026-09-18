@@ -77,6 +77,13 @@ export interface RevivedRunTracker {
   attemptStartedAtFor(taskID: string, generation: number): number | undefined;
   probe(taskID: string, generation: number): Promise<boolean>;
   onTerminal(record: BackgroundJobRecord): void;
+  /** Delivery ownership for a tracked run's terminal outcome: true when
+   * THIS tracker has delivered, is delivering, or still owes a delivery
+   * attempt for the exact (taskID, generation) — the ownership state
+   * `notifyParent` consults. The terminal-publication wake listener
+   * (src/index.ts) consults it so a revived run's completion produces
+   * ONE queued admission (the tracker's notifyParent), never two. */
+  willNotifyParent(taskID: string, generation: number): boolean;
   /** Fallback observation handoff: prepare before the admission await
    * so the stop gate defers terminal publication until a delivery owner
    * exists. Admit converts the preparation into a tracked run
@@ -250,6 +257,28 @@ export function createRevivedRunTracker(options: {
       current.terminalRevision === record.terminalRevision &&
       run.terminalState === record.state &&
       terminalOutcome(current) === record.state
+    );
+  }
+
+  /** Publication-wake suppression predicate: does this tracker own the
+   * delivery of a terminal outcome for the exact (taskID, generation)?
+   * Mirrors the ownership state notifyParent consults, extended to the
+   * states a listener can observe after onTerminal has armed the
+   * notification: delivered (sent), in flight (pending), or the retry
+   * ladder still owing an attempt (timer armed or budget remaining).
+   * Once the retry budget is exhausted without a send the tracker has
+   * given up and the publication wake is a legitimate degraded
+   * fallback, so ownership is released. */
+  function willNotifyParent(taskID: string, generation: number): boolean {
+    if (disposed) return false;
+    const run = runs.get(taskID);
+    if (run?.generation !== generation) return false;
+    const { attempts, pending, retryTimer, sent } = run.notification;
+    return (
+      sent ||
+      pending ||
+      retryTimer !== undefined ||
+      attempts < maxNotificationRetries
     );
   }
 
@@ -695,6 +724,7 @@ export function createRevivedRunTracker(options: {
     attemptStartedAtFor,
     probe,
     onTerminal,
+    willNotifyParent,
     prepareObservation,
     admitObservation,
     rejectObservation,

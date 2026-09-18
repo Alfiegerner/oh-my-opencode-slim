@@ -143,10 +143,21 @@ acceptance scenarios live on here as live-host probes):
   (the CameraFTP self-continuation pattern). Its appearance without a
   real reopen is a false-positive failure.
 
-- **D — cache-safety live probe across a revival/publication-wake turn.**
-  Resume a reconciled child (revival), let it complete again so a
-  terminal-publication wake fires, and let the parent run the woken turn.
-  Across that whole window the plugin log must show **zero**
+- **D — cache-safety live probe across a revival/notification turn.**
+  Resume a reconciled child (revival), let it complete again, and let
+  the parent run the woken turn. The revived run's completion must
+  produce **exactly one queued admission** for the parent: the
+  revived-run tracker's `<task>` notification, delivered via
+  `promptAsync` with `delivery: "queue"`. The plugin log must show the
+  terminal-publication wake suppressed for that publication —
+
+  ```
+  [orchestrator-wake] terminal publication wake skipped {"sessionID":"<parent>","taskID":"...","generation":2,"trigger":"terminal-publication","verdict":"skipped","reason":"revived-tracker-owns-delivery"}
+  ```
+
+  — never a second `verdict: "waking"` publication wake beside the
+  tracker's delivery: wake + native/tracker double-notifying is a
+  failure. Across that whole window the plugin log must show **zero**
   `[cache-monitor]` warnings — none of:
 
   ```
@@ -155,8 +166,8 @@ acceptance scenarios live on here as live-host probes):
   [cache-monitor] cache-read plateau: ...
   ```
 
-  The wake and corrective surfaces reuse the existing wake text and ride
-  the cache-safe trailing zone, so a revival turn that busts the prefix
+  The wake, tracker-notification, and corrective surfaces ride the
+  cache-safe trailing zone, so a revival turn that busts the prefix
   is a regression (see [docs/cache-verification.md](../cache-verification.md)).
 
 - **A — absence never stops a job.** Throughout the probe session,

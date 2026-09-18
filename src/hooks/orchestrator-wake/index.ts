@@ -245,8 +245,10 @@ export type OrchestratorWakeConfig = {
    * when the terminal gate publishes a completed/error outcome. Optional
    * for callers built before the field existed — absent means enabled. */
   wakeOnTerminalPublication?: boolean;
-  /** Per-parent minimum spacing between terminal-publication wakes.
-   * 0 disables the throttle. Absent means
+  /** Per-parent minimum spacing between terminal-publication wakes
+   * (1,000–2,147,483,647ms; 0 is invalid at the config layer, so the
+   * throttle cannot be disabled via config — 0 exists only as a
+   * test-only runtime path). Absent means
    * `DEFAULT_PUBLICATION_WAKE_MIN_INTERVAL_MS`. */
   publicationWakeMinIntervalMs?: number;
 };

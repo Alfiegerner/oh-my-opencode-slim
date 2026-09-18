@@ -1451,4 +1451,86 @@ describe('revived run tracker', () => {
     // Stale generations never resolve a revision.
     expect(harness.tracker.revisionFor('ses_child', gen + 1)).toBeUndefined();
   });
+
+  // ── willNotifyParent: publication-wake suppression predicate ──
+  //
+  // The terminal-publication wake listener (src/index.ts) consults this
+  // predicate to skip the wake when the tracker owns delivery for the
+  // exact (taskID, generation): a revived run's completion must produce
+  // ONE queued admission (the tracker's notifyParent), never two.
+  describe('willNotifyParent', () => {
+    test('claims delivery for a tracked run before, during, and after its notification', async () => {
+      let resultReady = false;
+      const harness = createHarness(completedTranscript(() => resultReady));
+      const gen = harness.run.generation;
+
+      // Untracked / stale: the wake is the deliverer.
+      expect(harness.tracker.willNotifyParent('ses_child', gen)).toBe(false);
+      expect(harness.tracker.willNotifyParent('unknown', gen)).toBe(false);
+
+      harness.tracker.register({
+        taskID: 'ses_child',
+        generation: gen,
+        parentSessionID: 'parent',
+        baselineMessageID: 'baseline',
+        description: 'inspect the change',
+      });
+      expect(harness.tracker.willNotifyParent('ses_child', gen)).toBe(true);
+      expect(harness.tracker.willNotifyParent('ses_child', gen + 1)).toBe(
+        false,
+      );
+
+      resultReady = true;
+      await harness.tracker.probe('ses_child', gen);
+      await flushNotify();
+      expect(harness.prompt).toHaveBeenCalledTimes(1);
+      // Delivered (sent): the tracker still owns this run's delivery —
+      // a wake beside it would double-notify.
+      expect(harness.tracker.willNotifyParent('ses_child', gen)).toBe(true);
+    });
+
+    test('releases ownership once the retry budget is exhausted', async () => {
+      const harness = createHarness(
+        () => ({ data: [] }),
+        mock(async () => {
+          throw new Error('parent unavailable');
+        }),
+        false,
+        { maxNotificationRetries: 1 },
+      );
+      publish(harness);
+      await flushNotify();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      // Attempt 1 of 1 failed; no retry is scheduled, so the tracker
+      // will never deliver — the publication wake is the legitimate
+      // degraded fallback and must not be suppressed.
+      expect(harness.prompt).toHaveBeenCalledTimes(1);
+      expect(
+        harness.tracker.willNotifyParent(
+          harness.run.taskID,
+          harness.run.generation,
+        ),
+      ).toBe(false);
+
+      // Contrast: with budget remaining (a retry scheduled), the
+      // tracker still owns delivery.
+      const retrying = createHarness(
+        () => ({ data: [] }),
+        mock(async () => {
+          throw new Error('parent unavailable');
+        }),
+      );
+      publish(retrying);
+      await flushNotify();
+      expect(retrying.prompt).toHaveBeenCalledTimes(1);
+      expect(
+        retrying.tracker.willNotifyParent(
+          retrying.run.taskID,
+          retrying.run.generation,
+        ),
+      ).toBe(true);
+      retrying.tracker.dispose();
+    });
+  });
 });

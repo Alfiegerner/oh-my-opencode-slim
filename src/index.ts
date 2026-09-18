@@ -807,6 +807,25 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // double-notify.
     backgroundJobCoordinator.addTerminalOutcomeListener((record) => {
       if (record.state !== 'completed' && record.state !== 'error') return;
+      // Revived-run ownership: when the tracker will deliver this run's
+      // <task> result itself (notifyParent), a publication wake beside
+      // it would queue a SECOND admission to the idle parent — the
+      // double-notify the exactly-once notification contract forbids.
+      // Scoped to the exact (taskID, generation) the tracker owns;
+      // non-revived publications are unaffected.
+      if (
+        revivedRunTracker.willNotifyParent(record.taskID, record.generation)
+      ) {
+        log('[orchestrator-wake] terminal publication wake skipped', {
+          sessionID: record.parentSessionID,
+          taskID: record.taskID,
+          generation: record.generation,
+          trigger: 'terminal-publication',
+          verdict: 'skipped',
+          reason: 'revived-tracker-owns-delivery',
+        });
+        return;
+      }
       void orchestratorWakeScheduler
         .triggerTerminalPublicationWake(
           record.parentSessionID,

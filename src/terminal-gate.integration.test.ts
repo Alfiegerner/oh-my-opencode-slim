@@ -4,6 +4,7 @@ import * as hookFactories from './hooks';
 import { isVolatileTaggedMessage } from './hooks/cache-safe-injection';
 import { resetOrchestratorWakeGateForTests } from './hooks/orchestrator-wake/wake-gate';
 import { BACKGROUND_JOB_BOARD_METADATA_KEY } from './hooks/task-session-manager/board-injection';
+import type { RevivedRunTracker } from './hooks/task-session-manager/revived-run-tracker';
 import * as runtimeFactories from './hooks/task-session-manager/runtime-status-reconciliation';
 import { OhMyOpenCodeLite as plugin } from './index';
 import type { BackgroundJobRecord } from './utils/background-job-board';
@@ -87,6 +88,11 @@ async function assembly(
   let board!: BackgroundJobCoordinator;
   let gate!: gateFactories.BackgroundJobTerminalGate;
   let taskHook!: ReturnType<typeof hookFactories.createTaskSessionManagerHook>;
+  // The production tracker instance, captured from the hook factory's
+  // options (index.ts threads `revivedRunTracker` into
+  // createTaskSessionManagerHook) so tests can register revived runs —
+  // the exact post-admission state task_revive leaves behind.
+  let revivedTracker: RevivedRunTracker | undefined;
   let runtime!: ReturnType<
     typeof runtimeFactories.createRuntimeStatusReconciler
   >;
@@ -121,6 +127,7 @@ async function assembly(
     'createTaskSessionManagerHook',
   ).mockImplementation((...args) => {
     taskHook = originalHook(...args);
+    revivedTracker = args[1]?.revivedRunTracker;
     prune = spyOn(taskHook, 'pruneTaskContext');
     onHookCreated?.(board, gate);
     return taskHook;
@@ -234,6 +241,7 @@ async function assembly(
     board,
     gate,
     taskHook,
+    revivedTracker,
     runtime,
     prune,
     status,
@@ -1404,6 +1412,248 @@ test('reopen-after-reconcile: child self-continuation republishes, wakes the idl
       modelSelection: 'inherit',
     });
     expect(lastWakeCall?.body?.agent).toBe('orchestrator');
+  } finally {
+    capture.restore();
+  }
+});
+
+// ── Final-review pin: exactly-once queued admission for a revived run ──
+//
+// A revived run (task_revive) is owned by the revived-run tracker: its
+// completion is delivered to the parent by the tracker's notifyParent
+// (a queued `<task>` notification via promptAsync). The publication-wake
+// listener in src/index.ts fires for the SAME terminal publication — on
+// an idle parent that wake passes its busy/throttle gates and would queue
+// a SECOND admission. The wake must be suppressed when the tracker will
+// deliver for that exact (taskID, generation); non-revived publications
+// keep waking exactly once (regression pin below).
+
+test('revived-run completion on an idle parent queues exactly one admission: the tracker delivery, no publication wake', async () => {
+  resetOrchestratorWakeGateForTests();
+  const capture = captureGateLogs();
+  try {
+    const promptAsync = mock(async () => ({}));
+    let hostChildren: Array<Record<string, unknown>> = [
+      { id: 'child', parentID: 'parent' },
+    ];
+    const probe = v2ShimClient({
+      outcome: 'succeeded',
+      wakeSurface: {
+        listChildren: () => hostChildren,
+        promptAsync,
+      },
+    });
+    const { h, pump, awaitPublication } = await openV2Lifecycle(probe, {
+      hostFlavor: 'v2',
+      // Schema floor (1s) instead of the 30s default so the revived
+      // publication sits past the throttle window without a
+      // half-minute sleep (same shape as the reopen-chain probe above).
+      configOverrides: {
+        orchestratorWake: { publicationWakeMinIntervalMs: 1_000 },
+      },
+    });
+    const tracker = h.revivedTracker;
+    if (!tracker) {
+      throw new Error('assembly did not expose the revived-run tracker');
+    }
+
+    // Run 1 (non-revived): publication #1 wakes the idle parent once.
+    await h.requestTask('native', 'v2 revived-run double-admission probe');
+    await pump({
+      type: 'session.created',
+      data: { sessionID: 'child', parentID: 'parent', agent: 'explorer' },
+    });
+    await pump({
+      type: 'session.execution.started',
+      data: { sessionID: 'child' },
+    });
+    hostChildren = [
+      {
+        id: 'child',
+        parentID: 'parent',
+        outcome: 'succeeded',
+        time: { updated: Date.now() },
+      },
+    ];
+    await pump({
+      type: 'session.execution.succeeded',
+      data: { sessionID: 'child' },
+    });
+    const first = await awaitPublication('child', 0);
+    expect(first).toMatchObject({ state: 'completed' });
+    const wakingPublicationWakes = () =>
+      capture
+        .of('[orchestrator-wake] terminal publication wake', 'child')
+        .filter(
+          (entry) =>
+            (entry.data as { verdict?: string } | undefined)?.verdict ===
+            'waking',
+        );
+    await flush();
+    await Bun.sleep(30);
+    expect(wakingPublicationWakes()).toHaveLength(1);
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+
+    // Past the publication-wake throttle window, revive the child: the
+    // exact post-admission state task_revive leaves behind
+    // (task-revive.ts registerLaunch + tracker.register) — the board
+    // runs a NEW generation and the tracker owns observing it.
+    await Bun.sleep(1_100);
+    const lease = h.board.acquireRelaunchLease('child', first.generation);
+    if (!lease) throw new Error('missing relaunch lease');
+    const relaunched = h.board.registerLaunch({
+      taskID: 'child',
+      parentSessionID: 'parent',
+      agent: 'explorer',
+      description: 'revived continuation',
+      background: true,
+      relaunchLease: lease,
+    });
+    h.board.releaseLease(lease);
+    tracker.register({
+      taskID: 'child',
+      generation: relaunched.generation,
+      parentSessionID: 'parent',
+      description: 'revived continuation',
+    });
+    const sinceRevision = h.board.get('child')?.terminalRevision ?? 0;
+
+    // The revived run executes and completes: the resume busy re-arms
+    // the gate's observation (a bare second idle pair is deduped by the
+    // continuous-idle guard), then the terminal event publishes.
+    hostChildren = [
+      { id: 'child', parentID: 'parent', time: { updated: Date.now() } },
+    ];
+    await pump({
+      type: 'session.execution.started',
+      data: { sessionID: 'child' },
+    });
+    hostChildren = [
+      {
+        id: 'child',
+        parentID: 'parent',
+        outcome: 'succeeded',
+        time: { updated: Date.now() },
+      },
+    ];
+    await pump({
+      type: 'session.execution.succeeded',
+      data: { sessionID: 'child' },
+    });
+    // A fresh generation resets terminalRevision to 0; await the
+    // terminal publication of the REVIVED generation explicitly.
+    let second: BackgroundJobRecord | undefined;
+    for (let i = 0; i < 400 && second === undefined; i++) {
+      const record = h.board.get('child');
+      if (
+        record &&
+        record.state !== 'running' &&
+        record.generation === relaunched.generation &&
+        record.terminalRevision > sinceRevision
+      ) {
+        second = record;
+      } else {
+        await Bun.sleep(5);
+      }
+    }
+    if (!second) throw new Error('revived publication never landed');
+    expect(second).toMatchObject({
+      state: 'completed',
+      generation: relaunched.generation,
+    });
+
+    // Exactly ONE queued admission across the whole assembly for the
+    // revived completion: the tracker's `<task>` delivery (promptAsync
+    // call #2). The publication wake must NOT have fired for it —
+    // wake + tracker delivery double-notifying is a failure.
+    await flush();
+    await Bun.sleep(30);
+    expect(wakingPublicationWakes()).toHaveLength(1);
+    expect(promptAsync).toHaveBeenCalledTimes(2);
+    const trackerCall = promptAsync.mock.calls.at(-1)?.[0] as {
+      path?: { id?: string };
+      delivery?: string;
+      body?: { parts?: Array<{ text?: string }> };
+    };
+    expect(trackerCall).toMatchObject({
+      path: { id: 'parent' },
+      delivery: 'queue',
+    });
+    expect(trackerCall?.body?.parts?.[0]?.text).toContain('<task ');
+    expect(trackerCall?.body?.parts?.[0]?.text).toContain('state="completed"');
+  } finally {
+    capture.restore();
+  }
+});
+
+test('regression: non-revived completion on an idle parent still fires the publication wake exactly once', async () => {
+  resetOrchestratorWakeGateForTests();
+  const capture = captureGateLogs();
+  try {
+    const promptAsync = mock(async () => ({}));
+    let hostChildren: Array<Record<string, unknown>> = [
+      { id: 'child', parentID: 'parent' },
+    ];
+    const probe = v2ShimClient({
+      outcome: 'succeeded',
+      wakeSurface: {
+        listChildren: () => hostChildren,
+        promptAsync,
+      },
+    });
+    const { h, pump, awaitPublication } = await openV2Lifecycle(probe, {
+      hostFlavor: 'v2',
+      configOverrides: {
+        orchestratorWake: { publicationWakeMinIntervalMs: 1_000 },
+      },
+    });
+
+    // A plain (never-revived) background task completes on an idle
+    // parent: the publication wake must fire EXACTLY once and queue
+    // exactly one admission (the wake itself).
+    await h.requestTask('native', 'v2 publication-wake regression probe');
+    await pump({
+      type: 'session.created',
+      data: { sessionID: 'child', parentID: 'parent', agent: 'explorer' },
+    });
+    await pump({
+      type: 'session.execution.started',
+      data: { sessionID: 'child' },
+    });
+    hostChildren = [
+      {
+        id: 'child',
+        parentID: 'parent',
+        outcome: 'succeeded',
+        time: { updated: Date.now() },
+      },
+    ];
+    await pump({
+      type: 'session.execution.succeeded',
+      data: { sessionID: 'child' },
+    });
+    await awaitPublication('child', 0);
+    await flush();
+    await Bun.sleep(30);
+    const waking = capture
+      .of('[orchestrator-wake] terminal publication wake', 'child')
+      .filter(
+        (entry) =>
+          (entry.data as { verdict?: string } | undefined)?.verdict ===
+          'waking',
+      );
+    expect(waking).toHaveLength(1);
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    const wakeCall = promptAsync.mock.calls[0]?.[0] as {
+      path?: { id?: string };
+      delivery?: string;
+      modelSelection?: string;
+    };
+    expect(wakeCall).toMatchObject({
+      path: { id: 'parent' },
+      delivery: 'queue',
+      modelSelection: 'inherit',
+    });
   } finally {
     capture.restore();
   }
