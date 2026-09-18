@@ -1028,6 +1028,15 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "Amm1rr",
+      "name": "Mohammad",
+      "avatar_url": "https://avatars.githubusercontent.com/u/480468?v=4",
+      "profile": "https://github.com/Amm1rr",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "commitConvention": "angular"
