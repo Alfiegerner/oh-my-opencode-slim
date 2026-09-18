@@ -417,6 +417,16 @@ export class ForegroundFallbackManager {
     this.sessionAgent.set(sessionID, normalizedAgentName);
   }
 
+  /** Plugin dispose: cancel scheduled initial-delay timers. `opencode
+   *  reload` destroys this instance while a delay may still be pending;
+   *  firing it through the old context would run one stale fallback. */
+  dispose(): void {
+    for (const handle of this.pendingInitialDelay.values()) {
+      clearTimeout(handle);
+    }
+    this.pendingInitialDelay.clear();
+  }
+
   constructor(
     /**
      * Ordered fallback chains per agent.

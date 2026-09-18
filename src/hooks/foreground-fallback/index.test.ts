@@ -3363,3 +3363,43 @@ describe('ForegroundFallbackManager disableChain', () => {
     expect(call[0].body.model.modelID).toBe('claude-haiku');
   });
 });
+
+// ---------------------------------------------------------------------------
+// dispose (reload generation cleanup)
+// ---------------------------------------------------------------------------
+
+describe('ForegroundFallbackManager dispose', () => {
+  test('dispose cancels pending initial-delay timers and empties the map', async () => {
+    // `opencode reload` destroys the plugin instance while an initial
+    // fallback delay may still be scheduled. The stale timer must not
+    // fire through the old context after dispose.
+    const { mocks } = createMockClient();
+    const mgr = new ForegroundFallbackManager(
+      { orchestrator: ['openai/gpt-b', 'openai/gpt-c'] },
+      true,
+      { directory: '/test' } as any,
+      3, // maxRetries
+      undefined, // coordinator
+      undefined, // onSessionModelChanged
+      40, // initialRetryDelayMs
+    );
+
+    // First failover error on a fresh session schedules the initial
+    // delay instead of intervening immediately.
+    await mgr.handleEvent({
+      type: 'session.error',
+      properties: {
+        sessionID: 'sess-dispose-delay',
+        error: { message: 'Rate limit exceeded' },
+      },
+    });
+    expect(mocks.promptAsync).not.toHaveBeenCalled();
+    expect((mgr as any).pendingInitialDelay.size).toBe(1);
+
+    mgr.dispose();
+
+    expect((mgr as any).pendingInitialDelay.size).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(mocks.promptAsync).not.toHaveBeenCalled();
+  });
+});

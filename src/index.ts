@@ -46,6 +46,7 @@ import {
   SessionLifecycle,
 } from './hooks';
 import { processImageAttachments } from './hooks/image-hook';
+import { clearAllWakeSessions } from './hooks/orchestrator-wake/wake-gate';
 import { createBackgroundFallbackHandoff } from './hooks/task-session-manager/fallback-observation-transfer';
 import { createRevivedRunTracker } from './hooks/task-session-manager/revived-run-tracker';
 import type { ToolLoopGuardHook } from './hooks/tool-loop-guard/hook';
@@ -1647,15 +1648,30 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
     dispose: async () => {
       terminalGate?.dispose();
+      // Cancel pending initial-delay fallback timers so a reloaded
+      // generation cannot observe one stale fallback call.
+      foregroundFallback.dispose();
       await taskSessionManagerHook.event({
         event: { type: 'server.instance.disposed' },
       });
       await orchestratorWakeScheduler.event({
         event: { type: 'server.instance.disposed' },
       });
+      // The scheduler cleanup above only clears its own instance state;
+      // the wake gate is process-global (globalThis + Symbol.for) and
+      // survives module re-entry. `opencode reload` reuses this process,
+      // so generation two would otherwise inherit generation one's
+      // two-wake no-progress caps and never wake those sessions again.
+      clearAllWakeSessions();
       await interviewManager.dispose();
       await multiplexerSessionManager.cleanupOnInstanceDisposed();
       clearTuiActivities();
+      // Explicitly release this generation's companion ownership: a
+      // reloaded generation only replaces the active manager at its own
+      // onLoad, and if it fails before that the detached companion would
+      // survive until process exit. Idempotent (registerActiveManager's
+      // replacement path and the process-exit listener tolerate repeats).
+      companionManager.onExit();
       // Release only this generation's ownership. The admission runtime
       // defers final scheduler/tracker teardown by one macrotask so an
       // immediate config-update re-init can retain active and queued calls.
