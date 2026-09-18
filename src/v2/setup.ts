@@ -38,7 +38,11 @@ import {
 import { INTERNAL_INITIATOR_METADATA_KEY } from '../utils/internal-initiator';
 import { initLogger, log } from '../utils/logger';
 import { adaptTool, applyAgentToDraft } from './adapters';
-import { buildPluginInput, resolveV2Directory } from './client-shim';
+import {
+  buildPluginInput,
+  resetClientShimGenerationWarnings,
+  resolveV2Directory,
+} from './client-shim';
 import { subagentArgsToV1, toolNameToV1, v1ArgsToSubagent } from './delegation';
 import { mapV2EventToV1 } from './event-adapter';
 import {
@@ -506,7 +510,7 @@ export function observeChatHeaderState(
   pruneSessionMap(states);
 }
 
-/** One-time (per process) drift canary: a primary `model.request` for a
+/** One-time (per setup generation) drift canary: a primary `model.request` for a
  * session with NO context-event observation recorded means the host fired
  * the request hook before (or instead of) the context hook — the one
  * dangerous ordering direction, because later requests would then read a
@@ -518,10 +522,6 @@ const MODEL_REQUEST_BEFORE_CONTEXT_WARNING =
   'for session; host hook ordering may have changed (x-initiator marking ' +
   'may be stale)';
 let modelRequestOrderingWarned = false;
-
-export function __resetChatHeadersOrderingTripwireForTesting(): void {
-  modelRequestOrderingWarned = false;
-}
 
 /**
  * v1 `chat.headers` → v2 `session.model.request` bridge.
@@ -554,10 +554,10 @@ export function __resetChatHeadersOrderingTripwireForTesting(): void {
  * Headers are transport-level only — no payload content is read or mutated
  * (prompt-cache safety is unaffected).
  *
- * @param onOrderingDrift invoked (once per process — module-global latch)
- *   when a primary request arrives for a session with no context-event
- *   observation; injectable so tests can observe the tripwire without
- *   mocking the logger.
+ * @param onOrderingDrift invoked (once per setup generation — module-global
+ *   latch, rearmed by resetV2GenerationWarnings) when a primary request
+ *   arrives for a session with no context-event observation; injectable so
+ *   tests can observe the tripwire without mocking the logger.
  */
 export function createChatHeadersBridge(
   states: ChatHeaderSessionStates,
@@ -720,8 +720,10 @@ export function deriveExactPermissionRules(perm: unknown): V2PermissionRule[] {
  * One-time degradation notice for hosts whose session domain lacks
  * `update` (reduced v2 host contexts). Same contract as the
  * client-shim notices established by commit 2bf290ad: ONE
- * deterministic warning per plugin process (module-level latch; fixed
- * text, no timestamps or per-call ids) so a missing host capability is
+ * deterministic warning per setup generation (module-level latch,
+ * rearmed by resetV2GenerationWarnings — `opencode reload` reuses the
+ * process, so a new generation must not inherit silence; fixed text,
+ * no timestamps or per-call ids) so a missing host capability is
  * observable in the plugin log without per-child noise. Never fakes
  * success — the rules are simply not applied and the static agent
  * permissions keep governing the child.
@@ -731,8 +733,19 @@ const PERMISSION_RULES_UNAVAILABLE_WARNING =
   'context; child session permission rules are not applied';
 let permissionRulesUnavailableWarned = false;
 
-export function __resetPermissionRulesWarningForTesting(): void {
+/**
+ * Rearm the one-time degradation warnings for a new setup generation.
+ * `opencode reload` (OpenCode v2.0.7) destroys and recreates plugin
+ * instances inside one process while module-level state survives the
+ * disposal; without this reset the reloaded generation would stay
+ * silent about host-capability degradations the previous generation
+ * already reported. Also serves as the test-facing reset seam for the
+ * latched warning bridges.
+ */
+export function resetV2GenerationWarnings(): void {
+  modelRequestOrderingWarned = false;
   permissionRulesUnavailableWarned = false;
+  resetClientShimGenerationWarnings();
 }
 
 /** Deps for the per-session permission rules bridge. */
@@ -1326,6 +1339,11 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       return async () => {};
     }
     log('[v2] setup invoked', { app: ctx.app, cwd: process.cwd() });
+
+    // Reload generations: rearm the one-time degradation warning latches
+    // BEFORE any bridge of this generation can fire them — module-level
+    // state survives instance disposal inside one process.
+    resetV2GenerationWarnings();
 
     // Directory/location resolution lives in the shim now (single source);
     // setup still needs the directory for config loading and tool adapters.

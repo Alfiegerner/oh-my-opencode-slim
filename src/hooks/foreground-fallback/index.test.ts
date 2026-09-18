@@ -3363,3 +3363,150 @@ describe('ForegroundFallbackManager disableChain', () => {
     expect(call[0].body.model.modelID).toBe('claude-haiku');
   });
 });
+
+// ---------------------------------------------------------------------------
+// dispose (reload generation cleanup)
+// ---------------------------------------------------------------------------
+
+describe('ForegroundFallbackManager dispose', () => {
+  test('dispose cancels pending initial-delay timers and empties the map', async () => {
+    // `opencode reload` destroys the plugin instance while an initial
+    // fallback delay may still be scheduled. The stale timer must not
+    // fire through the old context after dispose.
+    const { mocks } = createMockClient();
+    const mgr = new ForegroundFallbackManager(
+      { orchestrator: ['openai/gpt-b', 'openai/gpt-c'] },
+      true,
+      { directory: '/test' } as any,
+      3, // maxRetries
+      undefined, // coordinator
+      undefined, // onSessionModelChanged
+      40, // initialRetryDelayMs
+    );
+
+    // First failover error on a fresh session schedules the initial
+    // delay instead of intervening immediately.
+    await mgr.handleEvent({
+      type: 'session.error',
+      properties: {
+        sessionID: 'sess-dispose-delay',
+        error: { message: 'Rate limit exceeded' },
+      },
+    });
+    expect(mocks.promptAsync).not.toHaveBeenCalled();
+    expect((mgr as any).pendingInitialDelay.size).toBe(1);
+
+    mgr.dispose();
+
+    expect((mgr as any).pendingInitialDelay.size).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(mocks.promptAsync).not.toHaveBeenCalled();
+  });
+
+  test('dispose abandons an in-flight fallback before the replay reaches the old client', async () => {
+    // Reload fencing (upstream PR #1218 P1): the transcript read can
+    // suspend across dispose(); the continuation must not re-prompt,
+    // abort, or otherwise touch the destroyed generation's client.
+    let resolveMessages!: (value: unknown) => void;
+    const messagesPromise = new Promise((resolve) => {
+      resolveMessages = resolve;
+    });
+    const promptAsync = mock(async () => ({}));
+    const abort = mock(async () => ({}));
+    currentMockSession = {
+      messages: mock(() => messagesPromise),
+      promptAsync,
+      abort,
+    };
+    installGetClientMock();
+
+    const mgr = new ForegroundFallbackManager(
+      { orchestrator: ['openai/gpt-b', 'openai/gpt-c'] },
+      true,
+      { directory: '/test' } as any,
+      3, // maxRetries
+      undefined, // coordinator
+      undefined, // onSessionModelChanged
+      0, // initialRetryDelayMs — intervene immediately
+    );
+
+    // Runs synchronously into the hanging transcript read.
+    const pending = mgr.handleEvent({
+      type: 'session.error',
+      properties: {
+        sessionID: 'sess-stale-generation',
+        error: { message: 'Rate limit exceeded' },
+      },
+    });
+
+    // Reload happens while the transcript read is suspended.
+    mgr.dispose();
+    resolveMessages({
+      data: [
+        {
+          info: { role: 'user', id: 'm1' },
+          parts: [{ type: 'text', text: 'hello' }],
+        },
+      ],
+    });
+    await pending;
+
+    expect(promptAsync).not.toHaveBeenCalled();
+    expect(abort).not.toHaveBeenCalled();
+    // The finally cleanup must still release the process-global
+    // inProgress slot so the reloaded generation is not blocked.
+    expect(mgr.isFallbackInProgress('sess-stale-generation')).toBe(false);
+  });
+
+  test('dispose during retry backoff abandons the attempt with zero further client calls', async () => {
+    const { mocks } = createMockClient();
+    const realNow = Date.now;
+    let fakeNow = realNow();
+    Date.now = () => fakeNow;
+    try {
+      const mgr = new ForegroundFallbackManager(
+        { orchestrator: ['openai/gpt-b', 'openai/gpt-c'] },
+        true,
+        { directory: '/test' } as any,
+        3, // maxRetries
+        undefined, // coordinator
+        undefined, // onSessionModelChanged
+        0, // initialRetryDelayMs — intervene immediately
+        6_500, // retryDelayMs — backoff outlives the dedup spacing below
+      );
+
+      // First fallback completes normally: one transcript read + replay.
+      await mgr.handleEvent({
+        type: 'session.error',
+        properties: {
+          sessionID: 'sess-backoff-dispose',
+          error: { message: 'Rate limit exceeded' },
+        },
+      });
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+
+      // Second trigger: beyond the 5s dedup window but inside the
+      // retryDelayMs backoff, so tryFallback sleeps before
+      // execFallback. Runs synchronously into that sleep.
+      fakeNow += 6_000;
+      const pending = mgr.handleEvent({
+        type: 'session.error',
+        properties: {
+          sessionID: 'sess-backoff-dispose',
+          error: { message: 'Rate limit exceeded' },
+        },
+      });
+
+      // Reload during the backoff sleep.
+      mgr.dispose();
+      await pending;
+
+      expect(mocks.messages).toHaveBeenCalledTimes(1); // no second read
+      expect(mocks.promptAsync).toHaveBeenCalledTimes(1); // no second replay
+      expect(mocks.abort).not.toHaveBeenCalled();
+      expect(mgr.isFallbackInProgress('sess-backoff-dispose')).toBe(false);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+});

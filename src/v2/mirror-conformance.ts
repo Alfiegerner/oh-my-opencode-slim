@@ -3,7 +3,7 @@
  *
  * Compile-time assertions binding the hand-mirrored v2 plugin context in
  * `./types.ts` to the official `@opencode/plugin` types (pinned to the
- * audited version in devDependencies; baseline `2.0.5`). Enforcement
+ * audited version in devDependencies; baseline `2.0.7`). Enforcement
  * point is `bun run typecheck`: this file must NOT carry a test suffix,
  * because tsconfig excludes test-suffixed files (`*.test.ts`) from tsc —
  * a test-suffixed guard silently checks nothing.
@@ -44,7 +44,10 @@ type Equal<A, B> =
     ? true
     : false;
 
-/** Official session hook surface as of the pinned @opencode/plugin. */
+/** Official session hook surface as of the pinned @opencode/plugin.
+ * `experimental.ws.send`/`receive` were added upstream in 2.0.6 (#49136);
+ * the plugin does not register them (experimental, no current consumer),
+ * so they appear in the official set only. */
 type OfficialSessionHookNames =
   | 'prompt'
   | 'context'
@@ -55,6 +58,8 @@ type OfficialSessionHookNames =
   | 'http.request'
   | 'http.response'
   | 'experimental.ws.handshake'
+  | 'experimental.ws.send'
+  | 'experimental.ws.receive'
   | 'retry';
 
 /** Layer 1: the official surface is exactly this set — nothing added,

@@ -5,12 +5,12 @@ and OpenCode v2 (`opencode2`) from a single published package. This document
 describes how each host loads the plugin, what is supported where, and how to
 register it.
 
-The verified compatibility baseline is **OpenCode v2.0.5**. The plugin
-requires OpenCode v2.0.5+ on v2 hosts; older v2 hosts are unsupported.
-The adapter targets the v2.0.5 plugin API surface (see
-[The v2.0.5 plugin API surface](#the-v205-plugin-api-surface-this-adapter-uses)),
+The verified compatibility baseline is **OpenCode v2.0.7**. The plugin
+requires OpenCode v2.0.7+ on v2 hosts; older v2 hosts are unsupported.
+The adapter targets the v2 plugin API surface (see
+[The v2 plugin API surface](#the-v2-plugin-api-surface-this-adapter-uses)),
 and the compile-time mirror guard below is pinned to `@opencode/plugin`
-2.0.5.
+2.0.7.
 
 ## How it works
 
@@ -81,8 +81,8 @@ plugin context it consumes in `src/v2/types.ts` — the v1 host must be able to
 load the main build with no v2 package installed. This is a known tradeoff,
 not an oversight: the mirror is refreshed by hand and can drift from
 upstream, so every v2 release bump needs a deliberate diff of
-`src/v2/types.ts` against the new `@opencode/plugin`. That diff now has
-a compile-time tripwire: `src/v2/mirror-conformance.ts` — typechecked
+`src/v2/types.ts` against the new `@opencode/plugin`. That diff is
+backed by a compile-time tripwire: `src/v2/mirror-conformance.ts` — typechecked
 against the `@opencode/plugin` devDependency, pinned to the audited
 version — fails `bun run typecheck` when either the mirror or the
 pinned official surface drifts (hook-name sets, key payload fields).
@@ -96,8 +96,8 @@ name for the chat.headers bridge; the event stream, bridges, and
 orchestrator-wake children-driven degraded mode are exercised end-to-end
 on the stable host — live mock-driven re-verification on 2026-09-09
 included a queued wake firing after 60 s of parent idle with a stalled
-background child). v2.0.5 conformance is compile-time-pinned by the
-mirror-conformance guard against the `@opencode/plugin` 2.0.5
+background child). v2 conformance is compile-time-pinned by the
+mirror-conformance guard against the `@opencode/plugin` 2.0.7
 devDependency and exercised by the mock-driven bridge tests. Every v2
 API the adapter touches is
 capability-probed at runtime (`typeof ctx.mcp?.transform === 'function'`,
@@ -348,7 +348,7 @@ currently break this plugin:
 - **Runtime status reconciliation is capability-gated.** v2 has no
   equivalent of the v1 live session-status map (`client.session.status`
   is not a function on v2 hosts; `session.status` is not exposed to
-  plugins as of v2.0.5), so the task-session-manager's
+  plugins), so the task-session-manager's
   runtime-status reconciliation poll is disabled entirely on hosts
   without the method — a single per-instance log line notes the
   disabled reconciliation instead of logging uncertainty every ~5s poll.
@@ -374,7 +374,12 @@ currently break this plugin:
   `session.created` and fail-soft with a one-time warning on reduced
   hosts without the method); the `generate` session hook (not the
   `ctx.generate` text channel the webfetch summaries use), the `title`
-  hook, and the `tabs` methods are not used.
+  hook, and the `tabs` methods are not used. On the client SDK,
+  `server.status` is named `server.info` (the plugin never calls it),
+  and the `location.reload` / `fs.write` endpoints and the Form
+  `hidden` field are likewise not adopted. The applied child-session
+  allow rules always lose to a matching user-config `deny` (see the
+  config permission policies bullet above).
   The `title` hook needs no adoption for child sessions: v2 hosts
   title subagent children deterministically at creation (the
   `subagent` tool sets `title` from its `description` argument, which
@@ -406,8 +411,54 @@ currently break this plugin:
   matches raw MCP tool names: MCP access is granted per server name
   (`"mcps": ["context7", "!gh_grep"]` in agent config), and registration
   uses its own server names via `draft.set(name, ...)`.
+- **`opencode reload` recreates plugin instances in-process.** The CLI
+  `opencode reload` command, the TUI reload command, and the
+  `location.reload` HTTP endpoint all rebuild the host's location
+  service layer: plugin instances are destroyed and recreated, `setup`
+  re-enters in the same process, and the host calls the cleanup
+  returned by the previous generation before the new generation loads.
+  Pending permissions and forms are cancelled, and running sessions
+  swap to the new service layer at the next step boundary. There is no
+  unload-style lifecycle hook. Module state of an npm-form plugin
+  survives the reload (the module instance is reused); a
+  local-directory plugin is forced onto a fresh module instance
+  whenever its files change. The plugin handles the in-process re-entry
+  explicitly: the v1 `dispose` hook cancels pending foreground-fallback
+  initial-delay timers and fences off in-flight fallback chains at
+  their suspension points (`foregroundFallback.dispose()` — no replay,
+  abort, or transcript read continues through the destroyed client),
+  clears the process-global wake-gate
+  progress so the next generation does not inherit the previous
+  generation's two-wake no-progress caps (`clearAllWakeSessions()`),
+  and explicitly releases companion ownership
+  (`companionManager.onExit()` — idempotent). The v2 `setup` entry
+  calls `resetV2GenerationWarnings()`, rearming the one-time
+  degradation latches (model.request ordering drift, permission-rules
+  unavailable, session.list/remove unavailable) so every generation
+  warns once. Background-job persistence resets unconditionally on
+  every generation setup behind an epoch fence, so persisted write
+  queues cannot leak across generations. The event adapter passes
+  `location.shutdown` events through raw with no synthesis. The
+  user-wait-gate (`wait_for_user` HITL latch) stays armed across a
+  reload by design, and the admission runtime defers its final
+  scheduler/tracker teardown by one macrotask so an immediate re-init
+  can retain active and queued calls.
+- **Config permission policies are kernel-enforced and deny-final.**
+  `experimental.policies` supports `action: "permission"` entries
+  (`effect: "allow"`/`"deny"`, resource wildcards) enforced by the host
+  kernel. An explicit `deny` is final and never reaches the evaluate
+  hooks: a user-config `deny` can suppress the plugin's allow rules or
+  permission upgrades, and the plugin's exact-match allow rules on
+  child sessions coexist with user config — on a match the user `deny`
+  wins over the plugin's allow. No plugin code participates in that
+  resolution.
+- **Provider failure retries are aggressive.** The host retries a
+  failing provider call up to 10 times within a total window of about
+  84 s (4xx responses are never retried). Observation-style hooks
+  therefore fire far more frequently in a failing session than in a
+  healthy one.
 
-### The v2.0.5 plugin API surface this adapter uses
+### The v2 plugin API surface this adapter uses
 
 - **`session.update({sessionID, title?, permissions?})`.** Sets the
   session title and/or REPLACES the session-scoped permission rule
@@ -417,9 +468,11 @@ currently break this plugin:
   `permissions` field (see the adoption-status bullet above).
 - **`session.interrupt({sessionID, resume})`.** `resume: false` aborts
   the active run; the shim's abort path sends exactly that.
-- **`experimental.ws.handshake` session hook.** Exists on the official
-  hook set (pinned in the mirror-conformance guard); **not used** by
-  this plugin.
+- **`experimental.ws.handshake` / `experimental.ws.send` /
+  `experimental.ws.receive` session hooks.** Official experimental
+  hooks on the pinned surface (the mirror-conformance guard's
+  `OfficialSessionHookNames` set of 12); **not registered and not
+  used** by this plugin — they appear only in the official-set pin.
 - **Core `# Your Model` identity system part.** v2 core splices a
   `# Your Model` identity part at `system[1]` on every LLM request. The
   plugin's system transform keeps appending the orchestrator prompt to
@@ -547,7 +600,7 @@ taskID:
   `failed`/`interrupted` settle as error with the host outcome recorded.
 
 Related injection hardening: a remembered (possibly stale) processed
-completion now skips *cleanly* — the fence check runs before the
+completion skips *cleanly* — the fence check runs before the
 deletion-epoch fail-closed branch in `updateFromInjectedCompletion`, so
 replaying an old completion after a delete + same-ID relaunch can no
 longer poison the fresh generation with `markStatusUncertain`. Unobserved
@@ -643,10 +696,10 @@ The v2 plugin session domain (`packages/plugin/src/promise/session.ts`,
 `SessionDomain`, mirrored by the runtime object the promise adapter
 builds) exposes exactly `create`/`get`/`switchAgent`/`switchModel`/
 `prompt`/`generate`/`command`/`synthetic`/`interrupt`/`update`/`move`/
-`wait`/`context` — **`list` and `remove` are not handed to plugins**
-(as of v2.0.5). Both endpoints exist on the host's HTTP API, but the
+`wait`/`context` — **`list` and `remove` are not handed to plugins**.
+Both endpoints exist on the host's HTTP API, but the
 plugin context never receives them. `session.status`, `session.todo`, and
-`session.children` are likewise not exposed as of v2.0.5 — the wake
+`session.children` are likewise not exposed to plugins — the wake
 scheduler's fallback enumeration, the delete no-op below, and the disabled
 runtime-status reconciliation (see
 [Upstream behaviors](#upstream-behaviors-to-know)) all follow from these
@@ -681,8 +734,7 @@ silently (`list`) or logging on every call (`remove`):
 
 The guards are module-level booleans with fixed text — no timestamps,
 session ids, or per-call payloads — so repeated wake polls and cleanup
-calls do not flood the log (the remove warning used to fire once per
-delete attempt).
+calls do not flood the log.
 
 ### Orchestrator-wake on v2 (children-driven degraded mode)
 
@@ -690,7 +742,7 @@ The wake scheduler is **active on v2** in a degraded mode, configured with
 `backgroundJobs.orchestratorWake.mode` (`"auto"` | `"todo"` | `"children"`,
 default `"auto"`: todo-gating on v1, children-driven on v2; an explicit
 `"todo"` degrades to children because v2 has no todo surface exposed to
-plugins as of v2.0.5 — logged once).
+plugins — logged once).
 
 How it differs from the v1 path:
 
@@ -706,8 +758,8 @@ How it differs from the v1 path:
   child). A finished child is therefore terminal immediately instead of
   reading active for the whole staleness window, and a live child stays
   visible on its host evidence rather than dropping out on stale local
-  evidence. As of v2.0.5, `session.list` is not exposed to plugins on any
-  stable host
+  evidence. `session.list` is not exposed to plugins on any stable
+  host
   (see
   [Not exposed to plugins](#not-exposed-to-plugins-sessionlist-sessionremove)),
   so the event-tracked fallback is the operative path. Results are scoped

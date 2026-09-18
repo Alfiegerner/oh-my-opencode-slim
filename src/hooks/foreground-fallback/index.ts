@@ -332,6 +332,11 @@ export class ForegroundFallbackManager {
    *   (one retry chance); 2 = exhausted again, aborted — stop intervening.
    *   Reset to 0 on successful responses or session deletion. */
   private readonly chainExhaustion = new Map<string, number>();
+  /** True once dispose() ran. `opencode reload` destroys this instance's
+   *  context mid-attempt; in-flight fallback chains check this at every
+   *  suspension point so their continuation never touches the old
+   *  generation's client (transcript reads, aborts, re-prompts). */
+  private disposed = false;
   /** sessionID → notified when the session switched to a new model mid-flight
    *  (e.g. after a fallback re-prompt). Lets the background-task admission
    *  scheduler migrate provider/model accounting to the new model. */
@@ -415,6 +420,34 @@ export class ForegroundFallbackManager {
       return;
     }
     this.sessionAgent.set(sessionID, normalizedAgentName);
+  }
+
+  /** Plugin dispose: cancel scheduled initial-delay timers and fence off
+   *  in-flight fallback chains. `opencode reload` destroys this instance
+   *  mid-attempt — pending timers are cancelled here, and suspension
+   *  points inside tryFallback/tryFallbackWithAbort/execFallback abandon
+   *  their continuation (see abandonedByDispose) so no replay, abort, or
+   *  transcript read runs through the destroyed generation's client. */
+  dispose(): void {
+    this.disposed = true;
+    for (const handle of this.pendingInitialDelay.values()) {
+      clearTimeout(handle);
+    }
+    this.pendingInitialDelay.clear();
+  }
+
+  /** Dispose fence for fallback chains: true when this generation was
+   *  disposed and the caller must abandon its attempt. Deterministic log
+   *  (fixed text, sessionID only — no timestamps or per-call ids). The
+   *  caller's `finally` still clears the process-global inProgress slot,
+   *  so the reloaded generation is never blocked by the abandoned one. */
+  private abandonedByDispose(sessionID: string): boolean {
+    if (!this.disposed) return false;
+    log(
+      '[foreground-fallback] disposed while fallback in flight; abandoning stale attempt',
+      { sessionID },
+    );
+    return true;
   }
 
   constructor(
@@ -731,6 +764,9 @@ export class ForegroundFallbackManager {
 
   private async tryFallback(sessionID: string, error?: unknown): Promise<void> {
     if (!sessionID) return;
+    // Reload fence at entry, before any state mutation: a trigger racing
+    // dispose() must not start a new chain through the dead context.
+    if (this.abandonedByDispose(sessionID)) return;
     if (this.inProgress.has(sessionID)) return;
     // No chain -> no fallback. Skip before dedup so we don't stamp lastTrigger
     // for sessions we will never re-prompt (e.g. councillor via CouncilManager).
@@ -757,6 +793,11 @@ export class ForegroundFallbackManager {
             elapsed,
           });
           await new Promise((r) => setTimeout(r, delay));
+          // The backoff slept through a dispose(): execFallback would
+          // read the transcript and re-prompt through the destroyed
+          // generation's client. The finally below still releases the
+          // process-global inProgress slot.
+          if (this.abandonedByDispose(sessionID)) return;
         }
       }
 
@@ -783,6 +824,8 @@ export class ForegroundFallbackManager {
     error?: unknown,
   ): Promise<void> {
     if (!sessionID) return;
+    // Reload fence at entry (same rationale as tryFallback).
+    if (this.abandonedByDispose(sessionID)) return;
     if (this.inProgress.has(sessionID)) return;
     if (!this.hasFallbackChain(sessionID)) return;
     if (this.isDeduped(sessionID)) return;
@@ -790,6 +833,11 @@ export class ForegroundFallbackManager {
     this.inProgress.add(sessionID);
     try {
       await abortSessionWithTimeout(getClient(this.input), sessionID);
+      // The abort suspended across a dispose(): its outcome no longer
+      // matters to the reloaded generation — do not continue into
+      // execFallback (transcript read + replay on the dead client).
+      // The finally below still releases the process-global slot.
+      if (this.abandonedByDispose(sessionID)) return;
       await this.execFallback(sessionID, error);
     } finally {
       this.inProgress.delete(sessionID);
@@ -818,6 +866,10 @@ export class ForegroundFallbackManager {
     sessionID: string,
     error?: unknown,
   ): Promise<void> {
+    // Reload fence at entry: execFallback is reached after suspension
+    // points in the tryFallback* callers; a disposed generation must not
+    // even read the transcript through the old client.
+    if (this.abandonedByDispose(sessionID)) return;
     const session = getClient(this.input).session;
     try {
       const observedModel = this.sessionModel.get(sessionID);
@@ -968,6 +1020,11 @@ export class ForegroundFallbackManager {
       const result = await session.messages({
         path: { id: sessionID },
       });
+      // Transcript read suspended across a dispose(): everything from
+      // here on — handoff arming, replay prompt, switch claim — would
+      // run through the destroyed generation's client. Abandon before
+      // arming anything; the tryFallback* finally releases inProgress.
+      if (this.abandonedByDispose(sessionID)) return;
       // result.data may contain partial/streaming messages whose `info` is
       // undefined at runtime (OpenCode violates its own declared type), and
       // v2 messages carry `type`/`text` instead of `info`/`parts`, so guard
@@ -1096,6 +1153,15 @@ export class ForegroundFallbackManager {
           throw abortErr;
         }
         await new Promise((r) => setTimeout(r, REPROMPT_DELAY_MS));
+        // The abort/re-prompt-delay suspended across a dispose(): the
+        // second replay must not go through the old client. The first
+        // prompt's transport failed with an unknown outcome, so convert
+        // (never drop) the armed handoff exactly like the retry-failure
+        // path below.
+        if (this.abandonedByDispose(sessionID)) {
+          settleUnresolvedHandoff();
+          return;
+        }
         try {
           promptResult = await promptAsync(promptBody);
         } catch (retryErr) {

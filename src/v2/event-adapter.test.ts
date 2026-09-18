@@ -55,6 +55,24 @@ describe('mapV2EventToV1', () => {
     expect(out[0]).toBe(ev);
   });
 
+  test('v2.0.7 location.shutdown (config reload) stays passthrough-only', () => {
+    // Ephemeral host event (payload under `data`, live framing) published
+    // when `opencode reload` tears down and rebuilds every location.
+    // Nothing is synthesized from it: raw passthrough, no throw, no v1
+    // shape fabrication — v1 consumers ignore event types they do not
+    // know, and plugin teardown rides the dispose chain instead.
+    const ev = deepFreeze({
+      id: 'evt_shutdown',
+      created: '2026-09-18T00:00:00.000Z',
+      type: 'location.shutdown',
+      durable: false,
+      data: {},
+    });
+    const out = mapV2EventToV1(ev);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toBe(ev);
+  });
+
   test('never mutates the input event', () => {
     const ev = deepFreeze(
       v2Usage({ input: 10, read: 100, write: 20, timestamp: 1_700_000_000 }),

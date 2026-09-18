@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import path from 'node:path';
+import { stateFilePath } from './companion/manager';
 import type { MultiplexerConfig } from './config';
+import {
+  getWakeProgress,
+  resetOrchestratorWakeGateForTests,
+} from './hooks/orchestrator-wake/wake-gate';
 import pluginModuleDefault, {
   OhMyOpenCodeLite as plugin,
   sessionManagerMultiplexerConfig,
@@ -340,6 +346,101 @@ describe('plugin tool registration', () => {
       Date.now = originalNow;
       await rm(configDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('plugin reload generation cleanup', () => {
+  let originalEnv: typeof process.env;
+  let projectDir: string;
+
+  const createHooks = (pluginConfig: Record<string, unknown> = {}) =>
+    plugin({
+      client: createPluginClient(async () => ({})),
+      directory: projectDir,
+      worktree: projectDir,
+      serverUrl: new URL('http://127.0.0.1:4096'),
+      ...pluginConfig,
+    } as never);
+
+  beforeEach(async () => {
+    originalEnv = { ...process.env };
+    projectDir = await mkdtemp('/tmp/oh-my-opencode-slim-gens-');
+    process.env = {
+      ...originalEnv,
+      OPENCODE_CONFIG_DIR: projectDir,
+      XDG_DATA_HOME: `${projectDir}/data`,
+      XDG_CACHE_HOME: `${projectDir}/cache`,
+      OPENCODE_LOG_DIR: `${projectDir}/logs`,
+    };
+    delete process.env.OH_MY_OPENCODE_SLIM_DISABLE;
+    await Bun.write(
+      `${projectDir}/oh-my-opencode-slim.json`,
+      JSON.stringify({ companion: { enabled: false } }),
+    );
+  });
+
+  afterEach(async () => {
+    process.env = originalEnv;
+    await rm(projectDir, { recursive: true, force: true });
+  });
+
+  test('v1 dispose clears the process-global wake gate progress', async () => {
+    resetOrchestratorWakeGateForTests();
+    try {
+      const hooks = await createHooks();
+
+      // Simulate a generation-one session that already hit the two-wake
+      // no-progress cap. The wake gate is process-global (globalThis +
+      // Symbol.for), so without explicit disposal cleanup a reloaded
+      // generation would inherit the cap and never wake this session.
+      const progress = getWakeProgress('wake-generation-session');
+      progress.unchangedWakeCount = 2;
+      progress.stopped = true;
+      progress.expectingWakeBusy = true;
+
+      await hooks.dispose?.();
+
+      expect(getWakeProgress('wake-generation-session')).toEqual({
+        unchangedWakeCount: 0,
+        lastFingerprint: undefined,
+        stopped: false,
+        expectingWakeBusy: false,
+        observedModel: undefined,
+      });
+    } finally {
+      resetOrchestratorWakeGateForTests();
+    }
+  });
+
+  test('v1 dispose releases this generation companion manager', async () => {
+    // Enabled with a custom (missing) binaryPath: registration and state
+    // writes run, but neither the updater nor spawnIfAvailable touches
+    // the network or spawns a child.
+    await Bun.write(
+      `${projectDir}/oh-my-opencode-slim.json`,
+      JSON.stringify({
+        companion: {
+          enabled: true,
+          binaryPath: `${projectDir}/missing-companion-bin`,
+        },
+      }),
+    );
+    const hooks = await createHooks();
+    const readSessionIds = (): string[] => {
+      const state = JSON.parse(readFileSync(stateFilePath(), 'utf8')) as {
+        sessions: Array<{ session_id: string }>;
+      };
+      return state.sessions.map((s) => s.session_id);
+    };
+
+    // onLoad registered this generation's manager in the state file.
+    expect(readSessionIds()).toContain(`proc_${process.pid}`);
+
+    await hooks.dispose?.();
+
+    // dispose must call companionManager.onExit(): the session entry is
+    // withdrawn even if the next generation fails before its own onLoad.
+    expect(readSessionIds()).not.toContain(`proc_${process.pid}`);
   });
 });
 
