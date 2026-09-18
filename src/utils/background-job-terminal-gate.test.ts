@@ -384,6 +384,34 @@ describe('terminal gate', () => {
       resultSummary: 'Host reported outcome: succeeded.',
     });
   });
+  test('an attributable interrupted publishes stopped, never error, when the transcript source is absent', async () => {
+    const h = harness({
+      hostOutcomeClock: 'shared-unix-ms',
+      baselineFor: () => undefined,
+      readTerminalEvidence: async () => undefined,
+      input: {
+        client: {
+          session: {
+            // No session.messages: capability absence, same as the
+            // succeeded twin above.
+            get: async () => ({
+              data: { outcome: 'interrupted', time: { idle: 50 } },
+            }),
+          },
+        },
+      } as never,
+    });
+    h.observe('quiescent');
+    h.advance(61);
+    await h.gate.reconcile(h.run);
+    // The host distinguished an interruption from a failure; the board
+    // stop family (no plugin-verified cancel lease) must carry it.
+    expect(h.board.get(h.run.taskID)).toMatchObject({
+      state: 'stopped',
+      terminalRevision: 1,
+      resultSummary: 'Host reported outcome: interrupted.',
+    });
+  });
   test('board rejects freely fabricated terminal authorization', async () => {
     const h = harness();
     const validate = mock(() => true);

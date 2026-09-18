@@ -51,6 +51,10 @@ async function assembly(
     /** Whole-client replacement (v2 shim-shaped hosts). Suppresses the
      * default v1 client so capability probes see honest method absence. */
     client?: unknown;
+    /** Build the gate WITHOUT the production `hostOutcomeClock`
+     * contract, pinning the #1225 dependency: no shared clock, no
+     * attribution window, no host-outcome publication. */
+    withoutHostOutcomeClock?: boolean;
   } = {},
 ) {
   const env = { ...process.env };
@@ -95,6 +99,7 @@ async function assembly(
     gate = originalGate({
       ...options,
       graceMs: setup.graceMs ?? options.graceMs,
+      ...(setup.withoutHostOutcomeClock ? { hostOutcomeClock: undefined } : {}),
     });
     return gate;
   });
@@ -626,25 +631,33 @@ function v2ShimClient(options: {
   /** Transcript source: a host that exposes `session.messages`.
    * Omitted by default — honest method absence on the session. */
   transcript?: () => unknown;
+  /** Probe: keep `session.get` reporting the running shape (no
+   * outcome/idle) for the first N reads even after the host committed
+   * its terminal outcome; reveal it only on read N+1 onward. */
+  hideOutcomeForReads?: number;
 }): V2HostProbe {
   const host = {
     outcome: options.outcome,
     idleAt: undefined as number | undefined,
   };
-  const get = mock(
-    async (_args: unknown): Promise<unknown> => ({
-      // v2 Session.Info carries `outcome`/`time.idle` only after the
-      // terminal transition; a running child has neither.
-      data:
-        host.idleAt === undefined
-          ? { parentID: 'parent' }
-          : {
-              parentID: 'parent',
-              outcome: host.outcome,
-              time: { idle: host.idleAt },
-            },
-    }),
-  );
+  let reads = 0;
+  const get = mock(async (_args: unknown): Promise<unknown> => {
+    reads += 1;
+    // v2 Session.Info carries `outcome`/`time.idle` only after the
+    // terminal transition; a running child has neither. The probe delay
+    // hides the committed transition from the first N reads.
+    const visible =
+      host.idleAt !== undefined && reads > (options.hideOutcomeForReads ?? 0);
+    return {
+      data: visible
+        ? {
+            parentID: 'parent',
+            outcome: host.outcome,
+            time: { idle: host.idleAt },
+          }
+        : { parentID: 'parent' },
+    };
+  });
   const messages = options.transcript
     ? mock(async (_args: unknown): Promise<unknown> => options.transcript?.())
     : undefined;
@@ -680,13 +693,18 @@ type V2RawEventSpec = {
 async function driveV2Lifecycle(
   probe: V2HostProbe,
   events: V2RawEventSpec[],
+  setup: { withoutHostOutcomeClock?: boolean } = {},
 ): Promise<BackgroundJobCoordinator> {
   const childID = String(
     events.find((event) => event.type === 'session.created')?.data.sessionID ??
       events[0]?.data.sessionID ??
       'child',
   );
-  const h = await assembly(undefined, { graceMs: 20, client: probe.client });
+  const h = await assembly(undefined, {
+    graceMs: 20,
+    client: probe.client,
+    withoutHostOutcomeClock: setup.withoutHostOutcomeClock,
+  });
   const dispatch = async (event: Record<string, unknown>) => {
     await h.hooks.event?.({ event } as never);
   };
@@ -876,6 +894,178 @@ test('guard: unattributable succeeded outcome with no transcript source publishe
     expect(capture.of('[terminal-gate] terminal published', 'child')).toEqual(
       [],
     );
+  } finally {
+    capture.restore();
+  }
+});
+
+// ── Task 5: attribution guard-rails and interruption mapping ──
+//
+// Task 4's fix publishes from a window-attributed host outcome when the
+// transcript source is absent. These pins lock the surrounding rails:
+// the stop/interrupt family must not surface as a false error, a failed
+// outcome must surface as an error with the host payload, the #1225
+// attribution window must depend on the explicit hostOutcomeClock
+// contract, and the post-exhaustion dead end stays recorded honestly.
+
+test('guard: attributed interrupted outcome publishes from the stop/cancel family, never error', async () => {
+  const capture = captureGateLogs();
+  try {
+    const probe = v2ShimClient({ outcome: 'interrupted' });
+    const board = await driveV2Lifecycle(probe, [
+      {
+        type: 'session.created',
+        data: { sessionID: 'child', parentID: 'parent', agent: 'explorer' },
+      },
+      { type: 'session.execution.started', data: { sessionID: 'child' } },
+      { type: 'session.execution.interrupted', data: { sessionID: 'child' } },
+    ]);
+    const record = board.get('child');
+    if (record?.completedAt === undefined)
+      throw new Error('interrupted outcome never published');
+    // The host distinguished an interruption from a failure; the board
+    // vocabulary for a stop without a plugin-verified cancel lease is
+    // the stop/cancel family — never a false 'error'.
+    expect(['stopped', 'cancelled']).toContain(record.state);
+    expect(record.state).not.toBe('error');
+    const published = capture.of('[terminal-gate] terminal published', 'child');
+    expect(published).toHaveLength(1);
+    expect(published[0]?.data).toMatchObject({
+      taskID: 'child',
+      attribution: 'host-outcome',
+      parentSessionID: 'parent',
+    });
+    expect(published[0]?.data).toMatchObject({ state: record.state });
+  } finally {
+    capture.restore();
+  }
+});
+
+test('guard: attributed failed outcome publishes error and carries the host error payload', async () => {
+  const capture = captureGateLogs();
+  try {
+    const probe = v2ShimClient({ outcome: 'failed' });
+    const board = await driveV2Lifecycle(probe, [
+      {
+        type: 'session.created',
+        data: { sessionID: 'child', parentID: 'parent', agent: 'explorer' },
+      },
+      { type: 'session.execution.started', data: { sessionID: 'child' } },
+      {
+        type: 'session.execution.failed',
+        data: {
+          sessionID: 'child',
+          error: { message: 'host-side detonation payload' },
+        },
+      },
+    ]);
+    const record = board.get('child');
+    if (record?.completedAt === undefined)
+      throw new Error('failed outcome never published');
+    expect(record.state).toBe('error');
+    // The host's failure payload must reach the record's diagnostic
+    // surface (the summary the parent reconciles against), never be
+    // dropped in favor of a bare state label.
+    expect(record.resultSummary).toContain('host-side detonation payload');
+    const published = capture.of('[terminal-gate] terminal published', 'child');
+    expect(published).toHaveLength(1);
+    expect(published[0]?.data).toMatchObject({
+      taskID: 'child',
+      state: 'error',
+      parentSessionID: 'parent',
+    });
+  } finally {
+    capture.restore();
+  }
+});
+
+test('guard: without the hostOutcomeClock contract the attribution window never opens and nothing publishes', async () => {
+  const capture = captureGateLogs();
+  try {
+    const probe = v2ShimClient({ outcome: 'succeeded' });
+    // The gate is built WITHOUT `hostOutcomeClock: 'shared-unix-ms'`
+    // (the production wiring in src/index.ts is stripped by the
+    // fixture): the host and plugin clocks are then not declared
+    // comparable, so #1225's window must refuse to attribute even a
+    // fresh outcome — capability absence may not publish anything.
+    const board = await driveV2Lifecycle(
+      probe,
+      [
+        {
+          type: 'session.created',
+          data: {
+            sessionID: 'child',
+            parentID: 'parent',
+            agent: 'explorer',
+          },
+        },
+        {
+          type: 'session.execution.started',
+          data: { sessionID: 'child' },
+        },
+        {
+          type: 'session.execution.succeeded',
+          data: { sessionID: 'child' },
+        },
+      ],
+      { withoutHostOutcomeClock: true },
+    );
+    const attributions = capture.of(
+      '[terminal-gate] host-outcome attribution',
+      'child',
+    );
+    expect(attributions.length).toBeGreaterThan(0);
+    expect(attributions[attributions.length - 1]?.data).toMatchObject({
+      outcome: 'succeeded',
+      verdict: 'rejected',
+      reason: 'clock-not-comparable',
+    });
+    // Honest end state: the busy runtime observation is never
+    // contradicted (no polling capability on the shim host), so the
+    // board simply keeps deferring — running, never terminalized.
+    expect(board.get('child')?.state).toBe('running');
+    expect(board.get('child')?.completedAt).toBeUndefined();
+    expect(capture.of('[terminal-gate] terminal published', 'child')).toEqual(
+      [],
+    );
+  } finally {
+    capture.restore();
+  }
+});
+
+// probe: late-attributable outcome after exhaustion — dead end recorded; adjudication pending
+//
+// HONEST RESULT (fail — board stranded): the gate consults session.get
+// only twice in this scenario (initial inspect + one follow-up), then
+// never again — the busy runtime observation from the synthesized
+// status event is never contradicted (no polling capability on the
+// shim), and a rejected attribution leaves the busy defer path without
+// a retry timer. Neither a later idle pair (deduped by the continuous
+// idle guard, per the double-idle invariant) nor a later busy→idle
+// contrast cycle re-arms an outcome read. The board stays `running`
+// forever even with the outcome long since attributable.
+test.skip('probe: late-attributable outcome after exhaustion terminalizes the stranded board', async () => {
+  const capture = captureGateLogs();
+  try {
+    // The host commits its outcome on schedule, but session.get hides it
+    // for the first 12 reads — far beyond the gate's evidence retry
+    // budget (maxEvidenceRetries defaults to 3). The desired behavior:
+    // once the outcome becomes attributable, SOMETHING (a timer, a
+    // poll, a later reconcile trigger) picks it up and the board
+    // terminalizes instead of staying stranded post-exhaustion.
+    const probe = v2ShimClient({
+      outcome: 'succeeded',
+      hideOutcomeForReads: 12,
+    });
+    const board = await driveV2Lifecycle(probe, [
+      {
+        type: 'session.created',
+        data: { sessionID: 'child', parentID: 'parent', agent: 'explorer' },
+      },
+      { type: 'session.execution.started', data: { sessionID: 'child' } },
+      { type: 'session.execution.succeeded', data: { sessionID: 'child' } },
+    ]);
+    expect(board.get('child')?.state).toBe('completed');
   } finally {
     capture.restore();
   }
