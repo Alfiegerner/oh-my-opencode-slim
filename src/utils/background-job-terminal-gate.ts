@@ -1066,14 +1066,24 @@ export function createBackgroundJobTerminalGate(options: {
       );
     }
     const stable = now() - (value.quiescentSince ?? now()) >= graceMs;
-    if (
-      terminalOutcome &&
-      ['failed', 'interrupted', 'cancelled'].includes(terminalOutcome)
-    )
+    // Stop-family host outcomes are not failures: the host stopped the
+    // run (user interrupt/abort) without a plugin-verified cancel
+    // lease — the same stop policy as the absent-evidence branch below.
+    // Surfacing them as 'error' would report a user-stopped task as a
+    // false failure.
+    if (terminalOutcome === 'interrupted' || terminalOutcome === 'cancelled')
+      return commit(
+        token,
+        'stopped',
+        `Host reported outcome: ${terminalOutcome}.`,
+        undefined,
+        'host-outcome',
+      );
+    if (terminalOutcome === 'failed')
       return commit(
         token,
         'error',
-        `Host reported outcome: ${terminalOutcome}.`,
+        'Host reported outcome: failed.',
         undefined,
         'host-outcome',
       );

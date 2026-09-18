@@ -634,7 +634,9 @@ taskID:
   `updateStatus` semantics as the idle-reconciliation host-outcome path:
   `succeeded` requires usable final assistant text (otherwise the
   textless-completion diagnostics apply, per the #1115 precedent);
-  `failed`/`interrupted` settle as error with the host outcome recorded.
+  `failed` settles as error with the host outcome recorded; `interrupted`
+  is a host stop, not a failure, and settles as `stopped` (the stop
+  family — no plugin-verified cancel lease), never a false error.
 
 Related injection hardening: a remembered (possibly stale) processed
 completion skips *cleanly* — the fence check runs before the
