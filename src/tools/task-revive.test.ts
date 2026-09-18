@@ -23,6 +23,8 @@ const gates: BackgroundJobTerminalGate[] = [];
 function createTool(overrides?: {
   abort?: () => Promise<unknown>;
   status?: () => Promise<unknown>;
+  /** v2 hosts expose no session.status map at all (see client-shim.ts). */
+  omitStatus?: boolean;
   promptAsync?: () => Promise<unknown>;
   messages?: () => Promise<unknown>;
   revivedRunTracker?: {
@@ -43,7 +45,12 @@ function createTool(overrides?: {
   const input = {
     directory: '/test/project',
     client: {
-      session: { abort, status, promptAsync, messages: overrides?.messages },
+      session: {
+        abort,
+        status: overrides?.omitStatus ? undefined : status,
+        promptAsync,
+        messages: overrides?.messages,
+      },
     },
   } as never;
   const terminalGate = createBackgroundJobTerminalGate({
@@ -386,6 +393,32 @@ describe('task_revive tool', () => {
         state: 'running',
       });
     }
+  });
+
+  test('revives a stopped session on a v2 host with no live session-status map', async () => {
+    // Regression: v2 hosts omit session.status entirely (client-shim.ts).
+    // getRuntimeSessionStatusSnapshot always errors without that method,
+    // and task_revive used to treat any such error as unverifiable and
+    // permanently refuse to revive on v2. The board's own event-driven
+    // generation fencing is the only liveness signal v2 provides, so the
+    // live-map check must be skipped, not turned into a hard failure.
+    const { board, status, promptAsync, taskRevive } = createTool({
+      omitStatus: true,
+    });
+    stoppedSession(board);
+
+    const output = await taskRevive.execute(
+      { task_id: 'ses_1', prompt: 'continue from the retained session' },
+      context,
+    );
+
+    expect(status).not.toHaveBeenCalled();
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    expect(String(output)).toContain('state: running');
+    expect(board.get('ses_1')).toMatchObject({
+      generation: 2,
+      state: 'running',
+    });
   });
 
   test('refuses to relaunch when a late busy revives the generation during baseline capture', async () => {
