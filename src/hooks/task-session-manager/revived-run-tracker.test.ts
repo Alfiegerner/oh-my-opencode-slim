@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, mock, test } from 'bun:test';
+import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { BackgroundJobBoard } from '../../utils/background-job-fixture';
 import {
   type BackgroundJobTerminalGate,
   createBackgroundJobTerminalGate,
 } from '../../utils/background-job-terminal-gate';
 import { SLIM_INTERNAL_INITIATOR_MARKER } from '../../utils/internal-initiator';
+import * as opencodeClient from '../../utils/opencode-client';
 import { createRevivedRunTracker } from './revived-run-tracker';
 
 const gates: BackgroundJobTerminalGate[] = [];
@@ -25,6 +26,10 @@ function createHarness(
     }>;
   } = {},
 ) {
+  // Other suites install process-global getClient mocks; restore in afterEach.
+  spyOn(opencodeClient, 'getClient').mockImplementation(
+    (input) => input.client,
+  );
   const board = new BackgroundJobBoard();
   board.registerLaunch({
     taskID: 'ses_child',
@@ -83,6 +88,8 @@ function createHarness(
       tracker.baselineFor(taskID, generation),
     observationRevisionFor: (taskID, generation) =>
       tracker.revisionFor(taskID, generation),
+    attemptStartedAtFor: (taskID, generation) =>
+      tracker.attemptStartedAtFor(taskID, generation),
     isObservationPending: (taskID, generation) =>
       tracker.isObservationPending(taskID, generation),
     graceMs: options.stabilizationProbeDelayMs ?? 150,
@@ -144,6 +151,7 @@ afterEach(() => {
   for (const gate of gates.splice(0)) gate.dispose();
   globalThis.setTimeout = realSetTimeout;
   globalThis.clearTimeout = realClearTimeout;
+  mock.restore();
 });
 
 describe('revived run tracker', () => {
@@ -1188,7 +1196,13 @@ describe('revived run tracker', () => {
     ).toBe(true);
     expect(harness.tracker.isObservationPending('ses_child', gen)).toBe(true);
 
+    const attemptStart = harness.tracker.attemptStartedAtFor('ses_child', gen);
+    expect(typeof attemptStart).toBe('number');
+    await new Promise((resolve) => setTimeout(resolve, 2));
     expect(harness.tracker.admitObservation('ses_child', gen)).toBe(true);
+    expect(harness.tracker.attemptStartedAtFor('ses_child', gen)).toBe(
+      attemptStart,
+    );
     expect(harness.tracker.isTracked('ses_child', gen)).toBe(true);
     expect(harness.tracker.isObservationPending('ses_child', gen)).toBe(false);
 
@@ -1244,7 +1258,12 @@ describe('revived run tracker', () => {
     // First expiry promotes; the unresolved-admission bound is a second
     // window of the same length. Assert the fenced promoted state in
     // between, then admit before that bound lifts.
+    const attemptStart = harness.tracker.attemptStartedAtFor('ses_child', gen);
     await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(harness.tracker.attemptStartedAtFor('ses_child', gen)).toBe(
+      attemptStart,
+    );
+    const revision = harness.tracker.revisionFor('ses_child', gen);
     expect(harness.tracker.isTracked('ses_child', gen)).toBe(true);
     expect(harness.tracker.isObservationPending('ses_child', gen)).toBe(true);
     expect(harness.board.get('ses_child')?.state).toBe('running');
@@ -1252,6 +1271,10 @@ describe('revived run tracker', () => {
     // The late acceptance resolves it and fires the delivering probe.
     resultReady = true;
     expect(harness.tracker.admitObservation('ses_child', gen)).toBe(true);
+    expect(harness.tracker.attemptStartedAtFor('ses_child', gen)).toBe(
+      attemptStart,
+    );
+    expect(harness.tracker.revisionFor('ses_child', gen)).toBe(revision);
     expect(harness.tracker.isObservationPending('ses_child', gen)).toBe(false);
     await flushNotify();
     expect(harness.board.get('ses_child')?.state).toBe('completed');

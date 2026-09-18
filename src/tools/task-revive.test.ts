@@ -32,6 +32,8 @@ function createTool(overrides?: {
   status?: () => Promise<unknown>;
   /** v2 hosts expose no session.status map at all (see client-shim.ts). */
   omitStatus?: boolean;
+  /** v2 wait capability injected as experimental_v2.waitForSessionIdle. */
+  waitIdle?: () => Promise<void>;
   promptAsync?: () => Promise<unknown>;
   messages?: () => Promise<unknown>;
   baselineTimeoutMs?: number;
@@ -45,8 +47,10 @@ function createTool(overrides?: {
     overrides?.status ?? (async () => ({ data: { ses_1: { type: 'idle' } } })),
   );
   const promptAsync = mock(overrides?.promptAsync ?? (async () => ({})));
+  const waitIdle = overrides?.waitIdle ? mock(overrides.waitIdle) : undefined;
   const input = {
     directory: '/test/project',
+    ...(waitIdle ? { experimental_v2: { waitForSessionIdle: waitIdle } } : {}),
     client: {
       session: {
         abort,
@@ -95,6 +99,7 @@ function createTool(overrides?: {
     board,
     abort,
     status,
+    waitIdle,
     promptAsync,
     revivedRunTracker,
     onLaunch,
@@ -594,13 +599,14 @@ describe('task_revive tool', () => {
 
   test('revives a stopped session on a v2 host with no live session-status map', async () => {
     // Regression: v2 hosts omit session.status entirely (client-shim.ts).
-    // getRuntimeSessionStatusSnapshot always errors without that method,
-    // and task_revive used to treat any such error as unverifiable and
-    // permanently refuse to revive on v2. The board's own event-driven
-    // generation fencing is the only liveness signal v2 provides, so the
-    // live-map check must be skipped, not turned into a hard failure.
-    const { board, status, promptAsync, taskRevive } = createTool({
+    // Revive must not depend on the v1 status map: with no map, the tool
+    // verifies quiescence through the experimental_v2.waitForSessionIdle
+    // capability instead. That supersedes the skip-verification approach
+    // merged in #1221; a host with neither capability refuses clearly
+    // before any abort or prompt (see task-control-conformance tests).
+    const { board, status, waitIdle, promptAsync, taskRevive } = createTool({
       omitStatus: true,
+      waitIdle: async () => {},
     });
     stoppedSession(board);
 
@@ -610,6 +616,7 @@ describe('task_revive tool', () => {
     );
 
     expect(status).not.toHaveBeenCalled();
+    expect(waitIdle).toHaveBeenCalledTimes(1);
     expect(promptAsync).toHaveBeenCalledTimes(1);
     expect(String(output)).toContain('state: running');
     expect(board.get('ses_1')).toMatchObject({

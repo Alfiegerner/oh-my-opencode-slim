@@ -427,10 +427,56 @@ describe('mapV2EventToV1 live wire shape (payload under `data`)', () => {
     expect(out.slice(1)).toEqual([
       {
         type: 'session.status',
-        properties: { sessionID: 'ses_live', status: { type: 'busy' } },
+        properties: {
+          sessionID: 'ses_live',
+          status: { type: 'busy' },
+          activityAt: 1_788_961_637_000,
+        },
       },
     ]);
   });
+
+  test.each([0, 1_788_961_637_000])(
+    'live execution.started preserves a valid envelope `created` as activityAt: %d',
+    (created) => {
+      const ev = {
+        ...liveEvent('session.execution.started', { sessionID: 'ses_live' }),
+        created,
+      };
+      const out = mapV2EventToV1(ev);
+      expect(out[0]).toBe(ev);
+      expect(out[1]).toEqual({
+        type: 'session.status',
+        properties: {
+          sessionID: 'ses_live',
+          status: { type: 'busy' },
+          activityAt: created,
+        },
+      });
+    },
+  );
+
+  test.each([
+    undefined,
+    null,
+    'nope',
+    -1,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+  ])(
+    'live execution.started without a usable `created` synthesizes no receipt time: %j',
+    (created) => {
+      const ev = {
+        ...liveEvent('session.execution.started', { sessionID: 'ses_live' }),
+        created,
+      };
+      const out = mapV2EventToV1(ev);
+      expect(out[1]).toEqual({
+        type: 'session.status',
+        properties: { sessionID: 'ses_live', status: { type: 'busy' } },
+      });
+    },
+  );
 
   test('live session.created (flat `data` fields incl. parentID) maps to the v1 early-registration shape', () => {
     // Shape captured from a live v2 host: a subagent child

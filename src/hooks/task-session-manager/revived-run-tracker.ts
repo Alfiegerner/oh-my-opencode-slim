@@ -43,6 +43,7 @@ type RevivedRun = {
   generation: number;
   parentSessionID: string;
   baselineMessageID?: string;
+  readonly attemptStartedAt: number;
   description: string;
   /** Monotonic observation identity: incremented on every
    * registration so evidence consumers can fence a snapshot against a
@@ -65,6 +66,7 @@ export interface RevivedRunTracker {
     generation: number;
     parentSessionID: string;
     baselineMessageID?: string;
+    attemptStartedAt?: number;
     description: string;
   }): void;
   isTracked(taskID: string, generation: number): boolean;
@@ -72,6 +74,7 @@ export interface RevivedRunTracker {
    * (stop gate) can attribute the trailing answer to THIS run instead of
    * a substituted attempt. Undefined for untracked/stale generations. */
   baselineFor(taskID: string, generation: number): string | undefined;
+  attemptStartedAtFor(taskID: string, generation: number): number | undefined;
   probe(taskID: string, generation: number): Promise<boolean>;
   onTerminal(record: BackgroundJobRecord): void;
   /** Fallback observation handoff: prepare before the admission await
@@ -406,6 +409,7 @@ export function createRevivedRunTracker(options: {
     generation: number;
     parentSessionID: string;
     baselineMessageID?: string;
+    attemptStartedAt?: number;
     description: string;
   }): void {
     // External registration (e.g. task_revive) supersedes any pending
@@ -430,6 +434,13 @@ export function createRevivedRunTracker(options: {
     return run.baselineMessageID;
   };
 
+  const attemptStartedAtFor = (taskID: string, generation: number) => {
+    const attempt = pendingHandoffs.get(taskID) ?? runs.get(taskID);
+    return attempt?.generation === generation
+      ? attempt.attemptStartedAt
+      : undefined;
+  };
+
   // --- Fallback observation handoff -----------------------------------
   // A prepared handoff fences the stop gate from publishing a terminal
   // state while a fallback's admission await is still pending: the job
@@ -450,6 +461,7 @@ export function createRevivedRunTracker(options: {
       generation: number;
       parentSessionID: string;
       baselineMessageID?: string;
+      readonly attemptStartedAt: number;
       description: string;
       state: 'pending' | 'promoted';
       expiryTimer?: ReturnType<typeof setTimeout>;
@@ -484,12 +496,14 @@ export function createRevivedRunTracker(options: {
     generation: number;
     parentSessionID: string;
     baselineMessageID?: string;
+    attemptStartedAt?: number;
     description: string;
   }): void {
     const old = runs.get(input.taskID);
     if (old?.notification.retryTimer) clearTimeout(old.notification.retryTimer);
     runs.set(input.taskID, {
       ...input,
+      attemptStartedAt: input.attemptStartedAt ?? Date.now(),
       revision: ++revisionSequence,
       notification: { attempts: 0, sent: false, pending: false },
     });
@@ -548,6 +562,7 @@ export function createRevivedRunTracker(options: {
       generation: pending.generation,
       parentSessionID: pending.parentSessionID,
       baselineMessageID: pending.baselineMessageID,
+      attemptStartedAt: pending.attemptStartedAt,
       description: pending.description,
     });
     // The re-prompt may already be persisted (admission is async): own
@@ -593,6 +608,7 @@ export function createRevivedRunTracker(options: {
       generation: input.generation,
       parentSessionID: input.parentSessionID,
       baselineMessageID: input.baselineMessageID,
+      attemptStartedAt: Date.now(),
       description: input.description,
       state: 'pending',
       expiryTimer,
@@ -632,6 +648,7 @@ export function createRevivedRunTracker(options: {
       generation,
       parentSessionID: pending.parentSessionID,
       baselineMessageID: pending.baselineMessageID,
+      attemptStartedAt: pending.attemptStartedAt,
       description: pending.description,
     });
     // Immediate probe: the re-prompt admission is async — if the
@@ -675,6 +692,7 @@ export function createRevivedRunTracker(options: {
     register,
     isTracked,
     baselineFor,
+    attemptStartedAtFor,
     probe,
     onTerminal,
     prepareObservation,

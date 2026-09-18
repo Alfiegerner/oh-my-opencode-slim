@@ -571,6 +571,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       input: ctx,
       baselineFor: (taskID, generation) =>
         revivedRunTracker?.baselineFor(taskID, generation),
+      // Local in-process integration: host and plugin timestamps share Unix ms.
+      hostOutcomeClock: 'shared-unix-ms',
+      attemptStartedAtFor: (taskID, generation) =>
+        revivedRunTracker?.attemptStartedAtFor(taskID, generation),
       observationRevisionFor: (taskID, generation) =>
         revivedRunTracker?.revisionFor(taskID, generation),
       isObservationPending: (taskID, generation) =>

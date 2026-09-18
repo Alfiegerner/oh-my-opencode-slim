@@ -99,6 +99,13 @@ recovery of the taskID's exclusion. The model-identity lookup is a separate read
 its timeout signals cancellation of the lookup and releases the lease even if that read never
 settles, because no message write has started.
 
+On v2, `task_message` inherits the session's persisted agent/model/variant instead
+of reading and pinning selection per call; v1 retains its authoritative lookup.
+The v2 write uses `delivery: "queue", resume: false`: it updates the transcript
+without scheduling execution, never via a synthetic message or selection switch.
+Host errors are not retried with weaker semantics. A pending write still retains
+its message lease after timeout; this change does not alter that quarantine.
+
 `task_revive` resumes a retained session with a new instruction. A cancelled,
 errored, or stopped retained session may be revived immediately once its
 retained state has been verified safe. Acknowledgement controls parent and
@@ -136,6 +143,24 @@ purged, so future queued execution remains uncertain even after lease release.
 
 `task()` refuses an explicit `task_id` it cannot resume instead of dropping it
 and spawning another session.
+
+Revive checks for an idle-verification mechanism before aborting an active child:
+the live status map on v1, or the host's idle wait on v2. Missing capability fails
+before abort, baseline capture, or prompt; retrying cannot supply that capability.
+The v2 wait has a 5-second local budget. Timeout, rejection, invalid completion,
+or completion processed after the deadline sends no prompt and releases the
+preparation lease. A late settlement does not resume the finished revive flow.
+Waiting is not an instantaneous snapshot: it may wait for a busy child to idle,
+and cannot prevent an independent resume after verification. The final board
+ownership/activity guard and queued delivery remain in force.
+
+An accepted revive can return `status: started` with `status_uncertain: true` and
+an observation diagnostic. A historical or unattributable `session.get` outcome
+is not a failure of the new generation, on either v1 or v2. Attribution uses the
+admission boundary (not its delayed ACK), the current observation attempt and
+the latest live activity. Uncertainty alone never becomes terminal on retry
+exhaustion; existing events/probes and independent valid evidence can resolve it,
+but there is no guaranteed recovery deadline.
 
 `wait_for_user` is also orchestrator-only. The orchestrator uses it as the final
 tool action after providing concrete instructions for external manual work. Its

@@ -163,3 +163,40 @@ type _sessionInterruptResume = Expect<
 type _sessionInterruptContinueGone = Expect<
   Equal<'continue' extends keyof SessionInterruptInput ? true : false, false>
 >;
+
+/** Admission without resuming and idle verification are distinct contracts. */
+type SessionPromptInput = Parameters<SessionDomain['prompt']>[0];
+type MirrorPromptInput = Parameters<
+  NonNullable<V2Context['session']['prompt']>
+>[0];
+type _sessionPromptResume = Expect<
+  Equal<SessionPromptInput['resume'], boolean | null | undefined>
+>;
+type _sessionPromptDelivery = Expect<
+  Equal<SessionPromptInput['delivery'], 'steer' | 'queue' | null | undefined>
+>;
+/** The mirror emits only the non-null subset of the official optional fields. */
+type _promptMirrorIntent = Expect<
+  Equal<
+    [MirrorPromptInput['resume'], MirrorPromptInput['delivery']],
+    [
+      Exclude<SessionPromptInput['resume'], null>,
+      Exclude<SessionPromptInput['delivery'], null>,
+    ]
+  >
+>;
+type _waitMirrorInput = Expect<
+  Equal<
+    Readonly<Parameters<NonNullable<V2Context['session']['wait']>>[0]>,
+    Parameters<SessionDomain['wait']>[0]
+  >
+>;
+type _sessionWaitCompletion = Expect<
+  Equal<ReturnType<SessionDomain['wait']>, Promise<void>>
+>;
+type _waitMirrorCompletion = Expect<
+  Equal<
+    ReturnType<NonNullable<V2Context['session']['wait']>>,
+    ReturnType<SessionDomain['wait']>
+  >
+>;
