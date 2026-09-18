@@ -77,6 +77,28 @@ After abort settles, verification has its own time budget. The v2 session-info
 read uses only the remaining budget: timeout leaves the task uncertain and
 releases the lease without confirming cancellation or consuming late evidence.
 
+`task_message` retains its per-task message lease when the local timeout expires
+but the write transport is still pending. `noReply: true` prevents starting a
+turn, not mutating the transcript: a delayed update, including its captured
+agent/model/variant, could otherwise alter the context of a reused generation.
+A timeout does not prove that the message was not delivered.
+
+Until the write settles, the lease excludes further messages, cancellation via
+`task_cancel`, same-session revival/reuse, and lease-protected terminal
+notifications for that taskID. If the write never settles, this control-plane
+exclusion persists indefinitely; no automatic recovery is promised. It does not
+stop the child from executing or block other taskIDs, and results can still arrive
+through other observation/result paths. Settlement, whether success or failure,
+releases the token. There is no TTL or `session.abort` rollback for this write.
+
+This is local exclusion among operations following the board's lease protocol,
+not isolation from external actions or an exactly-once delivery guarantee.
+Removing a job with `board.drop` or `clearParent` does not retire its lease:
+`liveLeases` is independent of `jobs`, so deleting the record does not guarantee
+recovery of the taskID's exclusion. The model-identity lookup is a separate read:
+its timeout signals cancellation of the lookup and releases the lease even if that read never
+settles, because no message write has started.
+
 On v2, `task_message` inherits the session's persisted agent/model/variant instead
 of reading and pinning selection per call; v1 retains its authoritative lookup.
 The v2 write uses `delivery: "queue", resume: false`: it updates the transcript
