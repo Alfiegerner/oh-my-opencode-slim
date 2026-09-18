@@ -299,7 +299,12 @@ latest live activity) < time.idle <= read completion`; equality is ambiguous.
 Attempt boundaries survive handoff promotion and late ACKs. An unattributable
 outcome cannot establish or preserve host-outcome quiescence; it leaves the run
 uncertain, not stopped. Fresh `succeeded` still requires valid post-baseline result
-evidence. Independent runtime maps, native returns and cancellation keep their fences.
+evidence — except on hosts that expose no transcript source at all (no callable
+`session.messages`), where a window-attributed `succeeded` publishes `completed`
+from the host outcome alone (attribution `host-outcome`): capability absence is a
+dead end, never a pending transcript, and a host whose transcript is present but
+unfinalized keeps waiting exactly as on v1. Independent runtime maps, native
+returns and cancellation keep their fences.
 
 ## Feature matrix
 

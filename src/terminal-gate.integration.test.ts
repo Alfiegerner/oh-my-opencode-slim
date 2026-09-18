@@ -7,6 +7,7 @@ import type { BackgroundJobRecord } from './utils/background-job-board';
 import type { BackgroundJobCoordinator } from './utils/background-job-coordinator';
 import * as gateFactories from './utils/background-job-terminal-gate';
 import { BackgroundTaskConcurrency } from './utils/background-task-concurrency';
+import * as loggerModule from './utils/logger';
 import { mapV2EventToV1 } from './v2/event-adapter';
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -615,9 +616,17 @@ interface V2HostProbe {
    * execution event (live-verified: outcome already set at idle). */
   commitTerminalOutcome(idleAt: number): void;
   readonly get: ReturnType<typeof mock>;
+  /** Present ONLY on hosts that expose a transcript source; the
+   * starving shim shape (live incident) has none at all. */
+  readonly messages?: ReturnType<typeof mock>;
 }
 
-function v2ShimClient(options: { outcome: string }): V2HostProbe {
+function v2ShimClient(options: {
+  outcome: string;
+  /** Transcript source: a host that exposes `session.messages`.
+   * Omitted by default — honest method absence on the session. */
+  transcript?: () => unknown;
+}): V2HostProbe {
   const host = {
     outcome: options.outcome,
     idleAt: undefined as number | undefined,
@@ -636,11 +645,15 @@ function v2ShimClient(options: { outcome: string }): V2HostProbe {
             },
     }),
   );
-  // Shim shape: ONLY session.get. `session` is a plain object so the
-  // absent methods stay absent (capability probes must see honest
-  // absence, never an auto-filled stub); other client domains still
-  // degrade through the outer proxy like the v1 assembly default.
-  const session = { get };
+  const messages = options.transcript
+    ? mock(async (_args: unknown): Promise<unknown> => options.transcript?.())
+    : undefined;
+  // Shim shape: ONLY session.get (plus the optional transcript source).
+  // `session` is a plain object so absent methods stay absent (capability
+  // probes must see honest absence, never an auto-filled stub); other
+  // client domains still degrade through the outer proxy like the v1
+  // assembly default.
+  const session = { get, ...(messages ? { messages } : {}) };
   const client = new Proxy(
     { session, app: { log: async () => ({}) } },
     {
@@ -652,6 +665,7 @@ function v2ShimClient(options: { outcome: string }): V2HostProbe {
   return {
     client,
     get,
+    ...(messages ? { messages } : {}),
     commitTerminalOutcome(idleAt: number) {
       host.idleAt = idleAt;
     },
@@ -720,16 +734,149 @@ async function driveV2Lifecycle(
   return h.board;
 }
 
-// verdict A: reproduces live starvation; un-skipped by the starvation-fix task
-test.skip('v2 lifecycle through the real adapter terminalizes a completed child', async () => {
-  const probe = v2ShimClient({ outcome: 'succeeded' });
-  const board = await driveV2Lifecycle(probe, [
-    {
-      type: 'session.created',
-      data: { sessionID: 'child', parentID: 'parent', agent: 'explorer' },
+// verdict A (un-skipped by the starvation-fix task): reproduces the live
+// v2 starvation — attributed host success + no transcript source.
+test('v2 lifecycle through the real adapter terminalizes a completed child', async () => {
+  const capture = captureGateLogs();
+  try {
+    const probe = v2ShimClient({ outcome: 'succeeded' });
+    const board = await driveV2Lifecycle(probe, [
+      {
+        type: 'session.created',
+        data: { sessionID: 'child', parentID: 'parent', agent: 'explorer' },
+      },
+      { type: 'session.execution.started', data: { sessionID: 'child' } },
+      { type: 'session.execution.succeeded', data: { sessionID: 'child' } },
+    ]);
+    expect(board.get('child')).toMatchObject({
+      state: 'completed',
+      resultSummary: 'Host reported outcome: succeeded.',
+    });
+    // The publication must flow through the instrumented commit path:
+    // Task 2's INFO log with host-outcome attribution.
+    const published = capture.of('[terminal-gate] terminal published', 'child');
+    expect(published).toHaveLength(1);
+    expect(published[0]?.data).toMatchObject({
+      taskID: 'child',
+      state: 'completed',
+      attribution: 'host-outcome',
+      parentSessionID: 'parent',
+    });
+  } finally {
+    capture.restore();
+  }
+});
+
+// ── Starvation-fix guards (fences around the early-publish path) ──
+//
+// The fix commits `completed` from a window-attributed host success ONLY
+// when the transcript SOURCE is absent (capability: no session.messages).
+// Source-unavailable ≠ pending: a host that HAS a source whose transcript
+// is still unfinalized must keep waiting exactly as before, and an
+// outcome the #1225 window cannot attribute to this run authorizes
+// nothing even with no transcript source at all.
+
+function captureGateLogs() {
+  const entries: Array<{ message: string; data: unknown }> = [];
+  const spy = spyOn(loggerModule, 'log').mockImplementation(
+    (message: string, data?: unknown) => {
+      entries.push({ message, data });
     },
-    { type: 'session.execution.started', data: { sessionID: 'child' } },
-    { type: 'session.execution.succeeded', data: { sessionID: 'child' } },
-  ]);
-  expect(board.get('child')?.state).toBe('completed');
+  );
+  return {
+    of: (message: string, taskID: string) =>
+      entries.filter(
+        (entry) =>
+          entry.message === message &&
+          (entry.data as { taskID?: string } | undefined)?.taskID === taskID,
+      ),
+    restore: () => spy.mockRestore(),
+  };
+}
+
+test('guard: attributed success with a real pending transcript never early-publishes', async () => {
+  const capture = captureGateLogs();
+  try {
+    // The ONLY capability delta from the starving shim: this host
+    // exposes a transcript source. Its transcript is genuinely
+    // unfinalized (trailing assistant still on tool-calls), so no
+    // amount of waiting could ever justify inventing a result.
+    const probe = v2ShimClient({
+      outcome: 'succeeded',
+      transcript: () => ({
+        data: [
+          {
+            info: { id: 'turn', role: 'assistant', finish: 'tool-calls' },
+            parts: [{ type: 'text', text: 'streaming' }],
+          },
+        ],
+      }),
+    });
+    const board = await driveV2Lifecycle(probe, [
+      {
+        type: 'session.created',
+        data: { sessionID: 'child', parentID: 'parent', agent: 'explorer' },
+      },
+      { type: 'session.execution.started', data: { sessionID: 'child' } },
+      { type: 'session.execution.succeeded', data: { sessionID: 'child' } },
+    ]);
+    // The source was consulted and the host outcome WAS attributed
+    // (accepted, succeeded) — the guard is not accidentally passing
+    // because the outcome read never happened.
+    expect(probe.messages).toHaveBeenCalled();
+    const attributions = capture.of(
+      '[terminal-gate] host-outcome attribution',
+      'child',
+    );
+    expect(attributions.length).toBeGreaterThan(0);
+    expect(attributions[attributions.length - 1]?.data).toMatchObject({
+      outcome: 'succeeded',
+      verdict: 'accepted',
+    });
+    // ...and still nothing may publish off a pending transcript.
+    expect(board.get('child')?.state).toBe('running');
+    expect(capture.of('[terminal-gate] terminal published', 'child')).toEqual(
+      [],
+    );
+  } finally {
+    capture.restore();
+  }
+});
+
+test('guard: unattributable succeeded outcome with no transcript source publishes nothing', async () => {
+  const capture = captureGateLogs();
+  try {
+    const probe = v2ShimClient({ outcome: 'succeeded' });
+    const hostCommit = probe.commitTerminalOutcome;
+    // The host committed its success well before this run started (a
+    // historical idle): the #1225 window must reject it, and capability
+    // absence may not substitute for attribution.
+    const historical = {
+      ...probe,
+      commitTerminalOutcome: (idleAt: number) => hostCommit(idleAt - 60_000),
+    };
+    const board = await driveV2Lifecycle(historical, [
+      {
+        type: 'session.created',
+        data: { sessionID: 'child', parentID: 'parent', agent: 'explorer' },
+      },
+      { type: 'session.execution.started', data: { sessionID: 'child' } },
+      { type: 'session.execution.succeeded', data: { sessionID: 'child' } },
+    ]);
+    const attributions = capture.of(
+      '[terminal-gate] host-outcome attribution',
+      'child',
+    );
+    expect(attributions.length).toBeGreaterThan(0);
+    expect(attributions[attributions.length - 1]?.data).toMatchObject({
+      verdict: 'rejected',
+      reason: 'idle-not-after-window-lower',
+    });
+    expect(board.get('child')?.state).toBe('running');
+    expect(capture.of('[terminal-gate] terminal published', 'child')).toEqual(
+      [],
+    );
+  } finally {
+    capture.restore();
+  }
 });

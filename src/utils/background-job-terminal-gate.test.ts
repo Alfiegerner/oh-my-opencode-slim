@@ -273,6 +273,12 @@ describe('terminal gate', () => {
             get: async () => ({
               data: { outcome: 'succeeded', time: { idle } },
             }),
+            // Source-present host: the early-publish path for an
+            // absent transcript source must stay out of this test —
+            // its subject is the stale-quiescence aging guard, and a
+            // source-absent host would (correctly) publish completed
+            // on the first reconcile below.
+            messages: async () => ({ data: [] }),
           },
         },
       } as never,
@@ -351,7 +357,7 @@ describe('terminal gate', () => {
       terminalRevision: 0,
     });
   });
-  test('an attributable succeeded without transcript evidence never publishes', async () => {
+  test('an attributable succeeded publishes completed when the transcript source is absent', async () => {
     const h = harness({
       hostOutcomeClock: 'shared-unix-ms',
       baselineFor: () => undefined,
@@ -359,6 +365,9 @@ describe('terminal gate', () => {
       input: {
         client: {
           session: {
+            // No session.messages: capability absence. The undefined
+            // evidence read is a dead end, not a pending transcript,
+            // so the window-attributed success publishes completed.
             get: async () => ({
               data: { outcome: 'succeeded', time: { idle: 50 } },
             }),
@@ -370,8 +379,9 @@ describe('terminal gate', () => {
     h.advance(61);
     await h.gate.reconcile(h.run);
     expect(h.board.get(h.run.taskID)).toMatchObject({
-      state: 'running',
-      terminalRevision: 0,
+      state: 'completed',
+      terminalRevision: 1,
+      resultSummary: 'Host reported outcome: succeeded.',
     });
   });
   test('board rejects freely fabricated terminal authorization', async () => {

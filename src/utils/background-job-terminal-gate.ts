@@ -939,6 +939,14 @@ export function createBackgroundJobTerminalGate(options: {
     }
     if (signal?.kind === 'session-error')
       return commit(token, 'error', signal.message);
+    // Capability absence, not a pending read: fetchChildTranscript
+    // resolves undefined ONLY when the host exposes no session.messages
+    // endpoint. A host that HAS the source keeps its pending/textless
+    // retry semantics — a timed-out or failed read there is transient
+    // and must never masquerade as source absence.
+    const transcriptSourceAbsent =
+      options.input !== undefined &&
+      typeof getClient(options.input)?.session?.messages !== 'function';
     const transcriptRead = await read(`transcript:${run.taskID}`, token, () =>
       options.readTerminalEvidence
         ? options.readTerminalEvidence(run.taskID)
@@ -1065,6 +1073,28 @@ export function createBackgroundJobTerminalGate(options: {
       return commit(
         token,
         'error',
+        `Host reported outcome: ${terminalOutcome}.`,
+        undefined,
+        'host-outcome',
+      );
+    // A host that exposes no transcript source can never produce
+    // transcript evidence — the 'transcript source unavailable' retry
+    // verdict is a dead end, not a pending read. With the #1225 window
+    // already attributing the outcome to this run, a succeeded outcome
+    // publishes through the same host-outcome commit path as the error
+    // family. Guards: the transcript source must be genuinely absent
+    // (a present-but-unfinalized transcript keeps waiting exactly as
+    // before), and only the window-attributed terminalOutcome reaches
+    // here — an unattributable success publishes nothing.
+    if (
+      terminalOutcome === 'succeeded' &&
+      transcriptSourceAbsent &&
+      evidence.verdict === 'retry' &&
+      evidence.reason === 'transcript source unavailable'
+    )
+      return commit(
+        token,
+        'completed',
         `Host reported outcome: ${terminalOutcome}.`,
         undefined,
         'host-outcome',
