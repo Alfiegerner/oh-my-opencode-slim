@@ -66,14 +66,16 @@ function harness(
   const observe = (
     kind: 'busy' | 'quiescent' | 'unknown' | 'deleted',
     stable = false,
+    observedAt?: number,
   ) => {
     const token = gate.capture(run);
     if (!token) throw new Error('missing observation');
     return gate.observe(token, {
       kind,
       readStartedAt: token.readStartedAt,
-      origin: 'test',
+      origin: observedAt === undefined ? 'test' : 'session.status-event',
       stable,
+      ...(observedAt !== undefined ? { observedAt } : {}),
     });
   };
   return {
@@ -286,6 +288,88 @@ describe('terminal gate', () => {
     expect(h.board.get(h.run.taskID)).toMatchObject({
       state: 'running',
       statusUncertain: true,
+      terminalRevision: 0,
+    });
+  });
+  test('a host-timestamped busy keeps the short run outcome attributable', async () => {
+    const h = harness({
+      hostOutcomeClock: 'shared-unix-ms',
+      baselineFor: () => undefined,
+      readTerminalEvidence: async () => undefined,
+      input: {
+        client: {
+          session: {
+            get: async () => ({
+              data: { outcome: 'failed', time: { idle: 50 } },
+            }),
+          },
+        },
+      } as never,
+    });
+    // start host=10 < idle=50 < receipt 60. The adapter preserves the
+    // envelope `created`, so the delayed queued busy carries the host time
+    // and cannot fence the run's own outcome. failed publishes without
+    // transcript text.
+    h.advance(60);
+    h.observe('busy', false, 10);
+    h.advance(61);
+    h.observe('quiescent');
+    await h.gate.reconcile(h.run);
+    expect(h.board.get(h.run.taskID)).toMatchObject({
+      state: 'error',
+      resultSummary: 'Host reported outcome: failed.',
+      statusUncertain: false,
+    });
+  });
+  test('a real resume after a delayed busy still fences the stale outcome', async () => {
+    const h = harness({
+      hostOutcomeClock: 'shared-unix-ms',
+      baselineFor: () => undefined,
+      readTerminalEvidence: async () => undefined,
+      input: {
+        client: {
+          session: {
+            get: async () => ({
+              data: { outcome: 'failed', time: { idle: 50 } },
+            }),
+          },
+        },
+      } as never,
+    });
+    // The same failed outcome with an independently resumed run observed at
+    // host time 55: the outcome predates live activity and must not publish.
+    h.advance(60);
+    h.observe('busy', false, 10);
+    h.advance(62);
+    h.observe('busy', false, 55);
+    h.advance(63);
+    h.observe('quiescent');
+    await h.gate.reconcile(h.run);
+    expect(h.board.get(h.run.taskID)).toMatchObject({
+      state: 'running',
+      terminalRevision: 0,
+    });
+  });
+  test('an attributable succeeded without transcript evidence never publishes', async () => {
+    const h = harness({
+      hostOutcomeClock: 'shared-unix-ms',
+      baselineFor: () => undefined,
+      readTerminalEvidence: async () => undefined,
+      input: {
+        client: {
+          session: {
+            get: async () => ({
+              data: { outcome: 'succeeded', time: { idle: 50 } },
+            }),
+          },
+        },
+      } as never,
+    });
+    h.observe('quiescent');
+    h.advance(61);
+    await h.gate.reconcile(h.run);
+    expect(h.board.get(h.run.taskID)).toMatchObject({
+      state: 'running',
       terminalRevision: 0,
     });
   });
