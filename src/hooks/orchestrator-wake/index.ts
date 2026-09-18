@@ -1216,10 +1216,23 @@ export function createOrchestratorWakeScheduler(
     snapshot: WakeSnapshot,
     sessionID: string,
     recoveryWake: boolean,
+    checkpoint: 'initial' | 'recheck',
   ): SnapshotVerdict {
-    return snapshot.kind === 'children'
-      ? classifyChildrenSnapshot(snapshot, sessionID, recoveryWake)
-      : classifyTodoSnapshot(snapshot, sessionID, recoveryWake);
+    const verdict =
+      snapshot.kind === 'children'
+        ? classifyChildrenSnapshot(snapshot, sessionID, recoveryWake)
+        : classifyTodoSnapshot(snapshot, sessionID, recoveryWake);
+    // Observation only: every checkpoint classification lands in the log
+    // so a wake that is starved or wedged stays diagnosable.
+    log('[orchestrator-wake] evaluate verdict', {
+      sessionID,
+      verdict,
+      mode: snapshot.kind,
+      checkpoint,
+      recoveryWake,
+      childCount: snapshot.children.length,
+    });
+    return verdict;
   }
 
   function buildSnapshotFingerprint(snapshot: WakeSnapshot): string {
@@ -1299,7 +1312,7 @@ export function createOrchestratorWakeScheduler(
       if (
         !applySnapshotVerdict(
           sessionID,
-          classifySnapshot(snapshot, sessionID, recoveryWake),
+          classifySnapshot(snapshot, sessionID, recoveryWake, 'initial'),
         )
       ) {
         return;
@@ -1334,7 +1347,7 @@ export function createOrchestratorWakeScheduler(
       if (
         !applySnapshotVerdict(
           sessionID,
-          classifySnapshot(latest, sessionID, recoveryWake),
+          classifySnapshot(latest, sessionID, recoveryWake, 'recheck'),
         )
       ) {
         return;

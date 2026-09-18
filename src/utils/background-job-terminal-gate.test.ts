@@ -14,6 +14,7 @@ import {
 } from './background-job-terminal-gate';
 import { BackgroundTaskConcurrency } from './background-task-concurrency';
 import { classifyTerminalEvidence } from './child-transcript';
+import * as loggerModule from './logger';
 import { COMPLETED_WITHOUT_TEXT_DIAGNOSTIC } from './task';
 
 // Other test files mock the shared opencode-client module process-globally
@@ -1500,6 +1501,158 @@ describe('background reconcile failure containment', () => {
       expect(unhandled).toEqual([]);
     } finally {
       process.off('unhandledRejection', onUnhandled);
+    }
+  });
+});
+
+describe('terminal gate observability (INFO logs)', () => {
+  function captureLogs() {
+    const entries: Array<{ message: string; data: unknown }> = [];
+    const spy = spyOn(loggerModule, 'log').mockImplementation(
+      (message: string, data?: unknown) => {
+        entries.push({ message, data });
+      },
+    );
+    return {
+      entries,
+      of: (message: string) =>
+        entries.filter((entry) => entry.message === message),
+      restore: () => spy.mockRestore(),
+    };
+  }
+
+  test('host-outcome attribution attempt logs attempt number and attribution window', async () => {
+    const capture = captureLogs();
+    try {
+      let clock = 140;
+      const h = harness({
+        hostOutcomeClock: 'shared-unix-ms',
+        now: () => clock,
+        maxEvidenceRetries: 0,
+        baselineFor: () => undefined,
+        readTerminalEvidence: async () => ({ data: [] }),
+        input: {
+          client: {
+            session: {
+              get: async () => {
+                clock = 200;
+                return { data: { outcome: 'failed', time: { idle: 150 } } };
+              },
+            },
+          },
+        } as never,
+      });
+      const run = h.board.registerLaunch({
+        taskID: h.run.taskID,
+        parentSessionID: 'parent',
+        agent: 'fixer',
+        now: 100,
+      });
+      await h.gate.reconcile(run);
+      expect(
+        capture.of('[terminal-gate] host-outcome read initiated'),
+      ).toHaveLength(1);
+      const attempts = capture.of('[terminal-gate] host-outcome attribution');
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0]?.data).toMatchObject({
+        taskID: run.taskID,
+        generation: run.generation,
+        state: 'running',
+        attribution: 'host-outcome',
+        attempt: 0,
+        outcome: 'failed',
+        windowLower: 100,
+        windowUpper: 200,
+        verdict: 'accepted',
+      });
+      const published = capture.of('[terminal-gate] terminal published');
+      expect(published).toHaveLength(1);
+      expect(published[0]?.data).toMatchObject({
+        taskID: run.taskID,
+        generation: run.generation,
+        state: 'error',
+        attribution: 'host-outcome',
+        parentSessionID: 'parent',
+      });
+    } finally {
+      capture.restore();
+    }
+  });
+
+  test('rejected host-outcome attribution logs the rejection reason', async () => {
+    const capture = captureLogs();
+    try {
+      const h = harness({
+        hostOutcomeClock: 'shared-unix-ms',
+        baselineFor: () => undefined,
+        readTerminalEvidence: async () => ({ data: [] }),
+        input: {
+          client: {
+            session: {
+              get: async () => ({
+                data: { outcome: 'running', time: { idle: 150 } },
+              }),
+            },
+          },
+        } as never,
+      });
+      h.advance(200);
+      await h.gate.reconcile(h.run);
+      const attempts = capture.of('[terminal-gate] host-outcome attribution');
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0]?.data).toMatchObject({
+        taskID: h.run.taskID,
+        attribution: 'host-outcome',
+        attempt: 0,
+        verdict: 'rejected',
+        reason: 'unrecognized-outcome:running',
+      });
+    } finally {
+      capture.restore();
+    }
+  });
+
+  test('transcript publication logs transcript attribution', async () => {
+    const capture = captureLogs();
+    try {
+      const h = harness();
+      h.observe('quiescent');
+      await h.gate.reconcile(h.run);
+      const published = capture.of('[terminal-gate] terminal published');
+      expect(published).toHaveLength(1);
+      expect(published[0]?.data).toMatchObject({
+        taskID: h.run.taskID,
+        generation: h.run.generation,
+        state: 'completed',
+        attribution: 'transcript',
+        parentSessionID: 'parent',
+      });
+    } finally {
+      capture.restore();
+    }
+  });
+
+  test('evidence-unavailable give-up logs the exhausted attempt count', async () => {
+    const capture = captureLogs();
+    try {
+      const h = harness({
+        maxEvidenceRetries: 0,
+        readTerminalEvidence: async () => undefined,
+      });
+      await h.gate.reconcile(h.run);
+      const giveUps = capture.of(
+        '[terminal-gate] terminal evidence unavailable',
+      );
+      expect(giveUps).toHaveLength(1);
+      expect(giveUps[0]?.data).toMatchObject({
+        taskID: h.run.taskID,
+        generation: h.run.generation,
+        state: 'running',
+        attempt: 1,
+        verdict: 'gave-up',
+      });
+    } finally {
+      capture.restore();
     }
   });
 });
