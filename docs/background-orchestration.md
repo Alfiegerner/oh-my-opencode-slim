@@ -412,6 +412,10 @@ Behavior:
   host-observed progress re-arms the cap. Busy caused by the wake itself does
   **not** rearm the cap; unrelated busy/error lifecycle events do. The wake
   prompt text is static and does **not** include a fingerprint or snapshot.
+  The no-progress caps live in a process-global wake gate that the plugin's
+  dispose hook clears on instance teardown, so a recreated plugin generation
+  (for example after `opencode reload` on v2 hosts) starts with fresh caps
+  instead of inheriting the previous generation's.
 - Static wake text (internal initiator part via `promptAsync` only — no message
   transform injection or history rewrite):
 
