@@ -68,6 +68,15 @@ stops the generation but retains its session; it does not roll back partial edit
 After cancelling a write-capable task, inspect and reconcile file changes before
 launching replacement work.
 
+If the abort request times out while still pending, `task_cancel` reports
+uncertainty and retains its cancellation lease: a late abort must not affect a
+reused session. There is no lease TTL; an abort that never settles keeps reuse
+blocked. Late settlement releases the token but does not resume verification or
+publish confirmed cancellation; recovery depends on subsequent observation.
+After abort settles, verification has its own time budget. The v2 session-info
+read uses only the remaining budget: timeout leaves the task uncertain and
+releases the lease without confirming cancellation or consuming late evidence.
+
 `task_revive` resumes a retained session with a new instruction. A cancelled,
 errored, or stopped retained session may be revived immediately once its
 retained state has been verified safe. Acknowledgement controls parent and
