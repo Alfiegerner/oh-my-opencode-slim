@@ -704,12 +704,18 @@ export class ForegroundFallbackManager {
         if (existing) clearTimeout(existing);
         const handle = setTimeout(() => {
           this.pendingInitialDelay.delete(sessionID);
+          // Background fallback is fail-soft: a failure must be logged
+          // and swallowed, never escape as an unhandled rejection.
           // Call tryFallbackWithAbort for session.status retry path
-          if (needsAbort) {
-            void this.tryFallbackWithAbort(sessionID);
-          } else {
-            void this.tryFallback(sessionID);
-          }
+          const trigger = needsAbort
+            ? this.tryFallbackWithAbort(sessionID)
+            : this.tryFallback(sessionID);
+          void trigger.catch((err) => {
+            log('[foreground-fallback] delayed fallback trigger failed', {
+              sessionID,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
         }, this.initialRetryDelayMs);
         this.pendingInitialDelay.set(sessionID, handle);
         return false;

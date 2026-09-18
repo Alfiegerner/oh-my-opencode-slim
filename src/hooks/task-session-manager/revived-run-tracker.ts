@@ -14,6 +14,7 @@ import {
 } from '../../utils/child-transcript';
 import { isRecord } from '../../utils/guards';
 import { createInternalAgentTextPart } from '../../utils/internal-initiator';
+import { log } from '../../utils/logger';
 import { getClient } from '../../utils/opencode-client';
 import type { SessionSelection } from '../../utils/session-selection';
 
@@ -520,7 +521,11 @@ export function createRevivedRunTracker(options: {
         return;
       }
       deleteHandoff(taskID);
-      void probe(taskID, generation);
+      // Background probing is fail-soft: a failure must be logged and
+      // swallowed, never escape as an unhandled rejection.
+      void probe(taskID, generation).catch((err) => {
+        log('[revived-run-tracker] handoff-expiry probe failed', String(err));
+      });
     }, handoffExpiryMs);
     pending.expiryTimer.unref?.();
   }
@@ -555,7 +560,11 @@ export function createRevivedRunTracker(options: {
     });
     // The re-prompt may already be persisted (admission is async): own
     // it now rather than waiting for an idle that already happened.
-    void probe(taskID, pending.generation);
+    // Background probing is fail-soft: log and swallow, never leak an
+    // unhandled rejection.
+    void probe(taskID, pending.generation).catch((err) => {
+      log('[revived-run-tracker] promoted-owning probe failed', String(err));
+    });
     armPromotedResolution(taskID, pending.generation);
     return true;
   }
@@ -610,7 +619,11 @@ export function createRevivedRunTracker(options: {
       // the missing trigger when the result was persisted while the
       // admission ack was in flight and no idle event will fire again.
       deleteHandoff(taskID);
-      void probe(taskID, generation);
+      // Background probing is fail-soft: log and swallow, never leak an
+      // unhandled rejection.
+      void probe(taskID, generation).catch((err) => {
+        log('[revived-run-tracker] resolved-handoff probe failed', String(err));
+      });
       return true;
     }
     deleteHandoff(taskID);
@@ -632,7 +645,11 @@ export function createRevivedRunTracker(options: {
     // Immediate probe: the re-prompt admission is async — if the
     // substituted run already went idle (fast answer + delayed
     // admission accounting), no idle event will fire again.
-    void probe(taskID, generation);
+    // Background probing is fail-soft: log and swallow, never leak an
+    // unhandled rejection.
+    void probe(taskID, generation).catch((err) => {
+      log('[revived-run-tracker] immediate probe failed', String(err));
+    });
     return true;
   }
 

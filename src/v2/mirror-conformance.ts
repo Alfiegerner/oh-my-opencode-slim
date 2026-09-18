@@ -36,7 +36,7 @@ import type {
   SessionDomain,
   SessionHooks,
 } from '@opencode/plugin/promise/session';
-import type { V2Context } from './types';
+import type { V2Context, V2PermissionRule } from './types';
 
 type Expect<T extends true> = T;
 type Equal<A, B> =
@@ -139,6 +139,14 @@ type _sessionUpdatePermissions = Expect<
   }
     ? true
     : false
+>;
+/** The hand-mirrored rule element must equal the official element exactly —
+ * mirror-side drift fails typecheck here too. */
+type _permissionRuleMirrorPinned = Expect<
+  Equal<
+    V2PermissionRule,
+    NonNullable<SessionUpdateInput['permissions']>[number]
+  >
 >;
 
 type SessionInterruptInput = Parameters<SessionDomain['interrupt']>[0];

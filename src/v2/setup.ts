@@ -1823,6 +1823,8 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
 
       return async () => {
         log('[v2] dispose invoked');
+        // FIFO is intentional: the success path preserves the historical
+        // registration-order teardown; only the abort path unwinds LIFO.
         for (const d of disposers) {
           try {
             await d();

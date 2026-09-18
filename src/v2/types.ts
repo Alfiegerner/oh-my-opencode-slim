@@ -164,9 +164,9 @@ export interface V2Registration {
  * #48194/#46495/#46871), so rules emitted by this plugin are ALWAYS
  * exact-match strings — never `*` or `?` wildcards. */
 export interface V2PermissionRule {
-  action: string;
-  resource: string;
-  effect: 'allow' | 'deny' | 'ask';
+  readonly action: string;
+  readonly resource: string;
+  readonly effect: 'allow' | 'deny' | 'ask';
 }
 /** v2 mcp transform draft (used after capability probing; RemoteConfig
  * shape see packages/schema/src/mcp.ts — no `enabled`, it uses
