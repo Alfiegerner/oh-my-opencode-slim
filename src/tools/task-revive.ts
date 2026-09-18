@@ -5,7 +5,9 @@ import type { BackgroundJobSupervisor } from '../utils/background-job-supervisor
 import { log } from '../utils/logger';
 import { getClient } from '../utils/opencode-client';
 import { withTimeout } from '../utils/session';
+import { OperationTimeoutError } from '../utils/session';
 import { getRuntimeSessionStatusSnapshot } from '../utils/session-runtime-status';
+import type { ExperimentalV2 } from '../v2/client-shim';
 import {
   assertOrchestrator,
   cancelTrackedExecution,
@@ -15,6 +17,7 @@ import {
 const z = tool.schema;
 const DEFAULT_BASELINE_TIMEOUT_MS = 5_000;
 const DEFAULT_ADMISSION_TIMEOUT_MS = 10_000;
+const DEFAULT_WAIT_FOR_IDLE_TIMEOUT_MS = 5_000;
 
 class ReviveAdmissionDeadlineError extends Error {}
 
@@ -23,6 +26,7 @@ export interface TaskReviveToolOptions extends TaskControlToolOptions {
   revivedRunTracker: RevivedRunTracker;
   baselineTimeoutMs?: number;
   admissionTimeoutMs?: number;
+  waitForIdleTimeoutMs?: number;
 }
 
 export function createTaskReviveTool(
@@ -69,6 +73,20 @@ export function createTaskReviveTool(
         generation: current.generation,
       };
 
+      // Establish a real verification mechanism before any destructive abort.
+      // A historical session.get outcome is not a live-idle capability.
+      const session = getClient(options.input).session;
+      const hasStatusMap = typeof session.status === 'function';
+      const channel = (options.input as { experimental_v2?: ExperimentalV2 })
+        .experimental_v2?.waitForSessionIdle;
+      const waitForIdle =
+        !hasStatusMap && typeof channel === 'function' ? channel : undefined;
+      if (!hasStatusMap && !waitForIdle) {
+        throw new Error(
+          'task_revive idle-verification capability unavailable: the host must expose session.status or waitForSessionIdle; no abort or prompt was sent',
+        );
+      }
+
       let cancelledForRevive = false;
       if (current.state === 'running') {
         await cancelTrackedExecution(options, captured, 'revived');
@@ -111,16 +129,36 @@ export function createTaskReviveTool(
           Math.max(1, options.baselineTimeoutMs ?? DEFAULT_BASELINE_TIMEOUT_MS),
           'Baseline capture deadline exceeded; the revive prompt was NOT sent',
         );
-        // The host may resume the child independently while any of the
-        // reads below await network I/O. The live status map is the only
-        // place an independently resumed session shows up: busy or retry
-        // refuses, an unverifiable map refuses rather than guessing, and
-        // verified absence means no active runner. v2 hosts expose no
-        // status map at all (client-shim.ts omits session.status), so the
-        // map check only runs where the capability exists; the
-        // lastLiveBusyAt fence below covers v2 instead.
-        const session = getClient(options.input).session;
-        if (typeof session.status === 'function') {
+        if (waitForIdle) {
+          const timeoutMs = Math.max(
+            1,
+            options.waitForIdleTimeoutMs ?? DEFAULT_WAIT_FOR_IDLE_TIMEOUT_MS,
+          );
+          const deadline = Date.now() + timeoutMs;
+          const waiting = waitForIdle(current.taskID);
+          if (!waiting || typeof waiting.then !== 'function') {
+            throw new Error(
+              'Invalid session idle wait operation; the revive prompt was NOT sent',
+            );
+          }
+          const completion = await withTimeout(
+            waiting,
+            timeoutMs,
+            'Session idle wait timed out; the revive prompt was NOT sent',
+          );
+          // The 2.0.5 adapter does not forward AbortSignal. Late settlement is
+          // observed by withTimeout but cannot resume this terminated flow.
+          if (Date.now() >= deadline) {
+            throw new OperationTimeoutError(
+              'Session idle wait timed out; the revive prompt was NOT sent',
+            );
+          }
+          if (completion !== undefined) {
+            throw new Error(
+              'Invalid session idle wait result; the revive prompt was NOT sent',
+            );
+          }
+        } else {
           const liveSnapshot = await getRuntimeSessionStatusSnapshot(
             options.input,
           );
@@ -166,6 +204,7 @@ export function createTaskReviveTool(
         // in-flight run, but may enqueue a continuation after an independent
         // resume; it does not deduplicate. The v1 SDK ignores this client-side
         // hint (not part of the HTTP request); the v2 shim forwards it.
+        const admissionStartedAt = Date.now();
         const request = (
           session.promptAsync as (
             args: Record<string, unknown>,
@@ -214,12 +253,14 @@ export function createTaskReviveTool(
               objective: current.objective,
               background: true,
               relaunchLease,
+              now: admissionStartedAt,
             });
             revivedRunTracker.register({
               taskID: launched.taskID,
               generation: launched.generation,
               parentSessionID,
               baselineMessageID,
+              attemptStartedAt: admissionStartedAt,
               description: launched.description,
             });
             options.backgroundJobSupervisor?.onLaunch(launched);
@@ -394,6 +435,12 @@ function renderReviveOutput(
     `state: ${state}`,
     `status: ${admissionUnknown ? 'admission_unknown' : state === 'running' ? 'started' : state}`,
   ];
+  if (record.statusUncertain) {
+    lines.push(
+      'status_uncertain: true',
+      `observation: ${record.lastStatusError ?? 'Task termination is unconfirmed.'}`,
+    );
+  }
   if (admissionUnknown) {
     lines.push(
       'The host may have accepted the prompt. Admission is still pending; do not retry task_revive. Use task_status to inspect the session.',

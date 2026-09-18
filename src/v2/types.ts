@@ -230,6 +230,8 @@ export interface V2Context {
     ): Promise<V2Registration>;
     /** v2 session.get — SessionInfo by id (runtime-probed). */
     get?(input: { sessionID: string }): Promise<unknown>;
+    /** Wait for the session agent loop to become idle (runtime-probed). */
+    wait?(input: { sessionID: string }): Promise<void>;
     /** v2 session.remove — DELETE /api/session/:id (runtime-probed). */
     remove?(input: { sessionID: string }): Promise<unknown>;
     /** v2 session.list — query-filtered listing (runtime-probed).
@@ -262,9 +264,15 @@ export interface V2Context {
     context?(input: {
       sessionID: string;
     }): Promise<Array<Record<string, unknown>>>;
-    /** v2 session.prompt — flat PromptInput ({sessionID, text, files?,
-     * agents?, skills?, metadata?, delivery?, resume?}). */
-    prompt?(input: Record<string, unknown>): Promise<unknown>;
+    /** v2 session.prompt subset used here; resume:false admits without waking. */
+    prompt?(input: {
+      sessionID: string;
+      text: string;
+      files?: Array<{ uri: string; name?: string }>;
+      metadata?: Record<string, unknown>;
+      delivery?: 'steer' | 'queue';
+      resume?: boolean;
+    }): Promise<unknown>;
     /** v2 session.synthetic — like prompt but not persisted as user
      * input. `delivery` routes the inbox entry ("steer" | "queue");
      * `resume: false` admits the input WITHOUT waking the session. */

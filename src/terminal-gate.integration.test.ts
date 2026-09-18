@@ -126,7 +126,11 @@ async function assembly(
   );
   const get = mock(
     async (_args: unknown): Promise<unknown> => ({
-      data: { parentID: 'parent', outcome: 'succeeded' },
+      data: {
+        parentID: 'parent',
+        outcome: 'succeeded',
+        time: { idle: Date.now() },
+      },
     }),
   );
   const noop = async () => ({ data: [] });

@@ -43,6 +43,8 @@ export interface V2GenerateModelRef {
 /** Optional v2 capabilities threaded into the v1 PluginInput. Absent
  * capabilities must leave the input object unchanged (v1 parity). */
 export interface ExperimentalV2 {
+  /** Real host wait; not a snapshot, and not abortable by the 2.0.5 adapter. */
+  waitForSessionIdle?: (sessionID: string) => Promise<void>;
   /** One-shot generation (`ctx.generate.text`); no session involved. */
   generateText?: (
     prompt: string,
@@ -289,10 +291,8 @@ export function createSessionListShim(
   };
 }
 
-/** Build a v1-compatible PluginInput from the v2 context. The optional
- * `extras` threads probed v2 capabilities (e.g. one-shot generation)
- * through as `experimental_v2`; when absent no `experimental_v2` key is
- * added so the v1 pipeline stays byte-identical. */
+/** Build a v1-compatible input. Optional host idle-wait and one-shot generation
+ * share experimental_v2; absent capabilities are never replaced with stubs. */
 export function buildPluginInput(
   ctx: V2Context,
   extras?: ExperimentalV2,
@@ -343,11 +343,23 @@ export function buildPluginInput(
       list: createSessionListShim(s),
       prompt: s.prompt
         ? async (args: Record<string, unknown>) => {
+            const body = isRecord(args.body) ? args.body : {};
+            if (
+              ['agent', 'model', 'variant'].some(
+                (key) => body[key] !== undefined,
+              )
+            ) {
+              throw new Error(
+                '[v2] session.prompt cannot represent selection overrides (agent/model/variant); inherit the persisted session selection',
+              );
+            }
             const files = filesFromBody(args);
             return s.prompt?.({
               sessionID: sessionIDOf(args),
               text: textFromBody(args),
-              delivery: 'steer',
+              ...(body.noReply === true
+                ? ({ delivery: 'queue', resume: false } as const)
+                : ({ delivery: 'steer' } as const)),
               ...(files.length > 0 ? { files } : {}),
             });
           }
@@ -592,6 +604,7 @@ export function buildPluginInput(
   };
 
   const directory = resolveV2Directory(ctx);
+  const wait = typeof s.wait === 'function' ? s.wait.bind(s) : undefined;
   return {
     client,
     hostFlavor: 'v2',
@@ -603,8 +616,20 @@ export function buildPluginInput(
     worktree: directory,
     experimental_workspace: { register() {} },
     $: typeof Bun !== 'undefined' ? Bun.$ : undefined,
-    ...(extras?.generateText
-      ? { experimental_v2: { generateText: extras.generateText } }
+    ...(extras?.generateText || wait
+      ? {
+          experimental_v2: {
+            ...(extras?.generateText
+              ? { generateText: extras.generateText }
+              : {}),
+            ...(wait
+              ? {
+                  waitForSessionIdle: (sessionID: string) =>
+                    wait({ sessionID }),
+                }
+              : {}),
+          },
+        }
       : {}),
   };
 }

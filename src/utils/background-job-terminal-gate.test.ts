@@ -147,6 +147,148 @@ describe('terminal evidence policy (migrated from stop confirmation)', () => {
 });
 
 describe('terminal gate', () => {
+  test.each([
+    ['old', { idle: 99 }, false],
+    ['equal', { idle: 100 }, false],
+    ['within read', { idle: 150 }, true],
+    ['read completion', { idle: 200 }, true],
+    ['future', { idle: 201 }, false],
+    ['missing', { idle: undefined }, false],
+    ['string', { idle: '150' }, false],
+    ['NaN', { idle: NaN }, false],
+    ['infinite', { idle: Infinity }, false],
+    ['negative', { idle: -1 }, false],
+    ['unaccredited clock', { clock: undefined }, false],
+    ['future generation', { start: 300 }, false],
+    ['invalid generation', { start: NaN }, false],
+    ['negative generation', { start: -1 }, false],
+    ['invalid read completion', { readAt: NaN }, false],
+    ['infinite read completion', { readAt: Infinity }, false],
+    ['negative read completion', { readAt: -1 }, false],
+    ['replacement attempt', { attempt: 160 }, false],
+    ['equal attempt', { attempt: 150 }, false],
+    ['invalid attempt', { attempt: -1 }, false],
+    ['live activity', { activity: 160 }, false],
+    ['invalid activity', { activity: NaN }, false],
+    ['fresh after all boundaries', { attempt: 120, activity: 130 }, true],
+    [
+      'first generation missing timestamp',
+      { generation: 1, idle: undefined },
+      false,
+    ],
+    ['first generation fresh timestamp', { generation: 1 }, true],
+    ['host error', { error: 'unavailable' }, false],
+    ['invalid response', { response: null }, false],
+    [
+      'malformed envelope',
+      { response: { data: false, outcome: 'failed', time: { idle: 150 } } },
+      false,
+    ],
+    ['unrecognized outcome', { outcome: 'running' }, false],
+  ] as const)(
+    'host outcome attribution: %s',
+    async (_name, overrides, accepted) => {
+      const spec = {
+        idle: 150 as unknown,
+        start: 100,
+        readAt: 200,
+        generation: 2,
+        clock: 'shared-unix-ms' as 'shared-unix-ms' | undefined,
+        attempt: undefined as number | undefined,
+        activity: undefined as number | undefined,
+        outcome: 'failed',
+        error: undefined as string | undefined,
+        response: undefined as unknown,
+        ...overrides,
+      };
+      let clock = 140;
+      const onTerminal = mock(() => {});
+      const h = harness({
+        hostOutcomeClock: spec.clock,
+        now: () => clock,
+        attemptStartedAtFor: () => spec.attempt,
+        maxEvidenceRetries: 0,
+        onTerminal,
+        baselineFor: () => undefined,
+        readTerminalEvidence: async () => ({ data: [] }),
+        input: {
+          client: {
+            session: {
+              get: async () => {
+                clock = spec.readAt;
+                if (spec.response !== undefined) return spec.response;
+                return {
+                  data: { outcome: spec.outcome, time: { idle: spec.idle } },
+                  error: spec.error,
+                };
+              },
+            },
+          },
+        } as never,
+      });
+      const run =
+        spec.generation === 1
+          ? h.run
+          : h.board.registerLaunch({
+              taskID: h.run.taskID,
+              parentSessionID: 'parent',
+              agent: 'fixer',
+              now: spec.start,
+            });
+      if (spec.activity !== undefined)
+        h.board.markRunningFromLiveSession(run.taskID, spec.activity);
+      const revision = h.board.get(run.taskID)?.terminalRevision;
+      await h.gate.reconcile(run);
+      expect(h.board.get(run.taskID)).toMatchObject(
+        accepted
+          ? {
+              state: 'error',
+              resultSummary: 'Host reported outcome: failed.',
+              terminalRevision: (revision ?? 0) + 1,
+            }
+          : {
+              state: 'running',
+              statusUncertain: true,
+              terminalRevision: revision,
+            },
+      );
+      if (!accepted)
+        expect(h.board.get(run.taskID)?.resultSummary).toBeUndefined();
+      expect(onTerminal).toHaveBeenCalledTimes(accepted ? 1 : 0);
+    },
+  );
+
+  test('unattributable host outcome clears old quiescence instead of aging into stopped', async () => {
+    let idle = 150;
+    let transcript: unknown;
+    const h = harness({
+      hostOutcomeClock: 'shared-unix-ms',
+      baselineFor: () => undefined,
+      input: {
+        client: {
+          session: {
+            get: async () => ({
+              data: { outcome: 'succeeded', time: { idle } },
+            }),
+          },
+        },
+      } as never,
+      readTerminalEvidence: async () => transcript,
+    });
+    h.advance(200);
+    await h.gate.reconcile(h.run); // Valid quiescence, unavailable evidence.
+    idle = 0; // Equality to the generation boundary is not fresh evidence.
+    transcript = { data: [] };
+    for (let i = 1; i <= 6; i++) {
+      h.advance(200 + i * 10);
+      await h.gate.reconcile(h.run);
+    }
+    expect(h.board.get(h.run.taskID)).toMatchObject({
+      state: 'running',
+      statusUncertain: true,
+      terminalRevision: 0,
+    });
+  });
   test('board rejects freely fabricated terminal authorization', async () => {
     const h = harness();
     const validate = mock(() => true);
@@ -312,6 +454,7 @@ describe('terminal gate', () => {
           release = resolve;
         });
       const h = harness({
+        hostOutcomeClock: 'shared-unix-ms',
         input: {
           directory: '/tmp',
           client: { session: { get: held } },
@@ -334,7 +477,9 @@ describe('terminal gate', () => {
       expect(release).toBeFunction();
       blocked = true;
       release(
-        stage === 'transcript' ? answer() : { data: { outcome: 'failed' } },
+        stage === 'transcript'
+          ? answer()
+          : { data: { outcome: 'failed', time: { idle: 1 } } },
       );
       await pending;
       expect(h.board.get(h.run.taskID)?.state).toBe('running');
@@ -387,11 +532,27 @@ describe('terminal gate', () => {
     expect((await h.gate.reconcile(h.run)).kind).toBe('deferred');
     expect(h.board.get(h.run.taskID)?.state).toBe('running');
   });
-  test.each(['completed', 'error', 'cancelled'] as const)(
-    'parsed %s is only a candidate while busy',
-    async (state) => {
-      const h = harness();
-      h.observe('busy');
+  test.each(
+    (['completed', 'error', 'cancelled'] as const).flatMap((state) =>
+      (['busy', 'retry'] as const).map((activity) => ({ state, activity })),
+    ),
+  )(
+    'parsed terminal output remains a candidate under a live v1 map: %j',
+    async ({ state, activity }) => {
+      const get = mock(async () => ({
+        data: { outcome: 'failed', time: { idle: 1 } },
+      }));
+      const h = harness({
+        input: {
+          client: {
+            session: {
+              status: async () => ({ data: { ses_child: { type: activity } } }),
+              get,
+            },
+          },
+        } as never,
+        hostOutcomeClock: 'shared-unix-ms',
+      });
       await h.gate.reconcile(h.run, {
         kind: 'output',
         status: {
@@ -403,6 +564,7 @@ describe('terminal gate', () => {
         origin: { kind: 'native', run: h.run, callID: 'call' },
       });
       expect(h.board.get(h.run.taskID)?.state).toBe('running');
+      expect(get).not.toHaveBeenCalled();
     },
   );
   test('quiescence plus attributable transcript commits exactly once', async () => {
@@ -982,10 +1144,12 @@ test.each(['transcript', 'outcome'])(
         id: string;
         parentID: string;
         outcome?: 'succeeded';
+        time?: { idle: number };
       }> => ({
         id: 'ses_v2child',
         parentID: 'parent',
         outcome: source === 'transcript' || valid ? 'succeeded' : undefined,
+        time: { idle: Date.now() },
       }),
     );
     const input = buildPluginInput({
@@ -1007,6 +1171,7 @@ test.each(['transcript', 'outcome'])(
       backgroundJobBoard: board,
       baselineFor: () => 'baseline',
       maxEvidenceRetries: source === 'transcript' ? 1 : 3,
+      hostOutcomeClock: 'shared-unix-ms',
       graceMs: 5,
     });
     gates.push(gate);

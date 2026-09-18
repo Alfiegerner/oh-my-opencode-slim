@@ -119,7 +119,8 @@ its probe only ever matters on non-stable host builds.
    and a shim `client` that **really delegates** the v1 SDK call shapes to
    v2 flat session calls — `session.get`, `session.abort`→`interrupt`
    (`resume: false` aborts the active run), `session.messages`→`context`,
-   `session.prompt` (as `delivery: "steer"`), `session.update`→
+   `session.prompt` (default `delivery: "steer"`; `noReply: true` maps to
+   `delivery: "queue", resume: false`), `session.update`→
    `session.update` (`{sessionID, title}`), `session.delete`→`remove` (same
    `DELETE /api/session/:id`; stops the smartfetch secondary-model temp
    sessions leaking), and `session.list` (v2 `Session.Info` page → the v1
@@ -268,6 +269,37 @@ zero-registration load logs a loud health-check warning. The session hooks
 **unconditionally** on full v2 contexts: a registration failure fails
 setup loudly instead of degrading — hook-name rejection is treated as a
 host contract violation, not a degrade path.
+
+### Task-control prompt and idle-wait contracts
+
+The v1-facing `session.prompt` shim preserves text and file attachments. A
+`noReply: true` write is a real, non-synthetic prompt with `queue` + `resume: false`;
+queue alone would not preserve the no-resume intent. Unsupported per-call
+agent/model/variant overrides are rejected before writing, never silently dropped
+or implemented by non-atomic `switchAgent`/`switchModel` calls. `task_message`
+explicitly inherits persisted selection on v2; other noReply callers, including
+interview notifications, retain the same no-resume semantics.
+
+`experimental_v2.waitForSessionIdle(sessionID)` exists only when the host provides
+`session.wait({sessionID})`. It delegates that method alongside the unchanged
+`generateText` channel; it fabricates neither a status map nor board state.
+`session.status` remains absent. Historical `session.get` outcomes cannot authorize
+revive. The official 2.0.5 prompt intent fields and wait signature are pinned in
+`mirror-conformance.ts`, and tool→shim→host contracts have dedicated tests.
+The 2.0.5 promise adapter does not forward AbortSignal to these methods, so the
+bounded idle wait does not pretend to cancel the host operation: late settlement
+is observed without authorizing a prompt. It waits for idle within its budget,
+not for an atomic reservation; queued delivery can still follow an external resume.
+
+The terminal gate alone attributes `session.get` outcomes, in both v1 and v2.
+Only integrations explicitly declaring `hostOutcomeClock: 'shared-unix-ms'`
+(the local in-process wiring) may use them. Other factories default to distrust.
+Finite nonnegative timestamps must satisfy `max(generation start, attempt start,
+latest live activity) < time.idle <= read completion`; equality is ambiguous.
+Attempt boundaries survive handoff promotion and late ACKs. An unattributable
+outcome cannot establish or preserve host-outcome quiescence; it leaves the run
+uncertain, not stopped. Fresh `succeeded` still requires valid post-baseline result
+evidence. Independent runtime maps, native returns and cancellation keep their fences.
 
 ## Feature matrix
 

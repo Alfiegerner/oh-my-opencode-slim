@@ -30,6 +30,8 @@ export const STOPPED_WITHOUT_TERMINAL_RESULT =
   'Background session stopped before a terminal task result was received.';
 export const EVIDENCE_UNAVAILABLE_DIAGNOSTIC =
   'Terminal evidence could not be read after repeated attempts; task termination is unconfirmed (observation unavailable).';
+const UNATTRIBUTABLE_HOST_OUTCOME =
+  'Host outcome is not attributable to this run/attempt; task termination is unconfirmed.';
 
 export type RunRef = { taskID: string; generation: number };
 export type ObservationToken = Readonly<
@@ -37,6 +39,7 @@ export type ObservationToken = Readonly<
     activityRevision: number;
     terminalRevision: number;
     attemptRevision: number | undefined;
+    attemptStartedAt: number | undefined;
     baselineMessageID: string | undefined;
     episode: number;
     readStartedAt: number;
@@ -192,15 +195,35 @@ function isForegroundNativeTerminal(
   );
 }
 
-function hostOutcome(response: unknown): string | undefined {
+function validHostTime(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function attributableHostOutcome(
+  response: unknown,
+  bounds: {
+    lowerBound: number;
+    readCompletedAt: number;
+    clockComparable: boolean;
+  },
+): { outcome: string; idleAt: number } | undefined {
   if (!isRecord(response) || responseError(response) !== undefined)
     return undefined;
-  const info = isRecord(response.data) ? response.data : response;
+  const info = 'data' in response ? response.data : response;
+  if (!isRecord(info)) return;
   const outcome = info.outcome;
-  return typeof outcome === 'string' &&
-    ['succeeded', 'failed', 'interrupted', 'cancelled'].includes(outcome)
-    ? outcome
-    : undefined;
+  const idleAt = isRecord(info.time) ? info.time.idle : undefined;
+  if (
+    !bounds.clockComparable ||
+    !validHostTime(idleAt) ||
+    !validHostTime(bounds.lowerBound) ||
+    !validHostTime(bounds.readCompletedAt) ||
+    typeof outcome !== 'string' ||
+    !['succeeded', 'failed', 'interrupted', 'cancelled'].includes(outcome) ||
+    !(bounds.lowerBound < idleAt && idleAt <= bounds.readCompletedAt)
+  )
+    return;
+  return { outcome, idleAt };
 }
 
 function observationIdentity(token: ObservationToken): string {
@@ -209,6 +232,7 @@ function observationIdentity(token: ObservationToken): string {
     token.activityRevision,
     token.terminalRevision,
     token.attemptRevision,
+    token.attemptStartedAt,
     token.baselineMessageID,
     token.episode,
   ]);
@@ -262,6 +286,12 @@ export function createBackgroundJobTerminalGate(options: {
   readRuntime?: (run: RunRef, startedAt: number) => Promise<RuntimeObservation>;
   readTerminalEvidence?: (taskID: string) => Promise<unknown>;
   baselineFor?: (taskID: string, generation: number) => string | undefined;
+  attemptStartedAtFor?: (
+    taskID: string,
+    generation: number,
+  ) => number | undefined;
+  /** Explicit integration contract; never inferred from host flavor/capabilities. */
+  hostOutcomeClock?: 'shared-unix-ms';
   observationRevisionFor?: (
     taskID: string,
     generation: number,
@@ -331,6 +361,10 @@ export function createBackgroundJobTerminalGate(options: {
         run.generation,
       ),
       baselineMessageID: options.baselineFor?.(run.taskID, run.generation),
+      attemptStartedAt: options.attemptStartedAtFor?.(
+        run.taskID,
+        run.generation,
+      ),
       episode: value.episode,
       readStartedAt: now(),
     });
@@ -346,6 +380,8 @@ export function createBackgroundJobTerminalGate(options: {
       value.activityRevision === token.activityRevision &&
       board.get(token.taskID)?.terminalRevision === token.terminalRevision &&
       value.episode === token.episode &&
+      options.attemptStartedAtFor?.(token.taskID, token.generation) ===
+        token.attemptStartedAt &&
       options.baselineFor?.(token.taskID, token.generation) ===
         token.baselineMessageID &&
       options.observationRevisionFor?.(token.taskID, token.generation) ===
@@ -622,6 +658,23 @@ export function createBackgroundJobTerminalGate(options: {
     };
   }
 
+  function outcomeFromRead(response: unknown, token: ObservationToken) {
+    const job = board.get(token.taskID);
+    if (!job) return;
+    const boundaries = [
+      job.runStartedAt,
+      token.attemptStartedAt ?? job.runStartedAt,
+      job.lastLiveBusyAt ?? job.runStartedAt,
+    ];
+    return attributableHostOutcome(response, {
+      lowerBound: boundaries.every(validHostTime)
+        ? Math.max(...boundaries)
+        : NaN,
+      readCompletedAt: now(),
+      clockComparable: options.hostOutcomeClock === 'shared-unix-ms',
+    });
+  }
+
   async function inspect(run: RunRef): Promise<GateResult> {
     let token = capture(run);
     if (!token) return { kind: 'stale' };
@@ -680,13 +733,14 @@ export function createBackgroundJobTerminalGate(options: {
           if (!current(token)) return { kind: 'stale' };
           if (response.kind === 'blocked')
             return requestRuntimeContrastAfterRead(token, response.retryAfter);
-          const outcome = hostOutcome(response.value);
-          if (outcome) {
+          const attributable = outcomeFromRead(response.value, token);
+          if (attributable) {
             observe(token, {
               kind: 'quiescent',
               origin: 'host-outcome',
               readStartedAt: token.readStartedAt,
-              terminalOutcome: outcome,
+              observedAt: attributable.idleAt,
+              terminalOutcome: attributable.outcome,
             });
           } else if (
             !value.runtime ||
@@ -696,6 +750,7 @@ export function createBackgroundJobTerminalGate(options: {
               kind: 'unknown',
               origin: 'host-outcome',
               readStartedAt: token.readStartedAt,
+              diagnostic: UNATTRIBUTABLE_HOST_OUTCOME,
             });
           }
           // As with session.status, our own unknown observation advances the
@@ -747,7 +802,8 @@ export function createBackgroundJobTerminalGate(options: {
         run,
         value.retries > (options.maxEvidenceRetries ?? 3)
           ? EVIDENCE_UNAVAILABLE_DIAGNOSTIC
-          : 'Runtime observation unavailable; task termination is unconfirmed.',
+          : (runtime?.diagnostic ??
+              'Runtime observation unavailable; task termination is unconfirmed.'),
       );
     }
     if (options.isObservationPending?.(run.taskID, run.generation))
@@ -803,6 +859,7 @@ export function createBackgroundJobTerminalGate(options: {
         'Fallback handoff pending; task termination is unconfirmed.',
       );
     let terminalOutcome = runtime?.terminalOutcome;
+    let outcomeDiagnostic: string | undefined;
     let evidence = classifyTerminalEvidence(response, {
       baselineMessageID: token.baselineMessageID,
       runStartedAt: job.runStartedAt,
@@ -832,7 +889,11 @@ export function createBackgroundJobTerminalGate(options: {
             run,
             'Fallback handoff pending; task termination is unconfirmed.',
           );
-        terminalOutcome = hostOutcome(outcomeResponse.value);
+        terminalOutcome = outcomeFromRead(
+          outcomeResponse.value,
+          token,
+        )?.outcome;
+        if (!terminalOutcome) outcomeDiagnostic = UNATTRIBUTABLE_HOST_OUTCOME;
         if (terminalOutcome === 'succeeded')
           evidence = classifyTerminalEvidence(response, {
             baselineMessageID: token.baselineMessageID,
@@ -903,9 +964,10 @@ export function createBackgroundJobTerminalGate(options: {
       run,
       value.retries > (options.maxEvidenceRetries ?? 3)
         ? EVIDENCE_UNAVAILABLE_DIAGNOSTIC
-        : evidence.verdict === 'retry' && evidence.reason === 'textless'
-          ? COMPLETED_WITHOUT_TEXT_DIAGNOSTIC
-          : 'Runtime session is idle; task termination is unconfirmed.',
+        : (outcomeDiagnostic ??
+            (evidence.verdict === 'retry' && evidence.reason === 'textless'
+              ? COMPLETED_WITHOUT_TEXT_DIAGNOSTIC
+              : 'Runtime session is idle; task termination is unconfirmed.')),
     );
   }
 

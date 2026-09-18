@@ -118,6 +118,7 @@ type HookOptions = {
   maxRetainedSnapshots?: number;
   backgroundJobBoard?: BackgroundJobBoard;
   terminalGate?: BackgroundJobTerminalGate;
+  hostOutcomeClock?: 'shared-unix-ms';
   sessionStatus?: unknown;
   sessionClient?: Record<string, unknown>;
   idleReconcileDelayMs?: number;
@@ -198,6 +199,7 @@ function createHook(options?: HookOptions) {
       readContextMaxFiles: options?.readContextMaxFiles,
       backgroundJobBoard: options?.backgroundJobBoard,
       terminalGate: options?.terminalGate,
+      hostOutcomeClock: options?.hostOutcomeClock,
       backgroundJobSupervisor: options?.backgroundJobSupervisor,
       backgroundTaskConcurrency: options?.backgroundTaskConcurrency,
       pendingCallTracker: options?.pendingCallTracker,
@@ -6559,7 +6561,10 @@ describe('task-session-manager hook', () => {
       runtimeStatusReconcileDelayMs: 60_000,
       idleReconcileDelayMs: 0,
       sessionClient: {
-        get: mock(async () => ({ data: { outcome: 'succeeded' } })),
+        get: mock(async () => {
+          await Bun.sleep(1); // This positive fixture must finish strictly after admission.
+          return { data: { outcome: 'succeeded', time: { idle: Date.now() } } };
+        }),
         messages: mock(async () => ({
           data: [
             {
@@ -6569,6 +6574,7 @@ describe('task-session-manager hook', () => {
           ],
         })),
       },
+      hostOutcomeClock: 'shared-unix-ms',
     });
     board.registerLaunch({
       taskID: 'child-relaunch',

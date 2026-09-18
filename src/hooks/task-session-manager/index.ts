@@ -179,6 +179,7 @@ export function createTaskSessionManagerHook(
     readContextMaxFiles?: number;
     backgroundJobBoard?: BackgroundJobStore;
     terminalGate?: BackgroundJobTerminalGate;
+    hostOutcomeClock?: 'shared-unix-ms';
     backgroundJobSupervisor?: BackgroundJobSupervisor;
     backgroundTaskConcurrency?: BackgroundTaskConcurrency;
     /** Shared by plugin generations for one admission runtime. */
@@ -237,12 +238,15 @@ export function createTaskSessionManagerHook(
     createBackgroundJobTerminalGate({
       backgroundJobBoard,
       input: _ctx,
+      hostOutcomeClock: options.hostOutcomeClock,
       readTerminalEvidence: async (taskID) =>
         fetchChildTranscript(getClient(_ctx), taskID, _ctx.directory).catch(
           () => undefined,
         ),
       baselineFor: (taskID, generation) =>
         options.revivedRunTracker?.baselineFor(taskID, generation),
+      attemptStartedAtFor: (taskID, generation) =>
+        options.revivedRunTracker?.attemptStartedAtFor(taskID, generation),
       observationRevisionFor: (taskID, generation) =>
         options.revivedRunTracker?.revisionFor(taskID, generation),
       isObservationPending: (taskID, generation) =>
