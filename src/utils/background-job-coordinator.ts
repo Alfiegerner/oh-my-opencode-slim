@@ -392,6 +392,13 @@ export class BackgroundJobCoordinator implements BackgroundJobStore {
     return this.board.hasTerminalUnreconciled(parentSessionID);
   }
 
+  promoteProvisional(
+    taskID: string,
+    expectedParentSessionID?: string,
+  ): BackgroundJobRecord | undefined {
+    return this.board.promoteProvisional(taskID, expectedParentSessionID);
+  }
+
   hasConvergenceSignals(taskID: string, threshold = 3): boolean {
     return this.board.hasConvergenceSignals(taskID, threshold);
   }

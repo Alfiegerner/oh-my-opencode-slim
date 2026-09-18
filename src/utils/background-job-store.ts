@@ -260,6 +260,11 @@ export interface BackgroundJobStore {
   hasRunningJobs(): boolean;
   hasRunning(parentSessionID: string): boolean;
   hasTerminalUnreconciled(parentSessionID: string): boolean;
+  /** Attributing evidence promotes a placeholder into a tracked task. */
+  promoteProvisional(
+    taskID: string,
+    expectedParentSessionID?: string,
+  ): BackgroundJobRecord | undefined;
   hasConvergenceSignals(taskID: string, threshold?: number): boolean;
   formatForPrompt(parentSessionID: string, now?: number): string | undefined;
   formatForPromptWithMetadata(

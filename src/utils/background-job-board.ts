@@ -288,7 +288,15 @@ export class BackgroundJobBoard implements BackgroundJobStore {
 
     if (existing) {
       if (input.preserveRun) {
-        if (existing.state !== 'running') return existing;
+        if (existing.state !== 'running') {
+          // Attribution via the owning call promotes a placeholder even when
+          // its run already reached a terminal state; state, generation, and
+          // terminal evidence stay untouched.
+          if (!existing.provisional) return existing;
+          const promoted = { ...existing, provisional: false };
+          this.jobs.set(input.taskID, promoted);
+          return promoted;
+        }
         const observed = {
           ...existing,
           provisional: false,
@@ -1129,11 +1137,38 @@ export class BackgroundJobBoard implements BackgroundJobStore {
   }
 
   hasRunning(parentSessionID: string): boolean {
-    return this.list(parentSessionID).some((job) => job.state === 'running');
+    // A placeholder is not delegated work: it must neither gate a human
+    // wait nor justify a recovery wake on its own.
+    return this.list(parentSessionID).some(
+      (job) => !job.provisional && job.state === 'running',
+    );
   }
 
   hasTerminalUnreconciled(parentSessionID: string): boolean {
-    return this.list(parentSessionID).some((job) => job.terminalUnreconciled);
+    return this.list(parentSessionID).some(
+      (job) => !job.provisional && job.terminalUnreconciled,
+    );
+  }
+
+  /** Attributing evidence — the owning call's output or a cross-board
+   * adoption — promotes a placeholder into a tracked task without
+   * touching its run state. When the caller knows the owning parent, a
+   * mismatched record is left untouched. */
+  promoteProvisional(
+    taskID: string,
+    expectedParentSessionID?: string,
+  ): BackgroundJobRecord | undefined {
+    const record = this.jobs.get(taskID);
+    if (!record?.provisional) return record;
+    if (
+      expectedParentSessionID !== undefined &&
+      record.parentSessionID !== expectedParentSessionID
+    ) {
+      return record;
+    }
+    const promoted = { ...record, provisional: false };
+    this.jobs.set(taskID, promoted);
+    return promoted;
   }
 
   hasConvergenceSignals(taskID: string, threshold = 3): boolean {

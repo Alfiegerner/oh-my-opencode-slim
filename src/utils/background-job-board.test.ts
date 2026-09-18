@@ -83,6 +83,51 @@ describe('BackgroundJobBoard', () => {
     },
   );
 
+  test.each(['stopped', 'completed'])(
+    'attribution promotes a %s placeholder via preserveRun without resurrecting it',
+    (state) => {
+      const board = new BackgroundJobBoard();
+      const job = board.registerLaunch({
+        taskID: 'child-1',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        provisional: true,
+        now: 100,
+      });
+      if (state === 'stopped') board.markStopped(job.taskID, 'no outcome', 200);
+      else board.updateStatus({ taskID: job.taskID, state: 'completed' });
+
+      const promoted = board.registerLaunch({
+        taskID: 'child-1',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        preserveRun: true,
+        now: 300,
+      });
+      expect(promoted.provisional).toBe(false);
+      expect(promoted.state).toBe(state);
+      expect(promoted.generation).toBe(job.generation);
+      expect(board.formatForPrompt('parent-1')).toContain('child-1');
+    },
+  );
+
+  test('provisionals are not delegated work for wake and wait predicates', () => {
+    const board = new BackgroundJobBoard();
+    const job = board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      provisional: true,
+      now: 100,
+    });
+    expect(board.hasRunning('parent-1')).toBe(false);
+    expect(board.hasTerminalUnreconciled('parent-1')).toBe(false);
+    board.markStopped(job.taskID, 'no outcome', 200);
+    expect(board.hasTerminalUnreconciled('parent-1')).toBe(false);
+    board.promoteProvisional(job.taskID);
+    expect(board.hasTerminalUnreconciled('parent-1')).toBe(true);
+  });
+
   test('hasRunningJobs is false once no job is running', () => {
     const board = new BackgroundJobBoard();
     expect(board.hasRunningJobs()).toBe(false);
