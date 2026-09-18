@@ -67,36 +67,79 @@ describe('BackgroundJobBoard', () => {
     expect(job?.lastUsedAt).toBe(201);
   });
 
-  test('cancellation lease fences a same-ID relaunch', () => {
-    const board = new BackgroundJobBoard();
-    const first = board.registerLaunch({
-      taskID: 'ses_lease',
-      parentSessionID: 'parent-1',
-      agent: 'fixer',
-    });
-
-    const cancellationLease = board.acquireCancellationLease(
-      first.taskID,
-      first.generation,
-    );
-
-    expect(cancellationLease).toMatchObject({
-      taskID: first.taskID,
-      generation: first.generation,
-      kind: 'cancellation',
-    });
-    expect(
-      board.acquireRelaunchLease(first.taskID, first.generation),
-    ).toBeUndefined();
-    expect(() =>
-      board.registerLaunch({
-        taskID: first.taskID,
+  const leaseKinds = [
+    'message',
+    'relaunch',
+    'cancellation',
+    'terminal-notification',
+  ] as const;
+  test.each(
+    leaseKinds.flatMap((owner) =>
+      leaseKinds.map((contender) => ({ owner, contender })),
+    ),
+  )(
+    '$owner excludes $contender until its own token is released',
+    ({ owner, contender }) => {
+      const board = new BackgroundJobBoard();
+      const run = board.registerLaunch({
+        taskID: 'ses_lease',
         parentSessionID: 'parent-1',
         agent: 'fixer',
-      }),
-    ).toThrow('cancellation lease');
-    expect(board.get(first.taskID)?.generation).toBe(first.generation);
-  });
+      });
+      const acquire = {
+        message: () => board.acquireMessageLease(run.taskID, run.generation),
+        relaunch: () => board.acquireRelaunchLease(run.taskID, run.generation),
+        cancellation: () =>
+          board.acquireCancellationLease(run.taskID, run.generation),
+        'terminal-notification': () =>
+          board.acquireTerminalNotificationLease(
+            run.taskID,
+            run.generation,
+            board.get(run.taskID)?.terminalRevision,
+          ),
+      };
+      const complete = () =>
+        board.updateStatus({
+          taskID: run.taskID,
+          state: 'completed',
+          resultSummary: 'done',
+        });
+      if (owner === 'terminal-notification') complete();
+      const lease = acquire[owner]();
+      if (!lease) throw new Error('missing owner lease');
+      expect(lease.kind).toBe(owner);
+      expect(board.validateLease(lease)).toBe(true);
+      if (owner !== 'relaunch') {
+        expect(() => board.registerLaunch({ ...run })).toThrow(
+          `${owner} lease`,
+        );
+      }
+      // Change eligibility without releasing ownership. Withdrawing a terminal
+      // revision revokes send permission, but must not prevent token retirement.
+      const current = board.get(run.taskID);
+      if (!current) throw new Error('missing current record');
+      board.markRunningFromLiveSession(
+        run.taskID,
+        current.updatedAt + 1,
+        run.generation,
+        current.terminalRevision,
+      );
+      if (contender === 'terminal-notification') complete();
+      expect(board.validateLease(lease)).toBe(
+        owner !== 'terminal-notification',
+      );
+      expect(acquire[contender]()).toBeUndefined();
+      expect(board.releaseLease(lease)).toBe(true);
+      expect(board.releaseLease(lease)).toBe(false);
+      const next = acquire[contender]();
+      if (!next) throw new Error('missing next lease');
+      expect(next.token).not.toBe(lease.token);
+      expect(board.releaseLease(lease)).toBe(false);
+      expect(board.validateLease(next)).toBe(true);
+      expect(acquire[contender]()).toBeUndefined();
+      expect(board.releaseLease(next)).toBe(true);
+    },
+  );
 
   test('relaunch lease fences cancellation and validates token/generation', () => {
     const board = new BackgroundJobBoard();
@@ -137,45 +180,6 @@ describe('BackgroundJobBoard', () => {
     });
     expect(second.generation).not.toBe(first.generation);
     expect(board.releaseLease(relaunchLease)).toBe(true);
-  });
-
-  test('message lease is mutually exclusive with cancellation and relaunch', () => {
-    const board = new BackgroundJobBoard();
-    const first = board.registerLaunch({
-      taskID: 'ses_message_lease',
-      parentSessionID: 'parent-1',
-      agent: 'fixer',
-    });
-    const messageLease = board.acquireMessageLease(
-      first.taskID,
-      first.generation,
-    );
-
-    expect(messageLease).toMatchObject({
-      taskID: first.taskID,
-      generation: first.generation,
-      kind: 'message',
-    });
-    expect(board.acquireCancellationLease(first.taskID, first.generation)).toBe(
-      undefined,
-    );
-    expect(board.acquireRelaunchLease(first.taskID, first.generation)).toBe(
-      undefined,
-    );
-    expect(() =>
-      board.registerLaunch({
-        taskID: first.taskID,
-        parentSessionID: first.parentSessionID,
-        agent: first.agent,
-      }),
-    ).toThrow('message lease');
-
-    if (!messageLease) throw new Error('message lease was not acquired');
-    expect(board.validateLease(messageLease)).toBe(true);
-    expect(board.releaseLease(messageLease)).toBe(true);
-    expect(
-      board.acquireCancellationLease(first.taskID, first.generation),
-    ).toBeDefined();
   });
 
   test('expected generation and cancellation token fence markCancelled', () => {

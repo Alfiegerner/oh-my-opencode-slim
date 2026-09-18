@@ -767,6 +767,34 @@ test('integration: historical replay + rehydration + busy host publishes nothing
 });
 
 test('integration: late acknowledgement and transport success for A cannot consume terminal B', async () => {
+  const timers = new Map<number, { delay: number; callback: () => void }>();
+  let nextID = 0;
+  const setTimer = spyOn(globalThis, 'setTimeout').mockImplementation(((
+    callback: () => void,
+    delay: number,
+  ) => {
+    const id = ++nextID;
+    timers.set(id, { delay, callback });
+    return id;
+  }) as typeof setTimeout);
+  const clearTimer = spyOn(globalThis, 'clearTimeout').mockImplementation(((
+    id: number,
+  ) => {
+    timers.delete(id);
+  }) as typeof clearTimeout);
+  const tick = async () => {
+    for (let i = 0; i < 50; i++) await Promise.resolve();
+  };
+  const fire = (delay: number) => {
+    const entry = [...timers.entries()].find(
+      ([, timer]) => timer.delay === delay,
+    );
+    expect(entry).toBeDefined();
+    if (entry) {
+      timers.delete(entry[0]);
+      entry[1].callback();
+    }
+  };
   const board = new BackgroundJobBoard();
   const run = board.registerLaunch({
     taskID: 'ses_child',
@@ -777,13 +805,18 @@ test('integration: late acknowledgement and transport success for A cannot consu
   });
   let text = 'A';
   let resolveA!: (value: unknown) => void;
+  let rejectB!: (error: unknown) => void;
   const transport = mock(
     (_input: { body: { parts: Array<{ text: string }> } }) =>
       transport.mock.calls.length === 1
         ? new Promise((resolve) => {
             resolveA = resolve;
           })
-        : Promise.resolve({}),
+        : transport.mock.calls.length === 2
+          ? new Promise((_, reject) => {
+              rejectB = reject;
+            })
+          : Promise.resolve({}),
   );
   const input = {
     directory: '/tmp',
@@ -803,7 +836,7 @@ test('integration: late acknowledgement and transport success for A cannot consu
     input,
     backgroundJobBoard: board,
     terminalGate: gate,
-    maxNotificationRetries: 1,
+    maxNotificationRetries: 2,
     notificationRetryDelayMs: 1,
   });
   tracker.register({ ...run, baselineMessageID: 'baseline' });
@@ -850,7 +883,11 @@ test('integration: late acknowledgement and transport success for A cannot consu
     const b = board.get(run.taskID);
     if (!b) throw new Error('missing terminal B');
     tracker.onTerminal(a); // A delayed adapter callback must not replace B's notification state.
-    for (let i = 0; i < 4; i++) await tick(); // Lease contention is not a failed send attempt for B.
+    for (let i = 0; i < 4; i++) {
+      fire(1); // Lease contention is not a failed send attempt for B.
+      await tick();
+    }
+    expect(transport).toHaveBeenCalledTimes(1);
     expect(b.terminalRevision).toBeGreaterThan(a.terminalRevision);
     messages.push({
       info: {
@@ -866,9 +903,25 @@ test('integration: late acknowledgement and transport success for A cannot consu
     await hook.injectBackgroundJobBoard({}, { messages });
     // The adapter rejects A before invoking the board's acknowledgement method.
     expect(acknowledge).not.toHaveBeenCalled();
+    expect(
+      board.acquireRelaunchLease(run.taskID, run.generation),
+    ).toBeUndefined();
+    fire(10_000); // A never settled: its local wait alone must release ownership.
+    await tick();
+    const lease = board.acquireRelaunchLease(run.taskID, run.generation);
+    expect(lease).toBeDefined();
+    if (lease) board.releaseLease(lease);
+    fire(1);
+    await tick();
+    expect(transport).toHaveBeenCalledTimes(2); // B progresses without A's settlement.
     resolveA({});
     await tick();
+    expect(
+      board.acquireRelaunchLease(run.taskID, run.generation),
+    ).toBeUndefined();
+    rejectB(new Error('B was not accepted'));
     await tick();
+    fire(1); // A's success cannot accept B or cancel B's retry.
     await tick();
     expect(board.get(run.taskID)).toMatchObject({
       state: 'completed',
@@ -876,7 +929,7 @@ test('integration: late acknowledgement and transport success for A cannot consu
       terminalUnreconciled: true,
       terminalRevision: b.terminalRevision,
     });
-    expect(transport.mock.calls.length).toBe(2);
+    expect(transport.mock.calls.length).toBe(3);
     expect(transport.mock.calls[1][0].body.parts[0].text).toContain(
       '<task_result>\nB\n</task_result>',
     );
@@ -904,6 +957,8 @@ test('integration: late acknowledgement and transport success for A cannot consu
     resolveA?.({});
     tracker.dispose();
     await hook.event({ event: { type: 'server.instance.disposed' } });
+    setTimer.mockRestore();
+    clearTimer.mockRestore();
   }
 });
 

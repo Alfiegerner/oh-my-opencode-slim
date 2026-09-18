@@ -231,15 +231,39 @@ export function createRevivedRunTracker(options: {
     options.onSettled?.(run.taskID);
   }
 
+  function isCurrentNotification(
+    run: RevivedRun,
+    record: BackgroundJobRecord,
+    notification: RevivedRun['notification'],
+  ): boolean {
+    const current = options.backgroundJobBoard.get(run.taskID);
+    return (
+      !disposed &&
+      runs.get(run.taskID) === run &&
+      run.notification === notification &&
+      run.generation === record.generation &&
+      run.terminalRevision === record.terminalRevision &&
+      current?.generation === record.generation &&
+      current.terminalRevision === record.terminalRevision &&
+      run.terminalState === record.state &&
+      terminalOutcome(current) === record.state
+    );
+  }
+
   async function notifyParent(
     run: RevivedRun,
     record: BackgroundJobRecord,
   ): Promise<void> {
-    if (disposed || run.notification.sent || run.notification.pending) return;
-    if (run.terminalRevision !== record.terminalRevision) return;
     const notification = run.notification;
-    run.notification.pending = true;
-    run.notification.attempts += 1;
+    if (
+      !isCurrentNotification(run, record, notification) ||
+      notification.sent ||
+      notification.pending
+    )
+      return;
+    notification.pending = true;
+    notification.attempts += 1;
+    let lease: BackgroundJobLease | undefined;
     try {
       const session = getClient(options.input).session;
       const promptAsync =
@@ -248,16 +272,6 @@ export function createRevivedRunTracker(options: {
           : undefined;
       if (typeof promptAsync !== 'function') {
         throw new Error('session.promptAsync unavailable');
-      }
-      const current = options.backgroundJobBoard.get(run.taskID);
-      if (
-        !current ||
-        current.generation !== run.generation ||
-        current.terminalRevision !== record.terminalRevision ||
-        terminalOutcome(current) !== run.terminalState ||
-        record.state !== run.terminalState
-      ) {
-        return;
       }
       const state = record.state === 'completed' ? 'completed' : 'error';
       const tag = state === 'completed' ? 'task_result' : 'task_error';
@@ -275,27 +289,12 @@ export function createRevivedRunTracker(options: {
             .catch((): undefined => undefined)
         : undefined;
       if (
-        disposed ||
-        runs.get(run.taskID) !== run ||
-        notification.sent ||
-        run.notification !== notification
+        !isCurrentNotification(run, record, notification) ||
+        notification.sent
       ) {
         return;
       }
-      // Revalidate AFTER the selection await: a late success from a
-      // previous attempt may have marked this notification sent while the
-      // retry was pending here — sending again would duplicate the
-      // terminal result.
-      const latestBeforeSend = options.backgroundJobBoard.get(run.taskID);
-      if (
-        !latestBeforeSend ||
-        latestBeforeSend.generation !== run.generation ||
-        latestBeforeSend.terminalRevision !== record.terminalRevision ||
-        terminalOutcome(latestBeforeSend) !== run.terminalState
-      ) {
-        return;
-      }
-      const lease = options.backgroundJobBoard.acquireTerminalNotificationLease(
+      lease = options.backgroundJobBoard.acquireTerminalNotificationLease(
         run.taskID,
         run.generation,
         record.terminalRevision,
@@ -304,7 +303,7 @@ export function createRevivedRunTracker(options: {
         // Waiting for an older publication's transport does not spend this
         // publication's send budget: no transport attempt has started.
         notification.attempts -= 1;
-        scheduleNotificationRetry(run, record);
+        scheduleNotificationRetry(run, record, notification);
         return;
       }
       const notifyAgent = selection?.agent ?? 'orchestrator';
@@ -317,11 +316,19 @@ export function createRevivedRunTracker(options: {
         `</${tag}>`,
         '</task>',
       ].join('\n');
-      const response = await awaitNotificationTransport(
-        options.backgroundJobBoard,
-        lease,
-        () =>
-          (promptAsync as (args: Record<string, unknown>) => Promise<unknown>)({
+      await awaitNotificationTransport(
+        () => {
+          if (
+            !isCurrentNotification(run, record, notification) ||
+            notification.sent ||
+            !lease ||
+            !options.backgroundJobBoard.validateLease(lease)
+          ) {
+            throw new Error('Terminal notification is no longer current');
+          }
+          return (
+            promptAsync as (args: Record<string, unknown>) => Promise<unknown>
+          )({
             path: { id: run.parentSessionID },
             query: { directory: options.input.directory },
             // v1 prompt_async queues; 'queue' preserves that on v2 hosts
@@ -348,43 +355,23 @@ export function createRevivedRunTracker(options: {
               // translation (#1157).
               parts: [createInternalAgentTextPart(text)],
             },
-          }),
-        // Late settlement after the local timeout: a SUCCESS means the
-        // host DID accept the notification — mark it delivered and cancel
-        // the pending retry so the same terminal result is never sent to
-        // the parent twice. A late FAILURE keeps the retry scheduled.
-        (outcome) => {
-          if (!outcome.ok) return;
-          if (disposed || runs.get(run.taskID) !== run) return;
-          const current = options.backgroundJobBoard.get(run.taskID);
-          if (
-            run.notification !== notification ||
-            current?.generation !== record.generation ||
-            current.terminalRevision !== record.terminalRevision
-          )
-            return;
-          run.notification.sent = true;
-          if (run.notification.retryTimer) {
-            clearTimeout(run.notification.retryTimer);
-            run.notification.retryTimer = undefined;
+          });
+        },
+        // Acceptance belongs to the publication, even if an older attempt
+        // settles after its local timeout or while another attempt sends.
+        () => {
+          if (!isCurrentNotification(run, record, notification)) return;
+          notification.sent = true;
+          if (notification.retryTimer) {
+            clearTimeout(notification.retryTimer);
+            notification.retryTimer = undefined;
           }
         },
       );
-      const error = responseError(response);
-      if (error !== undefined) throw new Error(stringifyError(error));
-      const latest = options.backgroundJobBoard.get(run.taskID);
-      if (
-        !latest ||
-        latest.generation !== run.generation ||
-        latest.terminalRevision !== record.terminalRevision ||
-        terminalOutcome(latest) !== run.terminalState
-      ) {
-        return;
-      }
-      run.notification.sent = true;
     } catch {
-      scheduleNotificationRetry(run, record);
+      scheduleNotificationRetry(run, record, notification);
     } finally {
+      if (lease) options.backgroundJobBoard.releaseLease(lease);
       notification.pending = false;
     }
   }
@@ -392,21 +379,26 @@ export function createRevivedRunTracker(options: {
   function scheduleNotificationRetry(
     run: RevivedRun,
     record: BackgroundJobRecord,
+    notification: RevivedRun['notification'],
   ): void {
     if (
-      disposed ||
-      runs.get(run.taskID) !== run ||
-      run.terminalRevision !== record.terminalRevision ||
-      run.notification.attempts >= maxNotificationRetries ||
-      run.notification.retryTimer
+      !isCurrentNotification(run, record, notification) ||
+      notification.sent ||
+      notification.attempts >= maxNotificationRetries ||
+      notification.retryTimer
     ) {
       return;
     }
-    run.notification.retryTimer = setTimeout(() => {
-      run.notification.retryTimer = undefined;
+    notification.retryTimer = setTimeout(() => {
+      notification.retryTimer = undefined;
+      if (
+        !isCurrentNotification(run, record, notification) ||
+        notification.sent
+      )
+        return;
       void notifyParent(run, record);
     }, retryDelayMs);
-    run.notification.retryTimer.unref?.();
+    notification.retryTimer.unref?.();
   }
 
   function register(input: {
@@ -706,39 +698,18 @@ export function createRevivedRunTracker(options: {
 }
 
 async function awaitNotificationTransport<T>(
-  backgroundJobBoard: BackgroundJobStore,
-  lease: BackgroundJobLease,
   operation: () => Promise<T>,
-  onLateSettlement?: (outcome: { ok: boolean }) => void,
+  onAccepted: () => void,
 ): Promise<T> {
-  let settled = false;
-  let timedOut = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const transport = Promise.resolve()
     .then(operation)
-    .then(
-      (value) => {
-        settled = true;
-        if (timedOut) {
-          backgroundJobBoard.releaseLease(lease);
-          // A resolved promise is NOT delivery: the SDK can resolve with
-          // an `{ error }` envelope when throwOnError is off. Classify
-          // with the same check the normal path uses.
-          onLateSettlement?.({
-            ok: responseError(value) === undefined,
-          });
-        }
-        return value;
-      },
-      (error: unknown) => {
-        settled = true;
-        if (timedOut) {
-          backgroundJobBoard.releaseLease(lease);
-          onLateSettlement?.({ ok: false });
-        }
-        throw error;
-      },
-    );
+    .then((value) => {
+      const error = responseError(value);
+      if (error !== undefined) throw new Error(stringifyError(error));
+      onAccepted();
+      return value;
+    });
 
   try {
     return await Promise.race([
@@ -751,15 +722,8 @@ async function awaitNotificationTransport<T>(
         timer.unref?.();
       }),
     ]);
-  } catch (error) {
-    if (error instanceof NotificationTransportTimeoutError) {
-      timedOut = true;
-      if (settled) backgroundJobBoard.releaseLease(lease);
-    }
-    throw error;
   } finally {
     if (timer) clearTimeout(timer);
-    if (!timedOut) backgroundJobBoard.releaseLease(lease);
   }
 }
 

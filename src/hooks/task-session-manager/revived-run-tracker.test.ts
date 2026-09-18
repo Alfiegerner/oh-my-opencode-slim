@@ -14,6 +14,7 @@ function createHarness(
   prompt = mock(async () => ({})),
   assertBound = false,
   options: {
+    maxNotificationRetries?: number;
     stabilizationProbeDelayMs?: number;
     handoffExpiryMs?: number;
     resolveSelection?: (sessionID: string) => Promise<{
@@ -699,19 +700,9 @@ describe('revived run tracker', () => {
     return { timers, cleared, settle, fire, soleSurviving };
   }
 
-  test('late transport success after timeout marks sent and cancels the retry', async () => {
-    const clock = installCapturedTimers();
-    let resolvePrompt: ((value: unknown) => void) | undefined;
-    const prompt = mock(
-      () =>
-        new Promise((resolve) => {
-          resolvePrompt = resolve;
-        }),
-    );
-    const harness = createHarness(() => ({ data: [] }), prompt);
+  function publish(harness: ReturnType<typeof createHarness>) {
     harness.tracker.register({
-      taskID: harness.run.taskID,
-      generation: harness.run.generation,
+      ...harness.run,
       parentSessionID: 'parent',
       description: 'inspect the change',
     });
@@ -723,165 +714,410 @@ describe('revived run tracker', () => {
     });
     if (!terminal) throw new Error('missing terminal record');
     harness.tracker.onTerminal(terminal);
-    await clock.settle();
-    expect(harness.prompt).toHaveBeenCalledTimes(1);
+    return terminal;
+  }
 
-    // Local 10s transport timeout fires while promptAsync is still pending.
-    clock.fire(10_000);
-    await clock.settle();
-    const retryTimer = clock.soleSurviving(0);
-    expect(retryTimer).toBeDefined();
-
-    // The original transport settles successfully AFTER the timeout.
-    resolvePrompt?.({});
-    await clock.settle();
-
-    expect(harness.prompt).toHaveBeenCalledTimes(1);
-    expect([...clock.timers.values()]).not.toContain(retryTimer);
-  });
-
-  test('late transport failure after timeout keeps the retry path', async () => {
-    const clock = installCapturedTimers();
-    let rejectPrompt: ((reason: unknown) => void) | undefined;
-    const prompt = mock(
-      () =>
-        new Promise((_resolve, reject) => {
-          rejectPrompt = reject;
-        }),
+  function expectRelaunchAvailable(harness: ReturnType<typeof createHarness>) {
+    const lease = harness.board.acquireRelaunchLease(
+      harness.run.taskID,
+      harness.run.generation,
     );
-    const harness = createHarness(() => ({ data: [] }), prompt);
-    harness.tracker.register({
-      taskID: harness.run.taskID,
-      generation: harness.run.generation,
-      parentSessionID: 'parent',
-      description: 'inspect the change',
+    expect(lease).toBeDefined();
+    if (lease) harness.board.releaseLease(lease);
+  }
+
+  test.each([0, 1, 3])(
+    'hung transport releases before retries with budget %i',
+    async (maxNotificationRetries) => {
+      const clock = installCapturedTimers();
+      const harness = createHarness(
+        () => ({ data: [] }),
+        mock(() => new Promise(() => {})),
+        false,
+        { maxNotificationRetries },
+      );
+      const terminal = publish(harness);
+      for (
+        let attempt = 1;
+        attempt <= Math.max(1, maxNotificationRetries);
+        attempt++
+      ) {
+        await clock.settle();
+        expect(harness.prompt).toHaveBeenCalledTimes(attempt);
+        expect(
+          harness.board.acquireRelaunchLease(
+            terminal.taskID,
+            terminal.generation,
+          ),
+        ).toBeUndefined();
+        expect(clock.fire(10_000)).toBeDefined();
+        await clock.settle();
+        // Availability must precede retry execution, even if no transport settles.
+        expectRelaunchAvailable(harness);
+        if (attempt < maxNotificationRetries) {
+          expect(clock.fire(0)).toBeDefined();
+        } else {
+          expect(clock.soleSurviving(0)).toBeUndefined();
+        }
+      }
+      expect(harness.board.get(terminal.taskID)).toMatchObject(terminal);
+      harness.tracker.dispose();
+    },
+  );
+
+  function deferred() {
+    let resolve!: (value: unknown) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise((yes, no) => {
+      resolve = yes;
+      reject = no;
     });
-    const terminal = harness.board.updateStatus({
-      taskID: harness.run.taskID,
-      expectedGeneration: harness.run.generation,
-      state: 'completed',
-      resultSummary: 'done',
-    });
-    if (!terminal) throw new Error('missing terminal record');
-    harness.tracker.onTerminal(terminal);
-    await clock.settle();
+    return { promise, resolve, reject };
+  }
 
-    clock.fire(10_000);
-    await clock.settle();
-    expect(clock.soleSurviving(0)).toBeDefined();
-
-    // The original transport fails after the timeout: the retry must stay
-    // armed and deliver the notification on the next attempt.
-    rejectPrompt?.(new Error('host unavailable'));
-    await clock.settle();
-    expect(clock.soleSurviving(0)).toBeDefined();
-
-    clock.fire(0);
-    await clock.settle();
-    expect(harness.prompt).toHaveBeenCalledTimes(2);
-  });
-
-  test('late transport error envelope after timeout is not delivery', async () => {
-    const clock = installCapturedTimers();
-    let resolvePrompt: ((value: unknown) => void) | undefined;
-    const prompt = mock(
-      () =>
-        new Promise((resolve) => {
-          resolvePrompt = resolve;
+  test.each(['success', 'sync throw', 'async rejection', 'error envelope'])(
+    '%s releases the lease; only success accepts the publication',
+    async (outcome) => {
+      const clock = installCapturedTimers();
+      const harness = createHarness(
+        () => ({ data: [] }),
+        mock(() => {
+          if (outcome === 'sync throw') throw new Error('host unavailable');
+          if (outcome === 'async rejection')
+            return Promise.reject(new Error('host unavailable'));
+          return Promise.resolve(
+            outcome === 'success' ? {} : { error: 'host rejected' },
+          );
         }),
-    );
-    const harness = createHarness(() => ({ data: [] }), prompt);
-    harness.tracker.register({
-      taskID: harness.run.taskID,
-      generation: harness.run.generation,
-      parentSessionID: 'parent',
-      description: 'inspect the change',
-    });
-    const terminal = harness.board.updateStatus({
-      taskID: harness.run.taskID,
-      expectedGeneration: harness.run.generation,
-      state: 'completed',
-      resultSummary: 'done',
-    });
-    if (!terminal) throw new Error('missing terminal record');
-    harness.tracker.onTerminal(terminal);
-    await clock.settle();
-    expect(harness.prompt).toHaveBeenCalledTimes(1);
+      );
+      const terminal = publish(harness);
+      await clock.settle();
+      expectRelaunchAvailable(harness);
+      expect(clock.soleSurviving(10_000)).toBeUndefined();
+      expect(Boolean(clock.soleSurviving(0))).toBe(outcome !== 'success');
+      if (outcome === 'success') {
+        harness.tracker.onTerminal(terminal);
+        await clock.settle();
+        expect(harness.prompt).toHaveBeenCalledTimes(1);
+      } else {
+        clock.fire(0);
+        await clock.settle();
+        expect(harness.prompt).toHaveBeenCalledTimes(2);
+      }
+      expect(harness.board.get(terminal.taskID)).toMatchObject(terminal);
+      harness.tracker.dispose();
+    },
+  );
 
-    clock.fire(10_000);
-    await clock.settle();
+  test.each(['before timeout', 'timer first', 'settlement first'])(
+    'acceptance survives the timeout race: %s',
+    async (order) => {
+      const clock = installCapturedTimers();
+      const transport = deferred();
+      const harness = createHarness(
+        () => ({ data: [] }),
+        mock(() => transport.promise),
+      );
+      const terminal = publish(harness);
+      await clock.settle();
+      const timeout = clock.soleSurviving(10_000);
+      expect(timeout).toBeDefined();
+      if (order === 'timer first') timeout?.callback();
+      transport.resolve({});
+      if (order === 'settlement first') timeout?.callback();
+      await clock.settle();
+      expectRelaunchAvailable(harness);
+      expect(clock.soleSurviving(0)).toBeUndefined();
+      expect(clock.soleSurviving(10_000)).toBeUndefined();
+      harness.tracker.onTerminal(terminal);
+      await clock.settle();
+      expect(harness.prompt).toHaveBeenCalledTimes(1);
+      harness.tracker.dispose();
+    },
+  );
 
-    // The transport PROMISE resolves, but with a host error envelope —
-    // a resolved SDK call without throwOnError is not a delivered
-    // notification. The retry must stay armed.
-    resolvePrompt?.({ error: { message: 'host rejected' } });
-    await clock.settle();
-    expect(clock.soleSurviving(0)).toBeDefined();
+  test.each(['before retry', 'during selection'])(
+    'late success cancels further sends: %s',
+    async (phase) => {
+      const clock = installCapturedTimers();
+      const transport = deferred();
+      const secondSelection = deferred();
+      let selectionCalls = 0;
+      const harness = createHarness(
+        () => ({ data: [] }),
+        mock(() => transport.promise),
+        false,
+        {
+          resolveSelection: async () => {
+            selectionCalls += 1;
+            if (selectionCalls >= 2) await secondSelection.promise;
+            return { agent: 'plan', provenance: 'host-persisted' };
+          },
+        },
+      );
+      const terminal = publish(harness);
+      await clock.settle();
+      expect(harness.prompt).toHaveBeenCalledTimes(1);
+      clock.fire(10_000);
+      await clock.settle();
+      expectRelaunchAvailable(harness);
+      const retry = clock.soleSurviving(0);
+      expect(retry).toBeDefined();
+      if (phase === 'during selection') {
+        clock.fire(0);
+        await clock.settle();
+        expect(selectionCalls).toBe(2);
+      }
+      transport.resolve({});
+      await clock.settle();
+      secondSelection.resolve(undefined);
+      await clock.settle();
+      expect(clock.soleSurviving(0)).toBeUndefined();
+      // Even an already-queued callback must respect the acceptance latch.
+      retry?.callback();
+      harness.tracker.onTerminal(terminal);
+      await clock.settle();
+      expect(harness.prompt).toHaveBeenCalledTimes(1);
+      expectRelaunchAvailable(harness);
+      harness.tracker.dispose();
+    },
+  );
 
-    clock.fire(0);
-    await clock.settle();
-    expect(harness.prompt).toHaveBeenCalledTimes(2);
-  });
+  test.each(
+    ['rejection', 'error envelope'].flatMap((outcome) =>
+      [1, 3].map((budget) => ({ outcome, budget })),
+    ),
+  )(
+    'late $outcome preserves the retry budget $budget',
+    async ({ outcome, budget }) => {
+      const clock = installCapturedTimers();
+      const transport = deferred();
+      const harness = createHarness(
+        () => ({ data: [] }),
+        mock(() => transport.promise),
+        false,
+        { maxNotificationRetries: budget },
+      );
+      publish(harness);
+      await clock.settle();
+      clock.fire(10_000);
+      await clock.settle();
+      const retry = clock.soleSurviving(0);
+      expect(Boolean(retry)).toBe(budget > 1);
+      if (outcome === 'rejection')
+        transport.reject(new Error('host unavailable'));
+      else transport.resolve({ error: 'host rejected' });
+      await clock.settle();
+      expect(clock.soleSurviving(0)).toBe(retry);
+      expectRelaunchAvailable(harness);
+      for (let attempt = 2; attempt <= budget; attempt++) {
+        expect(clock.fire(0)).toBeDefined();
+        await clock.settle();
+        expect(harness.prompt).toHaveBeenCalledTimes(attempt);
+        expectRelaunchAvailable(harness);
+      }
+      expect(clock.soleSurviving(0)).toBeUndefined();
+      expect(harness.prompt).toHaveBeenCalledTimes(budget);
+      harness.tracker.dispose();
+    },
+  );
 
-  test('late success while a retry waits on selection prevents a second send', async () => {
-    const clock = installCapturedTimers();
-    let resolvePrompt: ((value: unknown) => void) | undefined;
-    const prompt = mock(
-      () =>
-        new Promise((resolve) => {
-          resolvePrompt = resolve;
-        }),
-    );
-    // First selection resolves immediately (attempt 1 sends); the second
-    // call (retry) blocks until released, modeling a slow host read.
-    let selectionCalls = 0;
-    let releaseSecondSelection: (() => void) | undefined;
-    const secondGate = new Promise<void>((resolve) => {
-      releaseSecondSelection = resolve;
-    });
-    const harness = createHarness(() => ({ data: [] }), prompt, false, {
-      resolveSelection: async () => {
-        selectionCalls += 1;
-        if (selectionCalls >= 2) await secondGate;
-        return { agent: 'plan', provenance: 'host-persisted' };
-      },
-    });
-    harness.tracker.register({
-      taskID: harness.run.taskID,
-      generation: harness.run.generation,
-      parentSessionID: 'parent',
-      description: 'inspect the change',
-    });
-    const terminal = harness.board.updateStatus({
-      taskID: harness.run.taskID,
-      expectedGeneration: harness.run.generation,
-      state: 'completed',
-      resultSummary: 'done',
-    });
-    if (!terminal) throw new Error('missing terminal record');
-    harness.tracker.onTerminal(terminal);
-    await clock.settle();
-    expect(harness.prompt).toHaveBeenCalledTimes(1);
+  test.each(['rejection', 'error envelope', 'timeout'])(
+    'A accepts while B is sending; B %s cannot trigger C or lose its lease',
+    async (outcome) => {
+      const clock = installCapturedTimers();
+      const a = deferred();
+      const b = deferred();
+      const prompt = mock(() =>
+        prompt.mock.calls.length === 1 ? a.promise : b.promise,
+      );
+      const harness = createHarness(() => ({ data: [] }), prompt);
+      const terminal = publish(harness);
+      await clock.settle();
+      clock.fire(10_000);
+      await clock.settle();
+      expectRelaunchAvailable(harness);
+      clock.fire(0);
+      await clock.settle();
+      expect(harness.prompt).toHaveBeenCalledTimes(2);
+      a.resolve({});
+      await clock.settle();
+      expect(
+        harness.board.acquireRelaunchLease(
+          terminal.taskID,
+          terminal.generation,
+        ),
+      ).toBeUndefined();
+      if (outcome === 'timeout') clock.fire(10_000);
+      else if (outcome === 'rejection') b.reject(new Error('host unavailable'));
+      else b.resolve({ error: 'host rejected' });
+      await clock.settle();
+      expectRelaunchAvailable(harness);
+      expect(clock.soleSurviving(0)).toBeUndefined();
+      harness.tracker.onTerminal(terminal);
+      await clock.settle();
+      expect(harness.prompt).toHaveBeenCalledTimes(2);
+      expect(harness.board.get(terminal.taskID)).toMatchObject(terminal);
+      harness.tracker.dispose();
+    },
+  );
 
-    // Local timeout: retry armed and fired; the retry passes its entry
-    // guard (sent is still false) and parks on the selection await.
-    clock.fire(10_000);
-    await clock.settle();
-    clock.fire(0);
-    await clock.settle();
-    expect(selectionCalls).toBeGreaterThanOrEqual(2);
+  test.each(
+    [
+      { replacement: 'same generation', timedOut: false },
+      { replacement: 'same generation', timedOut: true },
+      { replacement: 'new generation', timedOut: true },
+      { replacement: 'discardRun', timedOut: false },
+      { replacement: 'discardRun', timedOut: true },
+      { replacement: 'dispose', timedOut: false },
+      { replacement: 'dispose', timedOut: true },
+    ].flatMap((scenario) =>
+      ['success', 'rejection', 'error envelope'].map((outcome) => ({
+        ...scenario,
+        outcome,
+      })),
+    ),
+  )(
+    'stale $outcome after $replacement (timeout=$timedOut) cannot alter its successor',
+    async ({ replacement, timedOut, outcome }) => {
+      const clock = installCapturedTimers();
+      const a = deferred();
+      const b = deferred();
+      const prompt = mock(() =>
+        prompt.mock.calls.length === 1 ? a.promise : b.promise,
+      );
+      const harness = createHarness(() => ({ data: [] }), prompt);
+      const terminal = publish(harness);
+      await clock.settle();
+      if (timedOut) {
+        clock.fire(10_000);
+        await clock.settle();
+      }
+      const oldRetry = clock.soleSurviving(0);
+      const hasSuccessor = replacement.includes('generation');
+      let current = terminal;
+      if (replacement === 'new generation') {
+        const lease = harness.board.acquireRelaunchLease(
+          terminal.taskID,
+          terminal.generation,
+        );
+        if (!lease) throw new Error('missing relaunch lease');
+        harness.board.registerLaunch({ ...harness.run, relaunchLease: lease });
+        harness.board.releaseLease(lease);
+        const next = harness.board.updateStatus({
+          taskID: terminal.taskID,
+          state: 'completed',
+          resultSummary: 'new generation',
+        });
+        if (!next) throw new Error('missing new-generation terminal record');
+        current = next;
+      }
+      if (hasSuccessor) {
+        harness.tracker.register({ ...current, description: 'successor' });
+        harness.tracker.onTerminal(current);
+      } else if (replacement === 'discardRun') {
+        harness.board.markRunningFromLiveSession(
+          terminal.taskID,
+          terminal.updatedAt + 1,
+          terminal.generation,
+          terminal.terminalRevision,
+        );
+        expect(
+          harness.tracker.prepareObservation({
+            ...harness.run,
+            description: 'replacement observation',
+          }),
+        ).toBe(true);
+        harness.tracker.rejectObservation(terminal.taskID, terminal.generation);
+      } else {
+        harness.tracker.dispose();
+      }
+      await clock.settle();
+      if (outcome === 'success') a.resolve({});
+      else if (outcome === 'rejection') a.reject(new Error('old failure'));
+      else a.resolve({ error: 'old failure' });
+      await clock.settle();
+      if (hasSuccessor) {
+        if (!timedOut) {
+          expect(clock.fire(0)).toBeDefined();
+          await clock.settle();
+        }
+        expect(harness.prompt).toHaveBeenCalledTimes(2);
+        expect(
+          harness.board.acquireRelaunchLease(
+            current.taskID,
+            current.generation,
+          ),
+        ).toBeUndefined();
+        b.reject(new Error('successor not accepted'));
+        await clock.settle();
+        const newRetry = clock.soleSurviving(0);
+        expect(newRetry).toBeDefined();
+        oldRetry?.callback();
+        await clock.settle();
+        expect(clock.soleSurviving(0)).toBe(newRetry);
+        clock.fire(0);
+        await clock.settle();
+        expect(harness.prompt).toHaveBeenCalledTimes(3);
+        expect(harness.board.get(current.taskID)).toMatchObject(current);
+      } else {
+        oldRetry?.callback();
+        await clock.settle();
+        expect(clock.soleSurviving(0)).toBeUndefined();
+        expect(harness.prompt).toHaveBeenCalledTimes(1);
+        expectRelaunchAvailable(harness);
+      }
+      harness.tracker.dispose();
+    },
+  );
 
-    // The ORIGINAL transport settles successfully after everything: the
-    // notification is delivered, sent is marked, and the parked retry
-    // must not acquire the lease or send again.
-    resolvePrompt?.({});
-    await clock.settle();
-    releaseSecondSelection?.();
-    await clock.settle();
-    await clock.settle();
-
-    expect(harness.prompt).toHaveBeenCalledTimes(1);
-  });
+  test.each([
+    'withdraw publication',
+    'replace run',
+    'dispose',
+    'release lease',
+  ])(
+    'invalidating between acquisition and the deferred send prevents promptAsync: %s',
+    async (invalidation) => {
+      const clock = installCapturedTimers();
+      const harness = createHarness(() => ({ data: [] }));
+      const acquire = harness.board.acquireTerminalNotificationLease.bind(
+        harness.board,
+      );
+      let acquired = false;
+      let invalidated = false;
+      harness.board.acquireTerminalNotificationLease = (...args) => {
+        const lease = acquire(...args);
+        acquired = lease !== undefined && harness.board.validateLease(lease);
+        queueMicrotask(() => {
+          if (invalidation === 'withdraw publication')
+            harness.board.markRunningFromLiveSession(
+              harness.run.taskID,
+              Date.now(),
+              harness.run.generation,
+              lease?.terminalRevision,
+            );
+          else if (invalidation === 'replace run')
+            harness.tracker.register({
+              ...harness.run,
+              description: 'successor',
+            });
+          else if (invalidation === 'dispose') harness.tracker.dispose();
+          else if (lease) harness.board.releaseLease(lease);
+          invalidated = true;
+        });
+        return lease;
+      };
+      publish(harness);
+      await clock.settle();
+      expect(acquired).toBe(true);
+      expect(invalidated).toBe(true);
+      expect(harness.prompt).not.toHaveBeenCalled();
+      expectRelaunchAvailable(harness);
+      expect(clock.soleSurviving(10_000)).toBeUndefined();
+      harness.tracker.dispose();
+    },
+  );
 
   test('a pending probe replaced by another same-generation registration does not terminalize', async () => {
     let resolveMessages: ((value: unknown) => void) | undefined;

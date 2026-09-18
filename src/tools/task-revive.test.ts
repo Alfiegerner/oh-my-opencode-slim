@@ -1,4 +1,12 @@
-import { afterEach, describe, expect, mock, test } from 'bun:test';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from 'bun:test';
 import { createOpencodeClient } from '@opencode-ai/sdk';
 import { createRevivedRunTracker } from '../hooks/task-session-manager/revived-run-tracker';
 import { BackgroundJobBoard } from '../utils/background-job-fixture';
@@ -6,21 +14,17 @@ import {
   type BackgroundJobTerminalGate,
   createBackgroundJobTerminalGate,
 } from '../utils/background-job-terminal-gate';
+import * as opencodeClient from '../utils/opencode-client';
 import { createCancelTaskTool } from './cancel-task';
 import { createTaskReviveTool } from './task-revive';
 
 const gates: BackgroundJobTerminalGate[] = [];
 
-let mockClient: Record<string, unknown>;
-
-mock.module('../utils/opencode-client', () => ({
-  getClient: () => mockClient,
-}));
-
 function createTool(overrides?: {
   abort?: () => Promise<unknown>;
   status?: () => Promise<unknown>;
   promptAsync?: () => Promise<unknown>;
+  messages?: () => Promise<unknown>;
   revivedRunTracker?: {
     captureBaseline: () => Promise<string | undefined>;
     register: (input: unknown) => void;
@@ -36,21 +40,26 @@ function createTool(overrides?: {
     overrides?.status ?? (async () => ({ data: { ses_1: { type: 'idle' } } })),
   );
   const promptAsync = mock(overrides?.promptAsync ?? (async () => ({})));
-  mockClient = { session: { abort, status, promptAsync } };
+  const input = {
+    directory: '/test/project',
+    client: {
+      session: { abort, status, promptAsync, messages: overrides?.messages },
+    },
+  } as never;
   const terminalGate = createBackgroundJobTerminalGate({
     backgroundJobBoard: board,
-    input: { directory: '/test/project' } as never,
+    input,
   });
   gates.push(terminalGate);
   const revivedRunTracker =
     overrides?.revivedRunTracker ??
     createRevivedRunTracker({
-      input: { directory: '/test/project' } as any,
+      input,
       backgroundJobBoard: board,
       terminalGate,
     });
   const tools = createTaskReviveTool({
-    input: { directory: '/test/project' } as any,
+    input,
     backgroundJobBoard: board,
     shouldManageSession: () => true,
     verifyAbortMs: 10,
@@ -59,7 +68,7 @@ function createTool(overrides?: {
     revivedRunTracker,
   });
   const cancelTools = createCancelTaskTool({
-    input: { directory: '/test/project' } as any,
+    input,
     backgroundJobBoard: board,
     terminalGate,
     shouldManageSession: () => true,
@@ -72,12 +81,19 @@ function createTool(overrides?: {
     abort,
     status,
     promptAsync,
+    revivedRunTracker,
     taskCancel: cancelTools.task_cancel,
     taskRevive: tools.task_revive,
   };
 }
 
 const context = { sessionID: 'parent-1', agent: 'orchestrator' } as any;
+
+beforeEach(() => {
+  // Other suites can leave module mocks installed. Override only for this
+  // test; mock.restore below restores the previous implementation afterward.
+  spyOn(opencodeClient, 'getClient').mockImplementation((input) => input.client);
+});
 
 afterEach(() => {
   for (const gate of gates.splice(0)) gate.dispose();
@@ -110,6 +126,116 @@ function stoppedSession(
 }
 
 describe('task_revive tool', () => {
+  test.each(['success', 'rejection', 'error envelope'])(
+    'notification timeout permits a real revive; old %s leaves the new generation and lease intact',
+    async (outcome) => {
+      const timers = new Map<number, { delay: number; callback: () => void }>();
+      let nextID = 0;
+      spyOn(globalThis, 'setTimeout').mockImplementation(((
+        callback: () => void,
+        delay: number,
+      ) => {
+        const id = ++nextID;
+        timers.set(id, { delay, callback });
+        return id;
+      }) as typeof setTimeout);
+      spyOn(globalThis, 'clearTimeout').mockImplementation(((id: number) => {
+        timers.delete(id);
+      }) as typeof clearTimeout);
+      const flush = async () => {
+        for (let i = 0; i < 50; i++) await Promise.resolve();
+      };
+      let resolve!: (value: unknown) => void;
+      let reject!: (error: unknown) => void;
+      const pending = new Promise((yes, no) => {
+        resolve = yes;
+        reject = no;
+      });
+      const { board, promptAsync, taskRevive, revivedRunTracker } = createTool({
+        messages: async () => ({
+          data: [
+            {
+              info: {
+                id: 'old-result',
+                role: 'assistant',
+                finish: 'stop',
+                time: { completed: 1 },
+              },
+              parts: [{ type: 'text', text: 'done' }],
+            },
+          ],
+        }),
+      });
+      promptAsync.mockImplementationOnce(() => pending);
+      const run = board.registerLaunch({
+        taskID: 'ses_1',
+        parentSessionID: 'parent-1',
+        agent: 'explorer',
+        background: true,
+      });
+      revivedRunTracker.register(run);
+      const terminal = board.updateStatus({
+        taskID: run.taskID,
+        state: 'completed',
+        resultSummary: 'done',
+      });
+      if (!terminal) throw new Error('missing terminal record');
+      revivedRunTracker.onTerminal(terminal);
+      await flush();
+      const args = {
+        task_id: run.taskID,
+        prompt: 'Continue the investigation',
+      };
+      await expect(taskRevive.execute(args, context)).rejects.toThrow(
+        'relaunch lease unavailable',
+      );
+      expect(promptAsync).toHaveBeenCalledTimes(1);
+      const timeout = [...timers.values()].find(
+        (timer) => timer.delay === 10_000,
+      );
+      expect(timeout).toBeDefined();
+      timeout?.callback();
+      await flush();
+      try {
+        const output = await taskRevive.execute(args, context);
+        expect(String(output)).toContain('status: started');
+        expect(promptAsync).toHaveBeenCalledTimes(2);
+        expect(promptAsync.mock.calls[1]?.[0]).toMatchObject({
+          path: { id: run.taskID },
+          delivery: 'queue',
+        });
+        const current = board.get(run.taskID);
+        if (!current) throw new Error('missing revived record');
+        expect(current).toMatchObject({
+          generation: run.generation + 1,
+          state: 'running',
+        });
+        const lease = board.acquireMessageLease(
+          current.taskID,
+          current.generation,
+        );
+        if (!lease) throw new Error('missing new-generation lease');
+        if (outcome === 'success') resolve({});
+        else if (outcome === 'rejection')
+          reject(new Error('old transport failed'));
+        else resolve({ error: 'old transport failed' });
+        await flush();
+        expect(board.get(run.taskID)).toEqual(current);
+        expect(board.validateLease(lease)).toBe(true);
+        expect(
+          board.acquireRelaunchLease(current.taskID, current.generation),
+        ).toBeUndefined();
+        expect(board.releaseLease(lease)).toBe(true);
+        expect(
+          [...timers.values()].some((timer) => timer.delay === 1_000),
+        ).toBe(false);
+        expect(promptAsync).toHaveBeenCalledTimes(2);
+      } finally {
+        revivedRunTracker.dispose();
+      }
+    },
+  );
+
   test('uses promptAsync, starts a new board generation, and retains the session', async () => {
     const { board, promptAsync, taskRevive } = createTool();
     acknowledgedCompleted(board);
