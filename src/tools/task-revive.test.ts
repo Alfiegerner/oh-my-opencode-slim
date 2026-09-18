@@ -8,13 +8,19 @@ import {
   test,
 } from 'bun:test';
 import { createOpencodeClient } from '@opencode-ai/sdk';
-import { createRevivedRunTracker } from '../hooks/task-session-manager/revived-run-tracker';
+import {
+  createRevivedRunTracker,
+  type RevivedRunTracker,
+} from '../hooks/task-session-manager/revived-run-tracker';
+import { BackgroundJobBoard as ProductionBoard } from '../utils/background-job-board';
 import { BackgroundJobBoard } from '../utils/background-job-fixture';
 import {
   type BackgroundJobTerminalGate,
   createBackgroundJobTerminalGate,
 } from '../utils/background-job-terminal-gate';
+import * as logger from '../utils/logger';
 import * as opencodeClient from '../utils/opencode-client';
+import { OperationTimeoutError } from '../utils/session';
 import { createCancelTaskTool } from './cancel-task';
 import { createTaskReviveTool } from './task-revive';
 
@@ -27,14 +33,10 @@ function createTool(overrides?: {
   omitStatus?: boolean;
   promptAsync?: () => Promise<unknown>;
   messages?: () => Promise<unknown>;
-  revivedRunTracker?: {
-    captureBaseline: () => Promise<string | undefined>;
-    register: (input: unknown) => void;
-    isTracked: (taskID: string, generation: number) => boolean;
-    probe: (taskID: string, generation: number) => Promise<boolean>;
-    onTerminal: (record: unknown) => void;
-    dispose: () => void;
-  };
+  baselineTimeoutMs?: number;
+  admissionTimeoutMs?: number;
+  onLaunch?: () => void;
+  revivedRunTracker?: Partial<RevivedRunTracker>;
 }) {
   const board = new BackgroundJobBoard();
   const abort = mock(overrides?.abort ?? (async () => ({})));
@@ -58,13 +60,15 @@ function createTool(overrides?: {
     input,
   });
   gates.push(terminalGate);
-  const revivedRunTracker =
-    overrides?.revivedRunTracker ??
+  const revivedRunTracker = Object.assign(
     createRevivedRunTracker({
       input,
       backgroundJobBoard: board,
       terminalGate,
-    });
+    }),
+    overrides?.revivedRunTracker,
+  );
+  const onLaunch = mock(overrides?.onLaunch ?? (() => {}));
   const tools = createTaskReviveTool({
     input,
     backgroundJobBoard: board,
@@ -73,6 +77,9 @@ function createTool(overrides?: {
     abortRetryIntervalMs: 0,
     stableStoppedMs: 0,
     revivedRunTracker,
+    backgroundJobSupervisor: { onLaunch } as never,
+    baselineTimeoutMs: overrides?.baselineTimeoutMs,
+    admissionTimeoutMs: overrides?.admissionTimeoutMs,
   });
   const cancelTools = createCancelTaskTool({
     input,
@@ -89,6 +96,7 @@ function createTool(overrides?: {
     status,
     promptAsync,
     revivedRunTracker,
+    onLaunch,
     taskCancel: cancelTools.task_cancel,
     taskRevive: tools.task_revive,
   };
@@ -281,7 +289,6 @@ describe('task_revive tool', () => {
     const tracker = {
       captureBaseline: async () => undefined,
       register: () => {},
-      isTracked: () => false,
       probe: async (_taskID: string, generation: number) => {
         board.updateStatus({
           taskID: 'ses_1',
@@ -291,8 +298,6 @@ describe('task_revive tool', () => {
         });
         return true;
       },
-      onTerminal: () => {},
-      dispose: () => {},
     };
     const tools = createTool({ revivedRunTracker: tracker });
     board = tools.board;
@@ -423,59 +428,105 @@ describe('task_revive tool', () => {
     });
   });
 
-  test('refuses to relaunch when a late busy revives the generation during baseline capture', async () => {
-    // P1 regression: captureBaseline awaits network I/O. If a live busy
-    // observation arrives while the baseline is in flight, the revive
-    // must NOT send promptAsync over the still-active generation, must
-    // not bump the board generation, and must release the relaunch
-    // lease. With the lease held, the busy observation keeps the record
-    // stopped and only advances lastLiveBusyAt; the revive refuses on
-    // that fresh-activity signal.
-    let resolveBaseline: (id: string | undefined) => void = () => {};
-    const baselineGate = new Promise<string | undefined>((resolve) => {
-      resolveBaseline = resolve;
-    });
-    const deferredTracker = {
-      captureBaseline: () => baselineGate,
-      register: () => {},
-      isTracked: () => false,
-      probe: () => Promise.resolve(true),
-      onTerminal: () => {},
-      dispose: () => {},
-    };
-    const { board, promptAsync, taskRevive } = createTool({
-      revivedRunTracker: deferredTracker as any,
-    });
-    stoppedSession(board);
+  test.each(['resolve', 'reject'] as const)(
+    'baseline deadline releases the lease; late %s cannot send or retire a replacement',
+    async (settlement) => {
+      const baseline = Promise.withResolvers<string | undefined>();
+      const { board, promptAsync, taskRevive } = createTool({
+        baselineTimeoutMs: 5,
+        revivedRunTracker: { captureBaseline: () => baseline.promise },
+      });
+      stoppedSession(board);
+      await expect(
+        taskRevive.execute({ task_id: 'ses_1', prompt: 'continue' }, context),
+      ).rejects.toThrow(/baseline.*deadline/i);
+      const replacement = board.acquireRelaunchLease('ses_1', 1);
+      expect(replacement).toBeDefined();
+      if (!replacement) throw new Error('missing replacement lease');
+      if (settlement === 'resolve') baseline.resolve('late-baseline');
+      else baseline.reject(new Error('late read failure'));
+      await Bun.sleep(0);
+      expect(promptAsync).not.toHaveBeenCalled();
+      expect(board.get('ses_1')?.generation).toBe(1);
+      expect(board.validateLease(replacement)).toBe(true);
+      board.releaseLease(replacement);
+    },
+  );
 
-    const pending = taskRevive.execute(
-      { task_id: 'ses_1', prompt: 'continue' },
-      context,
-    );
-    // Late busy observation lands while captureBaseline is in flight.
-    board.markRunningFromLiveSession('ses_1', 115);
-    resolveBaseline(undefined);
-
-    await expect(pending).rejects.toThrow(/became active again/);
-    expect(promptAsync).toHaveBeenCalledTimes(0);
-    expect(board.get('ses_1')).toMatchObject({
-      state: 'running',
-      generation: 1,
-      lastLiveBusyAt: 115,
-    });
-    // The relaunch lease was released: a new acquire on the same
-    // generation succeeds.
-    const reLease = board.acquireRelaunchLease('ses_1', 1);
-    expect(reLease).toBeDefined();
-    if (reLease) board.releaseLease(reLease);
-  });
+  test.each([
+    ['baseline', 'running', /became active again/],
+    ['status', 'running', /became active again/],
+    ['status', 'drop', /no longer tracked/],
+    ['status', 'generation', /generation changed/],
+    ['status', 'lease', /became active again/],
+  ] as const)(
+    'refuses a %s read invalidated by %s',
+    async (phase, change, error) => {
+      const entered = Promise.withResolvers<void>();
+      const read = Promise.withResolvers<void>();
+      const { board, promptAsync, taskRevive } = createTool({
+        status: async () => {
+          if (phase === 'status') {
+            entered.resolve();
+            await read.promise;
+          }
+          return { data: { ses_1: { type: 'idle' } } };
+        },
+        revivedRunTracker: {
+          captureBaseline: async () => {
+            if (phase === 'baseline') {
+              entered.resolve();
+              await read.promise;
+            }
+            return undefined;
+          },
+        },
+      });
+      stoppedSession(board);
+      const acquire = spyOn(ProductionBoard.prototype, 'acquireRelaunchLease');
+      const pending = taskRevive.execute(
+        { task_id: 'ses_1', prompt: 'continue' },
+        context,
+      );
+      await entered.promise;
+      const lease = acquire.mock.results[0]?.value;
+      if (!lease) throw new Error('missing relaunch lease');
+      let replacement: typeof lease | undefined;
+      if (change === 'drop') board.drop('ses_1');
+      if (change === 'generation' || change === 'lease') {
+        board.releaseLease(lease);
+        if (change === 'generation') acknowledgedCompleted(board);
+        else replacement = board.acquireRelaunchLease('ses_1', 1);
+      }
+      if (change === 'running') board.markRunningFromLiveSession('ses_1', 115);
+      read.resolve();
+      await expect(pending).rejects.toThrow(error);
+      expect(promptAsync).not.toHaveBeenCalled();
+      expect(board.validateLease(lease)).toBe(false);
+      if (change === 'running') {
+        expect(board.get('ses_1')).toMatchObject({
+          state: 'running',
+          generation: 1,
+          lastLiveBusyAt: 115,
+        });
+      }
+      if (replacement) {
+        expect(board.validateLease(replacement)).toBe(true);
+        board.releaseLease(replacement);
+      }
+      if (change === 'drop') acknowledgedCompleted(board);
+      const reLease = board.acquireRelaunchLease(
+        'ses_1',
+        board.get('ses_1')?.generation ?? -1,
+      );
+      expect(reLease).toBeDefined();
+      if (reLease) board.releaseLease(reLease);
+    },
+  );
 
   test('refuses to relaunch when the host reports the session busy even if the board is stopped', async () => {
-    // P1 regression (host fence): the board record stays stopped under
-    // the relaunch lease, but the session may have resumed
-    // independently at the host. On v2 hosts promptAsync degrades to
-    // steering an in-flight run instead of rejecting it, so a live
-    // busy/retry entry must refuse before the prompt is sent.
+    // The host can resume independently before the board observes it;
+    // its busy/retry entry must refuse before the prompt is sent.
     const { board, promptAsync, status, taskRevive } = createTool({
       status: async () => ({ data: { ses_1: { type: 'busy' } } }),
     });
@@ -566,27 +617,277 @@ describe('task_revive tool', () => {
     expect(promptAsync).not.toHaveBeenCalled();
   });
 
-  test('releases the relaunch lease when promptAsync fails', async () => {
-    const { board, promptAsync, taskRevive } = createTool({
-      promptAsync: async () => {
-        throw new Error('host unavailable');
+  test.each(['reject', 'error response', 'throw', 'transport timeout'])(
+    'releases the relaunch lease when promptAsync fails via %s',
+    async (failure) => {
+      const error =
+        failure === 'transport timeout'
+          ? new OperationTimeoutError('Revive admission deadline exceeded')
+          : new Error('host unavailable');
+      const { board, promptAsync, taskRevive } = createTool({
+        promptAsync: () => {
+          if (failure === 'throw') throw error;
+          return failure === 'error response'
+            ? Promise.resolve({ error: error.message })
+            : Promise.reject(error);
+        },
+      });
+      acknowledgedCompleted(board);
+
+      await expect(
+        taskRevive.execute({ task_id: 'ses_1', prompt: 'retry' }, context),
+      ).rejects.toThrow(`revive failed: ${error.message}`);
+      expect(promptAsync).toHaveBeenCalledTimes(1);
+      const lease = board.acquireRelaunchLease('ses_1', 1);
+      expect(lease).toBeDefined();
+      if (lease) board.releaseLease(lease);
+      expect(board.get('ses_1')).toMatchObject({
+        generation: 1,
+        state: 'reconciled',
+        statusUncertain: false,
+      });
+    },
+  );
+
+  test.each(['deadline first', 'acceptance first'])(
+    'keeps the local deadline outcome when admission settles in the same tick: %s',
+    async (order) => {
+      const send = Promise.withResolvers<unknown>();
+      const deadlineReady = Promise.withResolvers<() => void>();
+      const admissionTimeoutMs = 1_000;
+      const realSetTimeout = globalThis.setTimeout;
+      spyOn(globalThis, 'setTimeout').mockImplementation(
+        (callback, ms, ...args) => {
+          const timer = realSetTimeout(callback, ms, ...args);
+          if (ms === admissionTimeoutMs)
+            deadlineReady.resolve(() => {
+              clearTimeout(timer);
+              callback(...args);
+            });
+          return timer;
+        },
+      );
+      const log = spyOn(logger, 'log').mockImplementation(() => {});
+      const { board, taskRevive, revivedRunTracker, onLaunch } = createTool({
+        admissionTimeoutMs,
+        promptAsync: () => send.promise,
+        revivedRunTracker: { probe: async () => false },
+      });
+      acknowledgedCompleted(board);
+      const launch = spyOn(ProductionBoard.prototype, 'registerLaunch');
+      const register = spyOn(revivedRunTracker, 'register');
+      const pending = taskRevive.execute(
+        { task_id: 'ses_1', prompt: 'go' },
+        context,
+      );
+      const admissionDeadline = await deadlineReady.promise;
+      // No await between these actions: settlement races the timer's microtasks.
+      if (order === 'deadline first') {
+        admissionDeadline();
+        send.resolve({});
+      } else {
+        send.resolve({});
+        admissionDeadline();
+      }
+      const output = String(await pending);
+      await Bun.sleep(0);
+      expect(output).toContain('status: admission_unknown');
+      expect(output).toContain('do not retry task_revive');
+      expect(output).toContain('Use task_status');
+      expect(output).not.toContain('revive failed');
+      expect(launch).toHaveBeenCalledTimes(1);
+      expect(register).toHaveBeenCalledTimes(1);
+      expect(onLaunch).toHaveBeenCalledTimes(1);
+      expect(board.get('ses_1')).toMatchObject({
+        generation: 2,
+        state: 'running',
+      });
+      const lease = board.acquireRelaunchLease('ses_1', 2);
+      expect(lease).toBeDefined();
+      if (lease) board.releaseLease(lease);
+      expect(log).not.toHaveBeenCalled();
+    },
+  );
+
+  test.each([
+    'pending',
+    'accepted',
+    'rejected',
+    'error response',
+    'tracker error',
+    'supervisor error',
+    'dropped',
+    'revoked',
+    'superseded',
+  ])('owns unknown admission until late settlement: %s', async (outcome) => {
+    const send = Promise.withResolvers<unknown>();
+    const log = spyOn(logger, 'log').mockImplementation(() => {});
+    const { board, taskRevive, revivedRunTracker, onLaunch } = createTool({
+      admissionTimeoutMs: 5,
+      promptAsync: () => send.promise,
+      onLaunch: () => {
+        if (outcome === 'supervisor error')
+          throw new Error('supervisor failed');
+      },
+      revivedRunTracker: {
+        captureBaseline: async () => 'baseline',
+        register: () => {
+          if (outcome === 'tracker error') throw new Error('tracker failed');
+        },
+        probe: async () => false,
       },
     });
     acknowledgedCompleted(board);
+    const acquire = spyOn(ProductionBoard.prototype, 'acquireRelaunchLease');
+    const launch = spyOn(ProductionBoard.prototype, 'registerLaunch');
+    const register = spyOn(revivedRunTracker, 'register');
+    const probe = spyOn(revivedRunTracker, 'probe');
+    const output = await taskRevive.execute(
+      { task_id: 'ses_1', prompt: 'continue' },
+      context,
+    );
+    expect(String(output)).toContain('status: admission_unknown');
+    expect(String(output)).not.toContain('<task_result>');
+    expect(launch).not.toHaveBeenCalled();
+    expect(register).not.toHaveBeenCalled();
+    expect(onLaunch).not.toHaveBeenCalled();
+    const lease = acquire.mock.results[0]?.value;
+    if (!lease) throw new Error('missing relaunch lease');
+    expect(board.validateLease(lease)).toBe(true);
+    expect(board.acquireRelaunchLease('ses_1', 1)).toBeUndefined();
+    if (outcome === 'pending') return;
 
-    await expect(
-      taskRevive.execute({ task_id: 'ses_1', prompt: 'retry' }, context),
-    ).rejects.toThrow('host unavailable');
-    expect(promptAsync).toHaveBeenCalledTimes(1);
-    const lease = board.acquireRelaunchLease('ses_1', 1);
-    expect(lease).toBeDefined();
-    if (lease) board.releaseLease(lease);
-    expect(board.get('ses_1')).toMatchObject({
-      generation: 1,
-      state: 'reconciled',
-      statusUncertain: false,
-    });
+    let replacement: typeof lease | undefined;
+    if (outcome === 'dropped') board.drop('ses_1');
+    if (outcome === 'revoked' || outcome === 'superseded') {
+      board.releaseLease(lease);
+      if (outcome === 'superseded') acknowledgedCompleted(board);
+      replacement = board.acquireRelaunchLease(
+        'ses_1',
+        board.get('ses_1')?.generation ?? -1,
+      );
+    }
+    const generation = board.get('ses_1')?.generation;
+    launch.mockClear();
+    if (outcome === 'rejected') send.reject(new Error('host unavailable'));
+    else
+      send.resolve(
+        outcome === 'error response' ? { error: 'host refused' } : {},
+      );
+    // Repeated and conflicting settlements must never register twice.
+    send.resolve({});
+    send.reject(new Error('duplicate settlement'));
+    await Bun.sleep(0);
+    const admitted = ['accepted', 'tracker error', 'supervisor error'].includes(
+      outcome,
+    );
+    expect(launch).toHaveBeenCalledTimes(
+      ['rejected', 'error response'].includes(outcome) ? 0 : 1,
+    );
+    expect(register).toHaveBeenCalledTimes(admitted ? 1 : 0);
+    expect(onLaunch).toHaveBeenCalledTimes(
+      admitted && outcome !== 'tracker error' ? 1 : 0,
+    );
+    expect(probe).toHaveBeenCalledTimes(outcome === 'accepted' ? 1 : 0);
+    expect(board.get('ses_1')?.generation).toBe(admitted ? 2 : generation);
+    if (outcome === 'accepted') {
+      expect(register).toHaveBeenCalledWith(
+        expect.objectContaining({
+          taskID: 'ses_1',
+          generation: 2,
+          baselineMessageID: 'baseline',
+        }),
+      );
+      expect(log).not.toHaveBeenCalled();
+    } else
+      expect(log).toHaveBeenCalledWith(
+        '[task-revive] admission failed',
+        expect.anything(),
+      );
+    expect(board.validateLease(lease)).toBe(false);
+    if (replacement) {
+      expect(board.validateLease(replacement)).toBe(true);
+      board.releaseLease(replacement);
+    }
+    if (outcome === 'dropped') acknowledgedCompleted(board);
+    const available = board.acquireRelaunchLease(
+      'ses_1',
+      board.get('ses_1')?.generation ?? -1,
+    );
+    expect(available).toBeDefined();
+    if (available) board.releaseLease(available);
   });
+
+  test.each(['immediate', 'late', 'superseded'])(
+    '%s observation does not hold relaunch exclusion',
+    async (timing) => {
+      const send = Promise.withResolvers<unknown>();
+      const probing = Promise.withResolvers<void>();
+      const observation = Promise.withResolvers<boolean>();
+      const log = spyOn(logger, 'log').mockImplementation(() => {});
+      const { board, taskRevive, promptAsync, abort } = createTool({
+        admissionTimeoutMs: 5,
+        promptAsync: () =>
+          timing === 'late' ? send.promise : Promise.resolve({}),
+        revivedRunTracker: {
+          captureBaseline: async () => undefined,
+          register: () => {},
+          probe: (_taskID, generation) => {
+            if (generation === 3) return Promise.resolve(false);
+            probing.resolve();
+            return observation.promise;
+          },
+        },
+      });
+      acknowledgedCompleted(board);
+      const pending = taskRevive.execute(
+        { task_id: 'ses_1', prompt: 'go' },
+        context,
+      );
+      if (timing === 'late') {
+        expect(String(await pending)).toContain('status: admission_unknown');
+        send.resolve({});
+      }
+      await probing.promise;
+      const lease = board.acquireRelaunchLease('ses_1', 2);
+      expect(lease).toBeDefined();
+      if (lease) board.releaseLease(lease);
+      if (timing === 'superseded') {
+        const replacement = String(
+          await taskRevive.execute(
+            { task_id: 'ses_1', prompt: 'replace G2' },
+            context,
+          ),
+        );
+        observation.resolve(false);
+        await expect(pending).rejects.toThrow('revive became stale');
+        expect(replacement).toContain('generation: 3');
+        expect(replacement).toContain('status: started');
+        expect(board.get('ses_1')).toMatchObject({
+          generation: 3,
+          state: 'running',
+        });
+        expect(promptAsync).toHaveBeenCalledTimes(2);
+        expect(abort).toHaveBeenCalledTimes(1);
+        expect(log).not.toHaveBeenCalled();
+        return;
+      }
+      observation.reject(new Error('probe failed'));
+      if (timing === 'immediate')
+        expect(String(await pending)).toContain('status: started');
+      await Bun.sleep(0);
+      expect(board.get('ses_1')).toMatchObject({
+        generation: 2,
+        state: 'running',
+        statusUncertain: false,
+      });
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(log).toHaveBeenCalledWith(
+        '[task-revive] observation failed',
+        expect.anything(),
+      );
+    },
+  );
 
   test('v1 SDK serializes only the body: the delivery hint never reaches the wire', async () => {
     // v1 compatibility evidence for the queue-delivery fence: the hint

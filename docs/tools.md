@@ -72,6 +72,20 @@ launching replacement work.
 errored, or stopped retained session may be revived immediately once its
 retained state has been verified safe. Acknowledgement controls parent and
 job-board consumption and reusable-pool display, not same-session revival.
+Baseline capture has a 5-second deadline: expiry fails without sending a prompt
+and releases the relaunch lease. The local admission wait has a 10-second deadline;
+expiry returns `status: admission_unknown`, not a launch failure. The reported
+generation/state is the pre-admission snapshot, even if acceptance settles before
+the caller receives the deadline result. The host may already be running
+the prompt, so do not retry: inspect with `task_status`. The pending send retains
+its lease until settlement; late acceptance registers the new generation once,
+while rejection releases it without registration. Completion probing happens
+after lease release, and probe errors are logged as observation failures.
+Observation does not reserve the generation: if another `task_revive` replaces it
+while the first caller awaits its probe, the first call rejects with
+`revive became stale`. This supersession rejection does not invalidate the newer
+launch; use `task_status` to inspect the current generation.
+
 `task()` refuses an explicit `task_id` it cannot resume instead of dropping it
 and spawning another session.
 
