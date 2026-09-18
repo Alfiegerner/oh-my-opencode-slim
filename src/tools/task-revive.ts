@@ -136,24 +136,37 @@ export function createTaskReviveTool(
         // or retry entry must refuse here; an unverifiable map refuses
         // rather than guessing. A verified-absent entry means no active
         // runner: the session is idle and safe to prompt.
-        const liveSnapshot = await getRuntimeSessionStatusSnapshot(
-          options.input,
-        );
-        const liveStatus = liveSnapshot.statuses.get(current.taskID);
-        if (liveStatus === 'busy' || liveStatus === 'retry') {
-          throw new Error(
-            `Task ${requested} is executing at the host (live status: ${liveStatus}); the revive prompt was NOT sent and no duplicate was launched. Use task_status to inspect it.`,
-          );
-        }
-        if (
-          liveSnapshot.error !== undefined ||
-          liveSnapshot.malformedSessionIDs.has(current.taskID)
-        ) {
-          throw new Error(
-            `Task ${requested} could not be verified against the live session map (${liveSnapshot.error ?? 'malformed entry'}); the revive prompt was NOT sent. Retry task_revive.`,
-          );
-        }
+        //
+        // v2 hosts expose no live status map at all (client-shim.ts
+        // intentionally omits `session.status`: v2 has no equivalent of
+        // the v1 map). Checking `typeof session.status === 'function'`
+        // is the same capability signal cancel-task.ts's verifier uses.
+        // Without it, `getRuntimeSessionStatusSnapshot` always errors,
+        // and treating that as "unverifiable" would permanently block
+        // every revive on v2. The freshLiveActivity check above already
+        // covers v2 (event-adapter.ts synthesizes busy/idle session.status
+        // from session.execution.* into the board's lastLiveBusyAt), so
+        // this extra map check only runs where the map actually exists.
         const session = getClient(options.input).session;
+        if (typeof session.status === 'function') {
+          const liveSnapshot = await getRuntimeSessionStatusSnapshot(
+            options.input,
+          );
+          const liveStatus = liveSnapshot.statuses.get(current.taskID);
+          if (liveStatus === 'busy' || liveStatus === 'retry') {
+            throw new Error(
+              `Task ${requested} is executing at the host (live status: ${liveStatus}); the revive prompt was NOT sent and no duplicate was launched. Use task_status to inspect it.`,
+            );
+          }
+          if (
+            liveSnapshot.error !== undefined ||
+            liveSnapshot.malformedSessionIDs.has(current.taskID)
+          ) {
+            throw new Error(
+              `Task ${requested} could not be verified against the live session map (${liveSnapshot.error ?? 'malformed entry'}); the revive prompt was NOT sent. Retry task_revive.`,
+            );
+          }
+        }
         if (typeof session.promptAsync !== 'function') {
           throw new Error('The host session does not support promptAsync');
         }
