@@ -153,6 +153,15 @@ export const ORCHESTRATOR_CHILDREN_WAKE_TEXT =
 /** After this many successful wakes with an unchanged fingerprint, stop. */
 export const ORCHESTRATOR_WAKE_UNCHANGED_CAP = 2;
 
+/**
+ * Default per-parent throttle window for terminal-publication wakes
+ * (`orchestratorWake.publicationWakeMinIntervalMs`). Bounds how often a
+ * publication burst (several children finishing together) may wake one
+ * idle parent; the first eligible publication wins and later ones inside
+ * the window are dropped (their results ride the next board snapshot).
+ */
+export const DEFAULT_PUBLICATION_WAKE_MIN_INTERVAL_MS = 30_000;
+
 /** Max stopped-job deltas queued per parent. Oldest entries are dropped
  * when a new distinct stop would exceed the cap, so a busy/waiting parent
  * cannot grow an unbounded recovery prompt. */
@@ -220,6 +229,11 @@ type LocalSessionState = {
   archived: boolean;
 };
 
+/** Why an evaluation is running. 'periodic' is the interval timer;
+ * 'recovery' is the stopped-job path; 'publication' is a terminal
+ * completed/error publication reaching an idle parent. */
+type WakeReason = 'periodic' | 'recovery' | 'publication';
+
 export type OrchestratorWakeConfig = {
   enabled: boolean;
   intervalMs: number;
@@ -227,6 +241,14 @@ export type OrchestratorWakeConfig = {
    * `resolveWakeMode`). Optional for callers built before the field
    * existed — absent means 'auto'. */
   mode?: 'auto' | 'todo' | 'children';
+  /** Feature flag for terminal-publication wakes: waking an idle parent
+   * when the terminal gate publishes a completed/error outcome. Optional
+   * for callers built before the field existed — absent means enabled. */
+  wakeOnTerminalPublication?: boolean;
+  /** Per-parent minimum spacing between terminal-publication wakes.
+   * 0 disables the throttle. Absent means
+   * `DEFAULT_PUBLICATION_WAKE_MIN_INTERVAL_MS`. */
+  publicationWakeMinIntervalMs?: number;
 };
 
 export type OrchestratorWakeOptions = {
@@ -576,6 +598,11 @@ export function createOrchestratorWakeScheduler(
 ) {
   const intervalMs = options.intervalMs ?? options.config.intervalMs;
   const enabled = options.config.enabled === true;
+  const wakeOnTerminalPublication =
+    options.config.wakeOnTerminalPublication ?? true;
+  const publicationWakeMinIntervalMs =
+    options.config.publicationWakeMinIntervalMs ??
+    DEFAULT_PUBLICATION_WAKE_MIN_INTERVAL_MS;
   const directory = ctx.directory;
   const sessionSdk = (ctx.client as OpencodeClient).session;
 
@@ -612,6 +639,10 @@ export function createOrchestratorWakeScheduler(
    * must survive its confirmation: only the keys actually sent are retired on
    * delivery. */
   const pendingStoppedRecoveries = new Map<string, PendingStoppedRecovery>();
+
+  /** Last terminal-publication wake per parent (epoch ms), for the
+   * `publicationWakeMinIntervalMs` throttle. */
+  const lastPublicationWakeAt = new Map<string, number>();
 
   function parseRecoveryKey(
     key: string,
@@ -779,6 +810,7 @@ export function createOrchestratorWakeScheduler(
     clearLocalSession(sessionID);
     clearWakeSession(sessionID);
     pendingStoppedRecoveries.delete(sessionID);
+    lastPublicationWakeAt.delete(sessionID);
   }
 
   function suppressArchivedSession(sessionID: string): void {
@@ -843,14 +875,27 @@ export function createOrchestratorWakeScheduler(
     );
   }
 
-  function canSchedule(sessionID: string): boolean {
+  function canSchedule(
+    sessionID: string,
+    scheduleOptions?: { ignoreProgressCap?: boolean },
+  ): boolean {
     if (!enabled) return false;
     if (!capabilities.ready) return false;
     if (!canObserveSelection(sessionID)) return false;
     if (localSessions.get(sessionID)?.archived) return false;
     if (options.hasInputWait(sessionID)) return false;
     if (options.isFallbackInProgress?.(sessionID)) return false;
-    if (getWakeProgress(sessionID).stopped) return false;
+    // The no-progress cap normally blocks re-entry after two unchanged
+    // wakes. A terminal-publication wake deliberately bypasses ONLY this
+    // clause: the in-evaluation fingerprint comparison is the authoritative
+    // progress test there (a publication changes the children fingerprint,
+    // so noteHostProgress un-stops a genuinely progressed session, while an
+    // unchanged fingerprint keeps the cap tripped).
+    if (
+      !scheduleOptions?.ignoreProgressCap &&
+      getWakeProgress(sessionID).stopped
+    )
+      return false;
     return true;
   }
 
@@ -1180,19 +1225,25 @@ export function createOrchestratorWakeScheduler(
    * v1 check sequence (host status map → active-child suppression →
    * incomplete-todo condition); children mode replaces the status-map
    * lookups with the event-tracked parent guard and the outcome-based child
-   * check (active children ARE the wake condition there — recovery wakes
-   * bypass it, as on v1).
+   * check (active children ARE the wake condition there — recovery and
+   * terminal-publication wakes bypass it, as on v1).
+   *
+   * `forceWake` covers both non-periodic reasons (stopped-job recovery and
+   * terminal publication): each is externally evidenced work whose wake
+   * condition is the event itself, not the snapshot's summary of remaining
+   * work. Without the flag an idle parent with no active children (and no
+   * incomplete todos) classifies 'no-work' and the wake silently no-ops.
    */
   function classifyTodoSnapshot(
     snapshot: TodoModeSnapshot,
     sessionID: string,
-    recoveryWake: boolean,
+    forceWake: boolean,
   ): SnapshotVerdict {
     if (isActiveStatus(snapshot.status, sessionID)) return 'parent-active';
-    if (!recoveryWake && hasActiveChild(snapshot.children, snapshot.status)) {
+    if (!forceWake && hasActiveChild(snapshot.children, snapshot.status)) {
       return 'children-active';
     }
-    if (!recoveryWake && !hasIncompleteTodos(snapshot.todos)) {
+    if (!forceWake && !hasIncompleteTodos(snapshot.todos)) {
       return 'no-work';
     }
     return 'wake';
@@ -1201,12 +1252,12 @@ export function createOrchestratorWakeScheduler(
   function classifyChildrenSnapshot(
     snapshot: ChildrenModeSnapshot,
     sessionID: string,
-    recoveryWake: boolean,
+    forceWake: boolean,
   ): SnapshotVerdict {
     if (snapshot.hostParentActive || isParentActiveByEvents(sessionID)) {
       return 'parent-active';
     }
-    if (!recoveryWake && !hasActiveWakeChild(snapshot.children)) {
+    if (!forceWake && !hasActiveWakeChild(snapshot.children)) {
       return 'no-work';
     }
     return 'wake';
@@ -1215,13 +1266,14 @@ export function createOrchestratorWakeScheduler(
   function classifySnapshot(
     snapshot: WakeSnapshot,
     sessionID: string,
-    recoveryWake: boolean,
+    forceWake: boolean,
     checkpoint: 'initial' | 'recheck',
+    trigger: WakeReason,
   ): SnapshotVerdict {
     const verdict =
       snapshot.kind === 'children'
-        ? classifyChildrenSnapshot(snapshot, sessionID, recoveryWake)
-        : classifyTodoSnapshot(snapshot, sessionID, recoveryWake);
+        ? classifyChildrenSnapshot(snapshot, sessionID, forceWake)
+        : classifyTodoSnapshot(snapshot, sessionID, forceWake);
     // Observation only: every checkpoint classification lands in the log
     // so a wake that is starved or wedged stays diagnosable.
     log('[orchestrator-wake] evaluate verdict', {
@@ -1229,7 +1281,8 @@ export function createOrchestratorWakeScheduler(
       verdict,
       mode: snapshot.kind,
       checkpoint,
-      recoveryWake,
+      recoveryWake: trigger === 'recovery',
+      trigger,
       childCount: snapshot.children.length,
     });
     return verdict;
@@ -1269,13 +1322,17 @@ export function createOrchestratorWakeScheduler(
   async function evaluate(
     sessionID: string,
     generation: symbol,
-    recoveryWake = false,
+    reason: WakeReason = 'periodic',
   ): Promise<void> {
+    const recoveryWake = reason === 'recovery';
+    const scheduleOptions = {
+      ignoreProgressCap: reason === 'publication',
+    };
     const state = localSessions.get(sessionID);
     if (!state || state.generation !== generation) return;
     if (!state.continuousIdle) return;
     if (state.archived) return;
-    if (!canSchedule(sessionID)) {
+    if (!canSchedule(sessionID, scheduleOptions)) {
       suppress(sessionID);
       return;
     }
@@ -1289,7 +1346,7 @@ export function createOrchestratorWakeScheduler(
           current.generation === generation &&
           current.continuousIdle
         ) {
-          void evaluate(sessionID, generation, recoveryWake);
+          void evaluate(sessionID, generation, reason);
         }
       });
       return;
@@ -1304,7 +1361,7 @@ export function createOrchestratorWakeScheduler(
       if (!snapshot || state.generation !== generation) return;
       if (!state.continuousIdle) return;
       if (applyArchiveState(sessionID, state, snapshot.archiveState)) return;
-      if (!canSchedule(sessionID)) {
+      if (!canSchedule(sessionID, scheduleOptions)) {
         suppress(sessionID);
         return;
       }
@@ -1312,7 +1369,13 @@ export function createOrchestratorWakeScheduler(
       if (
         !applySnapshotVerdict(
           sessionID,
-          classifySnapshot(snapshot, sessionID, recoveryWake, 'initial'),
+          classifySnapshot(
+            snapshot,
+            sessionID,
+            reason !== 'periodic',
+            'initial',
+            reason,
+          ),
         )
       ) {
         return;
@@ -1340,14 +1403,20 @@ export function createOrchestratorWakeScheduler(
       if (!latest || state.generation !== generation) return;
       if (!state.continuousIdle) return;
       if (applyArchiveState(sessionID, state, latest.archiveState)) return;
-      if (!canSchedule(sessionID)) {
+      if (!canSchedule(sessionID, scheduleOptions)) {
         suppress(sessionID);
         return;
       }
       if (
         !applySnapshotVerdict(
           sessionID,
-          classifySnapshot(latest, sessionID, recoveryWake, 'recheck'),
+          classifySnapshot(
+            latest,
+            sessionID,
+            reason !== 'periodic',
+            'recheck',
+            reason,
+          ),
         )
       ) {
         return;
@@ -1400,7 +1469,7 @@ export function createOrchestratorWakeScheduler(
       // must not ride in on stale orchestrator metadata.
       if (state.generation !== generation) return;
       if (!state.continuousIdle) return;
-      if (!canSchedule(sessionID)) {
+      if (!canSchedule(sessionID, scheduleOptions)) {
         suppress(sessionID);
         return;
       }
@@ -1656,7 +1725,105 @@ export function createOrchestratorWakeScheduler(
     clearTimer(state);
     bumpGeneration(state);
     state.continuousIdle = true;
-    void evaluate(sessionID, state.generation, true);
+    void evaluate(sessionID, state.generation, 'recovery');
+  }
+
+  /**
+   * Wake an idle orchestrator after the terminal gate publishes a
+   * completed/error host outcome (terminal-publication wake).
+   *
+   * OpenCode's native notifier delivers a child's FIRST completion to the
+   * parent. A publication that lands while the parent sits idle — a child
+   * that self-continued and finished again, or a later child's completion —
+   * would otherwise wait for the periodic idle evaluation (up to
+   * `intervalMs`). This trigger closes that gap under the SAME delivery
+   * machinery and wake gate as the periodic scheduler.
+   *
+   * Suppression, in order:
+   * - disabled via config (`wakeOnTerminalPublication`) or the shared
+   *   capability/observation gates;
+   * - busy parent: the native steer already delivered this completion, so
+   *   a queued wake would double-notify;
+   * - per-parent throttle (`publicationWakeMinIntervalMs`): a burst of
+   *   publications collapses into one wake;
+   * - `hasInputWait` / fallback / archived (via canSchedule).
+   *
+   * Unlike stopped-job recovery this does NOT rearm the no-progress cap:
+   * the publication path enters evaluation past the cap pre-check, and the
+   * in-evaluation fingerprint comparison decides — a publication that
+   * changed the children fingerprint un-stops the session, an unchanged
+   * one keeps the shared cap tripped.
+   */
+  async function triggerTerminalPublicationWake(
+    sessionID: string,
+    taskID: string,
+    generation: number,
+  ): Promise<void> {
+    if (
+      disposed ||
+      !enabled ||
+      !wakeOnTerminalPublication ||
+      !capabilities.ready ||
+      !canObserveSelection(sessionID)
+    ) {
+      return;
+    }
+    // Busy parent: native steer already delivered the first completion for
+    // this job; a queued wake on top would double-inject.
+    if (isParentActiveByEvents(sessionID)) {
+      log('[orchestrator-wake] terminal publication wake skipped', {
+        sessionID,
+        taskID,
+        generation,
+        trigger: 'terminal-publication',
+        verdict: 'skipped',
+        reason: 'parent-busy',
+      });
+      return;
+    }
+    const now = Date.now();
+    const lastWakeAt = lastPublicationWakeAt.get(sessionID);
+    if (
+      lastWakeAt !== undefined &&
+      publicationWakeMinIntervalMs > 0 &&
+      now - lastWakeAt < publicationWakeMinIntervalMs
+    ) {
+      log('[orchestrator-wake] terminal publication wake skipped', {
+        sessionID,
+        taskID,
+        generation,
+        trigger: 'terminal-publication',
+        verdict: 'skipped',
+        reason: 'throttled',
+        windowMs: publicationWakeMinIntervalMs,
+      });
+      return;
+    }
+    if (localSessions.get(sessionID)?.archived) {
+      return;
+    }
+    log('[orchestrator-wake] terminal publication wake', {
+      sessionID,
+      taskID,
+      generation,
+      trigger: 'terminal-publication',
+      verdict: 'waking',
+    });
+    lastPublicationWakeAt.set(sessionID, now);
+    boundTrackedMap(lastPublicationWakeAt);
+    if (
+      !canSchedule(sessionID, {
+        // The fingerprint comparison inside evaluate is the authoritative
+        // no-progress test for this path (see the docstring above).
+        ignoreProgressCap: true,
+      })
+    )
+      return;
+    const state = touchLocal(sessionID);
+    clearTimer(state);
+    bumpGeneration(state);
+    state.continuousIdle = true;
+    await evaluate(sessionID, state.generation, 'publication');
   }
 
   async function event(input: {
@@ -1683,6 +1850,7 @@ export function createOrchestratorWakeScheduler(
     if (type === 'server.instance.disposed') {
       disposed = true;
       pendingStoppedRecoveries.clear();
+      lastPublicationWakeAt.clear();
       lastStatusBySession.clear();
       childSessions.clear();
       childEvidence.clear();
@@ -1791,6 +1959,7 @@ export function createOrchestratorWakeScheduler(
     event,
     observeChatMessage,
     triggerStoppedJobRecovery,
+    triggerTerminalPublicationWake,
     /** Clear timers when wait_for_user or fallback begins. */
     suppress,
     /** Test seam */

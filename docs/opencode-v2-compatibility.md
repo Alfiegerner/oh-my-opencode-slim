@@ -834,6 +834,43 @@ periodic watchdog: an idle parent with a stuck or unreconciled child (or a
 job that stopped without a terminal result) gets woken to assess, cancel, or
 respawn, bounded by the same no-progress cap as v1.
 
+### Terminal-publication wake（终态后唤醒）
+
+The native notifier fires once per original job — the FIRST completion. A
+terminal publication that lands while the parent sits idle (a child that
+self-continues via its own background-shell notification and finishes
+again, or a later child's completion) would otherwise wait for the periodic
+idle evaluation (up to `orchestratorWake.intervalMs`, default 5 minutes).
+The **terminal-publication wake** closes that gap on both host flavors:
+
+- **Trigger:** the terminal gate publishes a `completed` or `error` host
+  outcome (state-disjoint from the stopped-job recovery listener, which
+  keys on `stopped` + terminal-unreconciled) AND the parent is idle AND
+  no input wait is open AND at least `publicationWakeMinIntervalMs` has
+  passed since this parent's last publication wake (per-parent throttle).
+- **Busy parent → skip entirely:** the native steer already delivered the
+  first completion; a queued wake would double-notify.
+- **Delivery:** the same `promptAsync` machinery as the periodic wake —
+  `delivery: "queue"`, `modelSelection: "inherit"`, the session's current
+  model variant — reusing the existing wake text (no new prompt surface).
+- **Shared gate:** one-flight, the two-wake no-progress cap, and
+  `expectingWakeBusy` are the periodic scheduler's, not a parallel gate.
+  A publication wake enters evaluation past the cap's pre-check and lets
+  the in-evaluation fingerprint comparison decide: a publication that
+  changed the children fingerprint un-stops the session; an unchanged
+  fingerprint keeps the cap tripped.
+
+Config knobs (see `backgroundJobs.orchestratorWake`):
+`wakeOnTerminalPublication` (boolean, default `true` — the feature flag)
+and `publicationWakeMinIntervalMs` (integer ms, default `30_000` — the
+per-parent throttle window; a burst of publications collapses into one
+wake).
+
+Related: when a job whose terminal report the parent already consumed
+(reconciled) reopens to running, the board injection appends exactly one
+corrective trailing notice ("previously reported terminal, now running
+again; the earlier report is superseded") in the cache-safe tail zone.
+
 ### Environment caveats
 
 - **Reduced/TUI-side hosts.** Some host processes load the plugin's `setup`

@@ -571,6 +571,10 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     terminalGate = createBackgroundJobTerminalGate({
       backgroundJobBoard: backgroundJobCoordinator,
       input: ctx,
+      // Configurable stop-confirmation grace (backgroundJobs.
+      // stopConfirmationMs); the default equals
+      // STOP_CONFIRMATION_GRACE_MS, so unset config keeps v1 behavior.
+      graceMs: runtime.backgroundJobs.stopConfirmationMs,
       baselineFor: (taskID, generation) =>
         revivedRunTracker?.baselineFor(taskID, generation),
       // Local in-process integration: host and plugin timestamps share Unix ms.
@@ -794,6 +798,22 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         }),
         `${record.taskID}:${record.generation}`,
       );
+    });
+    // Terminal-publication wake: completed/error publications reaching an
+    // IDLE parent (state-disjoint from the stopped recovery listener
+    // above — stopped+terminalUnreconciled vs completed|error). A busy
+    // parent is skipped inside the trigger: the native steer already
+    // delivered the first completion, so a queued wake would
+    // double-notify.
+    backgroundJobCoordinator.addTerminalOutcomeListener((record) => {
+      if (record.state !== 'completed' && record.state !== 'error') return;
+      void orchestratorWakeScheduler
+        .triggerTerminalPublicationWake(
+          record.parentSessionID,
+          record.taskID,
+          record.generation,
+        )
+        .catch(() => undefined);
     });
 
     // Initialize hooks and wrapPostToolHook helper for error isolation
