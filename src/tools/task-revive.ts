@@ -1,7 +1,10 @@
 import { type ToolDefinition, tool } from '@opencode-ai/plugin';
 import type { RevivedRunTracker } from '../hooks/task-session-manager/revived-run-tracker';
+import type { BackgroundJobLease } from '../utils/background-job-board';
 import type { BackgroundJobSupervisor } from '../utils/background-job-supervisor';
+import { log } from '../utils/logger';
 import { getClient } from '../utils/opencode-client';
+import { withTimeout } from '../utils/session';
 import { getRuntimeSessionStatusSnapshot } from '../utils/session-runtime-status';
 import {
   assertOrchestrator,
@@ -10,10 +13,16 @@ import {
 } from './cancel-task';
 
 const z = tool.schema;
+const DEFAULT_BASELINE_TIMEOUT_MS = 5_000;
+const DEFAULT_ADMISSION_TIMEOUT_MS = 10_000;
+
+class ReviveAdmissionDeadlineError extends Error {}
 
 export interface TaskReviveToolOptions extends TaskControlToolOptions {
   backgroundJobSupervisor?: BackgroundJobSupervisor;
   revivedRunTracker: RevivedRunTracker;
+  baselineTimeoutMs?: number;
+  admissionTimeoutMs?: number;
 }
 
 export function createTaskReviveTool(
@@ -89,7 +98,7 @@ export function createTaskReviveTool(
         );
       }
 
-      let baselineMessageID: string | undefined;
+      let admissionOwner: { settled: boolean } | undefined;
       let launched:
         | ReturnType<
             TaskControlToolOptions['backgroundJobBoard']['registerLaunch']
@@ -97,56 +106,19 @@ export function createTaskReviveTool(
         | undefined;
       try {
         const observedLiveBusyAt = current.lastLiveBusyAt;
-        baselineMessageID = await revivedRunTracker.captureBaseline(
-          current.taskID,
+        const baselineMessageID = await withTimeout(
+          revivedRunTracker.captureBaseline(current.taskID),
+          Math.max(1, options.baselineTimeoutMs ?? DEFAULT_BASELINE_TIMEOUT_MS),
+          'Baseline capture deadline exceeded; the revive prompt was NOT sent',
         );
-        // captureBaseline awaits network I/O; the record may have changed
-        // while we waited. Revalidate against the live record before
-        // sending anything: never relaunch over a session that is
-        // running again. A live relaunch lease keeps the board record
-        // stopped while a revive is in flight (the busy observation only
-        // advances lastLiveBusyAt), so treat any movement of that
-        // timestamp as fresh activity and refuse.
-        const rechecked = getCurrentReviveJob(
-          options,
-          parentSessionID,
-          requested,
-          captured.taskID,
-          captured.generation,
-        );
-        const freshLiveActivity =
-          rechecked.lastLiveBusyAt !== undefined &&
-          rechecked.lastLiveBusyAt !== observedLiveBusyAt;
-        if (
-          !options.backgroundJobBoard.validateLease(relaunchLease) ||
-          rechecked.state === 'running' ||
-          !isReviveableRetainedJob(rechecked) ||
-          freshLiveActivity
-        ) {
-          throw new Error(
-            `Task ${requested} became active again (${rechecked.state}) before the revive prompt was sent; the prompt was NOT sent and no duplicate was launched. Use task_status to inspect it.`,
-          );
-        }
-        current = rechecked;
-        // Fence the send against independent host-level resumes. The
-        // board record stays stopped under the relaunch lease, so the
-        // host's live status map is the only place an independently
-        // resumed session shows up. On v2 hosts promptAsync degrades to
-        // steering an in-flight run instead of rejecting it, so a busy
-        // or retry entry must refuse here; an unverifiable map refuses
-        // rather than guessing. A verified-absent entry means no active
-        // runner: the session is idle and safe to prompt.
-        //
-        // v2 hosts expose no live status map at all (client-shim.ts
-        // intentionally omits `session.status`: v2 has no equivalent of
-        // the v1 map). Checking `typeof session.status === 'function'`
-        // is the same capability signal cancel-task.ts's verifier uses.
-        // Without it, `getRuntimeSessionStatusSnapshot` always errors,
-        // and treating that as "unverifiable" would permanently block
-        // every revive on v2. The freshLiveActivity check above already
-        // covers v2 (event-adapter.ts synthesizes busy/idle session.status
-        // from session.execution.* into the board's lastLiveBusyAt), so
-        // this extra map check only runs where the map actually exists.
+        // The host may resume the child independently while any of the
+        // reads below await network I/O. The live status map is the only
+        // place an independently resumed session shows up: busy or retry
+        // refuses, an unverifiable map refuses rather than guessing, and
+        // verified absence means no active runner. v2 hosts expose no
+        // status map at all (client-shim.ts omits session.status), so the
+        // map check only runs where the capability exists; the
+        // lastLiveBusyAt fence below covers v2 instead.
         const session = getClient(options.input).session;
         if (typeof session.status === 'function') {
           const liveSnapshot = await getRuntimeSessionStatusSnapshot(
@@ -170,15 +142,31 @@ export function createTaskReviveTool(
         if (typeof session.promptAsync !== 'function') {
           throw new Error('The host session does not support promptAsync');
         }
-        // Close the check-then-act window for good: a session can become
-        // active between the live-status read above and this send. On v2
-        // hosts the default prompt delivery is `steer`, which injects into
-        // an in-flight run instead of rejecting; `queue` makes the send
-        // safe (the prompt waits for idle, v1 prompt_async semantics) so a
-        // raced revive can never steer or duplicate an active run. The v1
-        // SDK ignores the extra client-side argument (not part of the HTTP
-        // request); the v2 shim threads it to the host.
-        const response = await (
+        // Both reads above await network I/O. Revalidate immediately before
+        // sending: live busy can restore running even under a relaunch lease.
+        // A changed busy timestamp also fences activity that stopped again.
+        current = getCurrentReviveJob(
+          options,
+          parentSessionID,
+          requested,
+          captured.taskID,
+          captured.generation,
+        );
+        if (
+          !options.backgroundJobBoard.validateLease(relaunchLease) ||
+          !isReviveableRetainedJob(current) ||
+          (current.lastLiveBusyAt !== undefined &&
+            current.lastLiveBusyAt !== observedLiveBusyAt)
+        ) {
+          throw new Error(
+            `Task ${requested} became active again (${current.state}) before the revive prompt was sent; the prompt was NOT sent and no duplicate was launched. Use task_status to inspect it.`,
+          );
+        }
+        // A remote resume can race this send. `queue` avoids steering an
+        // in-flight run, but may enqueue a continuation after an independent
+        // resume; it does not deduplicate. The v1 SDK ignores this client-side
+        // hint (not part of the HTTP request); the v2 shim forwards it.
+        const request = (
           session.promptAsync as (
             args: Record<string, unknown>,
           ) => Promise<unknown>
@@ -191,44 +179,121 @@ export function createTaskReviveTool(
           },
           delivery: 'queue',
         });
-        const responseError = getApiError(response);
-        if (responseError !== undefined) {
-          throw new Error(errorText(responseError));
+        // This captured owner, not the caller's deadline, owns settlement.
+        // Keep exclusion while admission is unknown; never retry the write.
+        const owner = { settled: false, transferred: false };
+        admissionOwner = owner;
+        const admission = Promise.resolve(request)
+          .then((response) => {
+            if (owner.settled) return;
+            owner.settled = true;
+            const responseError = getApiError(response);
+            if (responseError !== undefined) {
+              throw new Error(errorText(responseError));
+            }
+            // Deletion wins, but it leaves this write's lease alive. Only
+            // that precise case may compensate; all stale owners/generations
+            // still go through registerLaunch's existing rejection fence.
+            if (
+              !options.backgroundJobBoard.get(captured.taskID) &&
+              options.backgroundJobBoard.validateLease(relaunchLease)
+            ) {
+              owner.transferred = true;
+              // Starts synchronously under the lease, independently of the
+              // admission race. Its abort is never awaited by this caller.
+              void ownInvalidatedAdmission(options, relaunchLease);
+              throw new Error(
+                'admission accepted but invalidated by loss of the record; compensation initiated',
+              );
+            }
+            launched = options.backgroundJobBoard.registerLaunch({
+              taskID: current.taskID,
+              parentSessionID,
+              agent: current.agent,
+              description: current.description,
+              objective: current.objective,
+              background: true,
+              relaunchLease,
+            });
+            revivedRunTracker.register({
+              taskID: launched.taskID,
+              generation: launched.generation,
+              parentSessionID,
+              baselineMessageID,
+              description: launched.description,
+            });
+            options.backgroundJobSupervisor?.onLaunch(launched);
+          })
+          .finally(() => {
+            owner.settled = true;
+            if (!owner.transferred)
+              options.backgroundJobBoard.releaseLease(relaunchLease);
+          });
+        const observation = admission
+          .then(async () => {
+            if (!launched) return;
+            try {
+              await revivedRunTracker.probe(
+                launched.taskID,
+                launched.generation,
+              );
+            } catch (error) {
+              log('[task-revive] observation failed', {
+                taskID: current.taskID,
+                error: errorText(error),
+              });
+            }
+          })
+          .catch((error: unknown) => {
+            if (launched) {
+              options.backgroundJobBoard.markStatusUncertain(
+                current.taskID,
+                `task_revive failed: ${errorText(error)}`,
+                launched.generation,
+              );
+            }
+            log('[task-revive] admission failed', {
+              taskID: current.taskID,
+              error: errorText(error),
+            });
+          });
+        let admissionTimer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            admission,
+            new Promise<never>((_, reject) => {
+              admissionTimer = setTimeout(
+                () =>
+                  reject(
+                    new ReviveAdmissionDeadlineError(
+                      'Revive admission deadline exceeded',
+                    ),
+                  ),
+                Math.max(
+                  1,
+                  options.admissionTimeoutMs ?? DEFAULT_ADMISSION_TIMEOUT_MS,
+                ),
+              );
+            }),
+          ]);
+        } catch (error) {
+          // Preserve the local race outcome, regardless of later settlement.
+          // A timeout error from the transport is still an admission failure.
+          if (error instanceof ReviveAdmissionDeadlineError) {
+            return renderReviveOutput(current, true);
+          }
+          throw error;
+        } finally {
+          clearTimeout(admissionTimer);
         }
-
-        launched = options.backgroundJobBoard.registerLaunch({
-          taskID: current.taskID,
-          parentSessionID,
-          agent: current.agent,
-          description: current.description,
-          objective: current.objective,
-          background: true,
-          relaunchLease,
-        });
-        if (launched.generation <= current.generation) {
-          throw new Error(`Task ${requested} did not receive a new generation`);
-        }
-        revivedRunTracker.register({
-          taskID: launched.taskID,
-          generation: launched.generation,
-          parentSessionID,
-          baselineMessageID,
-          description: launched.description,
-        });
-        options.backgroundJobSupervisor?.onLaunch(launched);
-        await revivedRunTracker.probe(launched.taskID, launched.generation);
+        // Observe fast completion without holding exclusion over the probe.
+        await observation;
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (launched) {
-          options.backgroundJobBoard.markStatusUncertain(
-            current.taskID,
-            `task_revive failed: ${message}`,
-            launched.generation,
-          );
-        }
-        throw new Error(`Task ${requested} revive failed: ${message}`);
+        throw new Error(`Task ${requested} revive failed: ${errorText(error)}`);
       } finally {
-        options.backgroundJobBoard.releaseLease(relaunchLease);
+        // Before a write exists there is no late admission to protect.
+        if (!admissionOwner)
+          options.backgroundJobBoard.releaseLease(relaunchLease);
       }
 
       if (!launched) {
@@ -247,10 +312,77 @@ export function createTaskReviveTool(
   return { task_revive };
 }
 
+/**
+ * Owns a single compensating abort after deletion invalidates an accepted
+ * admission. The board retains the token even without a job: no TTL, retry,
+ * terminal publication, or recovery is allowed on this path.
+ */
+async function ownInvalidatedAdmission(
+  options: TaskReviveToolOptions,
+  lease: BackgroundJobLease,
+): Promise<void> {
+  const board = options.backgroundJobBoard;
+  const { taskID, generation } = lease;
+  const stillOwns = () => {
+    const valid = board.validateLease(lease) && !board.get(taskID);
+    if (!valid)
+      log('[task-revive] compensation ownership lost', { taskID, generation });
+    return valid;
+  };
+  try {
+    const session = getClient(options.input).session;
+    // No await between this fence and issuing the only compensating write.
+    if (!stillOwns()) return;
+    const response = await session.abort({ path: { id: taskID } });
+    // No local abort timeout: an idle read cannot retire a token while the
+    // remote write could still execute. Only actual settlement reaches here.
+    if (!stillOwns()) return;
+    const responseError = getApiError(response);
+    if (responseError !== undefined)
+      throw new Error(`abort failed: ${errorText(responseError)}`);
+
+    // Historical session.get outcomes cannot prove the accepted run stopped.
+    // Take fresh live evidence after abort settlement, with a bounded budget.
+    const snapshot = await getRuntimeSessionStatusSnapshot(options.input, {
+      timeoutMs: options.verifyAbortMs ?? 1_500,
+    });
+    if (!stillOwns()) return;
+    const status = snapshot.statuses.get(taskID);
+    if (
+      snapshot.error !== undefined ||
+      snapshot.malformedSessionIDs.has(taskID) ||
+      status === 'busy' ||
+      status === 'retry'
+    ) {
+      throw new Error(
+        `live quiescence not verified: ${snapshot.error ?? status ?? 'malformed entry'}`,
+      );
+    }
+
+    // Valid idle/absence proves current quiescence, not purging queued work.
+    // Revalidate above and release synchronously: never retire a successor.
+    board.releaseLease(lease);
+    log('[task-revive] compensation quiescence verified', {
+      taskID,
+      generation,
+    });
+  } catch (error) {
+    // Explicit quarantine: retain exclusion without fabricating a cancelled
+    // record or notifying a deleted parent. No automatic recovery/retry.
+    log('[task-revive] compensation unconfirmed', {
+      taskID,
+      generation,
+      error: errorText(error),
+      leaseRetained: board.validateLease(lease),
+    });
+  }
+}
+
 function renderReviveOutput(
   record: NonNullable<
     ReturnType<TaskReviveToolOptions['backgroundJobBoard']['get']>
   >,
+  admissionUnknown = false,
 ): string {
   const state =
     record.state === 'reconciled'
@@ -260,9 +392,13 @@ function renderReviveOutput(
     `task_id: ${record.taskID}`,
     `generation: ${record.generation}`,
     `state: ${state}`,
-    `status: ${state === 'running' ? 'started' : state}`,
+    `status: ${admissionUnknown ? 'admission_unknown' : state === 'running' ? 'started' : state}`,
   ];
-  if (record.resultSummary !== undefined) {
+  if (admissionUnknown) {
+    lines.push(
+      'The host may have accepted the prompt. Admission is still pending; do not retry task_revive. Use task_status to inspect the session.',
+    );
+  } else if (record.resultSummary !== undefined) {
     const tag = state === 'completed' ? 'task_result' : 'task_error';
     lines.push('', `<${tag}>`, record.resultSummary, `</${tag}>`);
   }

@@ -1,11 +1,13 @@
-import { beforeEach, describe, expect, mock, test } from 'bun:test';
+import { beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { DEFAULT_MAX_RETAINED_SNAPSHOTS } from '../../config/constants';
 import { SessionLifecycle } from '../../hooks/session-lifecycle';
+import { createTaskReviveTool } from '../../tools/task-revive';
 import {
   BackgroundJobSupervisor,
   BackgroundTaskConcurrency,
   createInternalAgentTextPart,
   getBackgroundJobLifecycleLedger,
+  BackgroundJobBoard as ProductionBoard,
   SLIM_INTERNAL_INITIATOR_MARKER,
 } from '../../utils';
 import { BackgroundJobBoard } from '../../utils/background-job-fixture';
@@ -5523,6 +5525,128 @@ describe('task-session-manager hook', () => {
     // Message should remain unchanged
     expect(messages.messages[0].parts[0].text).toBe('do something');
   });
+
+  test.each(['child-1', 'parent-1'])(
+    'compensates late revive acceptance through the real deletion callback: %s',
+    async (deletedID) => {
+      const coordinator = new SessionLifecycle(() => {});
+      const board = new BackgroundJobBoard();
+      const { hook } = createHook({ backgroundJobBoard: board, coordinator });
+      for (const taskID of ['child-1', 'sibling']) {
+        board.registerLaunch({
+          taskID,
+          parentSessionID: 'parent-1',
+          agent: 'explorer',
+        });
+        board.updateStatus({ taskID, state: 'completed' });
+      }
+      const send = Promise.withResolvers<unknown>();
+      const stop = Promise.withResolvers<unknown>();
+      const abortEntered = Promise.withResolvers<void>();
+      const released = Promise.withResolvers<void>();
+      const deadline = Promise.withResolvers<() => void>();
+      const realTimer = globalThis.setTimeout;
+      const timerSpy = spyOn(globalThis, 'setTimeout').mockImplementation(
+        (callback, ms, ...args) => {
+          const timer = realTimer(callback, ms, ...args);
+          if (ms === 1_000)
+            deadline.resolve(() => {
+              clearTimeout(timer);
+              callback(...args);
+            });
+          return timer;
+        },
+      );
+      const acquire = spyOn(ProductionBoard.prototype, 'acquireRelaunchLease');
+      const releaseLease = board.releaseLease.bind(board);
+      const release = spyOn(
+        ProductionBoard.prototype,
+        'releaseLease',
+      ).mockImplementation((lease) => {
+        const result = releaseLease(lease);
+        released.resolve();
+        return result;
+      });
+      const promptAsync = mock(() => send.promise);
+      const abort = mock(() => {
+        abortEntered.resolve();
+        return stop.promise;
+      });
+      const tracker = {
+        captureBaseline: async () => 'baseline',
+        register: mock(() => {}),
+        probe: mock(async () => false),
+      };
+      const onLaunch = mock(() => {});
+      const terminal = mock(() => {});
+      board.addTerminalStateListener(terminal);
+      const { task_revive } = createTaskReviveTool({
+        input: {
+          directory: '/tmp',
+          client: {
+            session: {
+              promptAsync,
+              abort,
+              status: async () => ({ data: {} }),
+            },
+          },
+        } as never,
+        backgroundJobBoard: board,
+        shouldManageSession: () => true,
+        revivedRunTracker: tracker as never,
+        backgroundJobSupervisor: { onLaunch } as never,
+        admissionTimeoutMs: 1_000,
+      });
+      try {
+        const pending = task_revive.execute(
+          { task_id: 'child-1', prompt: 'continue' },
+          { sessionID: 'parent-1', agent: 'orchestrator' } as never,
+        );
+        (await deadline.promise)();
+        expect(String(await pending)).toContain('status: admission_unknown');
+        const lease = acquire.mock.results[0]?.value;
+        if (!lease) throw new Error('missing relaunch lease');
+        coordinator.dispatchSessionDeleted(deletedID);
+        expect(board.get('child-1')).toBeUndefined();
+        expect(board.get('sibling') === undefined).toBe(
+          deletedID === 'parent-1',
+        );
+        const tombstones = getBackgroundJobLifecycleLedger(board).tombstones;
+        expect(tombstones.has('child-1')).toBe(true);
+        send.resolve({});
+        await abortEntered.promise;
+        expect(board.validateLease(lease)).toBe(true);
+        expect(() =>
+          board.registerLaunch({
+            taskID: 'child-1',
+            parentSessionID: 'parent-1',
+            agent: 'explorer',
+          }),
+        ).toThrow(/lease/);
+        expect(release).not.toHaveBeenCalled();
+        stop.resolve({});
+        await released.promise;
+        expect(release).toHaveBeenCalledTimes(1);
+        expect(release).toHaveBeenCalledWith(lease);
+        expect(board.validateLease(lease)).toBe(false);
+        expect(board.get('child-1')).toBeUndefined();
+        expect(board.get('parent-1')).toBeUndefined();
+        expect(tombstones.has('child-1')).toBe(true);
+        expect(promptAsync).toHaveBeenCalledTimes(1); // no parent notification
+        expect(abort).toHaveBeenCalledTimes(1);
+        expect(abort).toHaveBeenCalledWith({ path: { id: 'child-1' } });
+        expect(tracker.register).not.toHaveBeenCalled();
+        expect(tracker.probe).not.toHaveBeenCalled();
+        expect(onLaunch).not.toHaveBeenCalled();
+        expect(terminal).not.toHaveBeenCalled();
+      } finally {
+        timerSpy.mockRestore();
+        acquire.mockRestore();
+        release.mockRestore();
+        await hook.event({ event: { type: 'server.instance.disposed' } });
+      }
+    },
+  );
 
   test('cleans up background jobs when parent or child is deleted', async () => {
     const coordinator = new SessionLifecycle(() => {});
