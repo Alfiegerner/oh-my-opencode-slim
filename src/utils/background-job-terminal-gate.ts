@@ -10,8 +10,8 @@ import {
   fetchChildTranscript,
   responseError,
 } from './child-transcript';
-import { getClient } from './opencode-client';
 import { isRecord } from './guards';
+import { getClient } from './opencode-client';
 import {
   getRuntimeSessionStatusSnapshot,
   type RuntimeSessionStatusSnapshot,
@@ -19,6 +19,7 @@ import {
 } from './session-runtime-status';
 import {
   COMPLETED_WITHOUT_TEXT_DIAGNOSTIC,
+  guardCompletedStatusText,
   type TaskStatusOutput,
 } from './task';
 
@@ -54,7 +55,13 @@ export type RuntimeObservation = {
   terminalOutcome?: string;
 };
 export type TaskOutputOrigin =
-  | { kind: 'native'; run: RunRef; callID: string }
+  | {
+      kind: 'native';
+      run: RunRef;
+      callID: string;
+      /** Host matched this pending by exact callID; parsed identity is not enough. */
+      callIDConfirmed?: boolean;
+    }
   | {
       kind: 'synthetic';
       occurrenceID: string;
@@ -165,6 +172,24 @@ interface Observation {
 type ReadResult =
   | { kind: 'ready'; value: unknown }
   | { kind: 'blocked'; retryAfter: Promise<void> };
+
+/** A foreground run's synchronous native terminal return is itself
+ * terminal evidence — the host call bound to this exact run has already
+ * come back — but only when the host attributed the output by its exact
+ * callID (callIDConfirmed); text-parsed identity could be a quoted
+ * foreign task header. Background runs never qualify. */
+function isForegroundNativeTerminal(
+  signal: TerminalSignal | undefined,
+  background: boolean,
+): boolean {
+  return (
+    signal?.kind === 'output' &&
+    signal.origin.kind === 'native' &&
+    signal.origin.callIDConfirmed === true &&
+    signal.status.state !== 'running' &&
+    !background
+  );
+}
 
 function hostOutcome(response: unknown): string | undefined {
   if (!isRecord(response) || responseError(response) !== undefined)
@@ -380,6 +405,11 @@ export function createBackgroundJobTerminalGate(options: {
       cancellationLease: lease,
       now: now(),
     });
+    const candidateSignal = value.candidate?.signal;
+    const foregroundNativeEvidence = isForegroundNativeTerminal(
+      candidateSignal,
+      before.background,
+    );
     const authorization: TerminalCommitToken = Object.freeze({
       [terminalCommitBrand]: true,
     });
@@ -391,7 +421,8 @@ export function createBackgroundJobTerminalGate(options: {
         (value.runtime?.kind === 'deleted' ||
           !options.isObservationPending?.(token.taskID, token.generation)) &&
         (value.runtime?.kind === 'quiescent' ||
-          value.runtime?.kind === 'deleted'),
+          value.runtime?.kind === 'deleted' ||
+          foregroundNativeEvidence),
     });
     const record = board.commitTerminal(input, authorization);
     if (record === before || !record) return deferred(token);
@@ -439,6 +470,9 @@ export function createBackgroundJobTerminalGate(options: {
       value.pendingRuntime = false;
       value.runtime = undefined;
       value.quiescentSince = undefined;
+      // Ambiguous busy/retry is live activity: drop held candidates.
+      value.candidate = undefined;
+      value.idleCandidate = undefined;
       if (value.timer) clearTimeout(value.timer);
       value.timer = undefined;
       return deferred(token);
@@ -662,9 +696,38 @@ export function createBackgroundJobTerminalGate(options: {
     }
     if (!current(token)) return { kind: 'stale' };
     const runtime = value.runtime;
-    if (runtime?.kind === 'busy' || runtime?.kind === 'retry')
+    const job = board.get(run.taskID);
+    if (!job || job.generation !== run.generation) return { kind: 'stale' };
+    const candidate = value.candidate;
+    let signal =
+      candidate && current(candidate.token) ? candidate.signal : undefined;
+    // Re-arm only a local episode bump with every other identity barrier
+    // intact. Foreground only; a genuine busy already cleared the candidate.
+    if (
+      !signal &&
+      candidate &&
+      !job.background &&
+      candidate.signal.kind === 'output' &&
+      candidate.signal.origin.kind === 'native' &&
+      candidate.signal.origin.run.taskID === run.taskID &&
+      candidate.signal.origin.run.generation === run.generation &&
+      candidate.token.baselineMessageID === token.baselineMessageID &&
+      candidate.token.attemptRevision === token.attemptRevision &&
+      candidate.token.terminalRevision === token.terminalRevision
+    ) {
+      value.candidate = { signal: candidate.signal, token };
+      signal = candidate.signal;
+    }
+    const foregroundNativeTerminal = isForegroundNativeTerminal(
+      signal,
+      job.background,
+    );
+    if (
+      !foregroundNativeTerminal &&
+      (runtime?.kind === 'busy' || runtime?.kind === 'retry')
+    )
       return deferred(run);
-    if (!runtime || runtime.kind === 'unknown') {
+    if (!foregroundNativeTerminal && (!runtime || runtime.kind === 'unknown')) {
       // Occupied readers already own an availability-driven continuation;
       // they neither consume the diagnostic budget nor need a second timer.
       if (runtime?.retryAfter) return deferred(run);
@@ -681,20 +744,15 @@ export function createBackgroundJobTerminalGate(options: {
         run,
         'Fallback handoff pending; task termination is unconfirmed.',
       );
-    const job = board.get(run.taskID);
-    if (!job || job.generation !== run.generation) return { kind: 'stale' };
     if (
       job.state !== 'running' &&
       (job.state === 'reconciled' ? job.terminalState : job.state) !==
         'completed'
     )
       return { kind: 'committed', record: job };
-    const candidate = value.candidate;
-    const signal =
-      candidate && current(candidate.token) ? candidate.signal : undefined;
     if (
       signal?.kind === 'cancel' &&
-      runtime.stable &&
+      runtime?.stable === true &&
       board.validateLease(signal.lease)
     ) {
       return commit(
@@ -733,7 +791,7 @@ export function createBackgroundJobTerminalGate(options: {
         run,
         'Fallback handoff pending; task termination is unconfirmed.',
       );
-    let terminalOutcome = runtime.terminalOutcome;
+    let terminalOutcome = runtime?.terminalOutcome;
     let evidence = classifyTerminalEvidence(response, {
       baselineMessageID: token.baselineMessageID,
       runStartedAt: job.runStartedAt,
@@ -774,8 +832,9 @@ export function createBackgroundJobTerminalGate(options: {
     }
     if (evidence.verdict === 'completed' || evidence.verdict === 'error')
       return commit(token, evidence.verdict, evidence.text);
-    // The native call is bound to this exact run. Its returned result is an
-    // attributable source, but never overrides an actual pending transcript.
+    // Native return is attributable only when no transcript exists. Foreground
+    // still publishes when the transcript is pending; empty result uses a
+    // placeholder instead of the original whitespace.
     if (
       response === undefined &&
       signal?.kind === 'output' &&
@@ -784,6 +843,27 @@ export function createBackgroundJobTerminalGate(options: {
       signal.status.state !== 'running'
     ) {
       return commit(token, signal.status.state, signal.status.result);
+    }
+    if (
+      foregroundNativeTerminal &&
+      signal?.kind === 'output' &&
+      signal.status.state !== 'running'
+    ) {
+      const { state, result } = signal.status;
+      // A textless completion is an error, same rule as every other
+      // completed publication (guardCompletedStatusText): never invent a
+      // success summary for a finished run that produced no text.
+      const guarded = guardCompletedStatusText(
+        state,
+        result,
+        board.get(run.taskID)?.resultSummary,
+      );
+      return commit(
+        token,
+        guarded.state,
+        guarded.resultSummary ??
+          `Foreground task ended with state ${guarded.state}.`,
+      );
     }
     const stable = now() - (value.quiescentSince ?? now()) >= graceMs;
     if (
