@@ -209,6 +209,78 @@ describe('revived run tracker', () => {
     ).toBe('queue');
   });
 
+  // ── v2-sim pin: queue delivery + exactly-once across the double-idle ──
+  //
+  // On a v2 host the event adapter synthesizes BOTH a `session.status`
+  // idle and a `session.idle` for one terminal execution event (the
+  // documented double-idle invariant), so the terminal observation is
+  // redelivered to every publication listener and the tracker's probe
+  // can be re-driven. The parent notification must still be delivered
+  // EXACTLY ONCE, via promptAsync with `delivery: 'queue'` (v1
+  // prompt_async parity — 'steer' would hijack an in-flight parent,
+  // #1192) and `modelSelection: 'inherit'` (lifecycle continuation,
+  // #1079): the exact argument pair the v2 client shim translates.
+  test('v2-sim: double-delivered terminal observation notifies the parent exactly once with queue delivery', async () => {
+    let probe = false;
+    const harness = createHarness(
+      completedTranscript(() => probe),
+      undefined,
+      false,
+    );
+    const baseline = await harness.tracker.captureBaseline('ses_child');
+    harness.tracker.register({
+      taskID: harness.run.taskID,
+      generation: harness.run.generation,
+      parentSessionID: 'parent',
+      baselineMessageID: baseline,
+      description: 'inspect the change',
+    });
+    probe = true;
+    await harness.tracker.probe(harness.run.taskID, harness.run.generation);
+    await flushNotify();
+
+    // The second half of the double-idle pair: the coordinator's
+    // terminal-outcome listener redelivers the SAME publication, and a
+    // re-driven probe reconciles to the already-terminal record.
+    const published = harness.board.get('ses_child');
+    if (!published) throw new Error('missing publication');
+    harness.tracker.onTerminal(published);
+    await harness.tracker.probe(harness.run.taskID, harness.run.generation);
+    await flushNotify();
+
+    expect(harness.prompt).toHaveBeenCalledTimes(1);
+    expect(harness.prompt.mock.calls[0]?.[0]).toMatchObject({
+      path: { id: 'parent' },
+      delivery: 'queue',
+      modelSelection: 'inherit',
+    });
+    const body = (
+      harness.prompt.mock.calls[0]?.[0] as
+        | {
+            body?: {
+              agent?: string;
+              parts?: Array<{
+                text?: string;
+                metadata?: Record<string, unknown>;
+              }>;
+            };
+          }
+        | undefined
+    )?.body;
+    expect(body?.agent).toBe('orchestrator');
+    expect(body?.parts?.[0]?.text).toContain('<task ');
+    expect(body?.parts?.[0]?.text).toContain('state="completed"');
+    expect(body?.parts?.[0]?.text).toContain(SLIM_INTERNAL_INITIATOR_MARKER);
+    expect(
+      body?.parts?.[0]?.metadata?.['oh-my-opencode-slim.internalInitiator'],
+    ).toBe(true);
+    // The board stays settled after the redelivery — no second terminal.
+    expect(harness.board.get('ses_child')).toMatchObject({
+      state: 'completed',
+      resultSummary: 'new result',
+    });
+  });
+
   test('notifies the parent in its current selection instead of hardcoded orchestrator', async () => {
     let probe = false;
     const harness = createHarness(
