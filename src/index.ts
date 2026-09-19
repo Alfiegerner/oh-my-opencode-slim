@@ -848,14 +848,20 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // First-publication ownership (live-verified on a 2.0.8 host): the
       // native notifier delivers a run's FIRST terminal publication to
       // the parent even while it sits idle, so a plugin wake beside it
-      // would double-notify. The native contract covers exactly the
-      // first publication of a natively-spawned lineage — the task's
-      // original launch (taskGeneration 1) publishing its first terminal
-      // revision. Every later publication of the lineage (a reopened
-      // self-continuation republishing under a new revision) and every
-      // relaunched generation has no native notifier and still wakes
-      // (the unowned-relaunch/degraded-fallback path above).
-      if (record.taskGeneration === 1 && record.terminalRevision === 1) {
+      // would double-notify. On v2 EVERY plugin task launch AND relaunch
+      // is a host `subagent` tool call that arms the host's native
+      // background notifier — a relaunch re-arms it with a fresh
+      // `started_at`, defeating the notify dedupe — so the native
+      // contract covers the FIRST publication (terminalRevision 1) of
+      // EVERY generation, not just the original launch. Only later
+      // revisions of the same generation (rev>1: a child
+      // self-continuation, a direct prompt to the child session) have no
+      // native notifier and remain the plugin's to deliver (v1 behaves
+      // the same: the native task tool arms notifyBackgroundResult per
+      // background call). Edge: if a native delivery is ever lost
+      // host-side, the job falls back to board injection on the parent's
+      // next activity (pre-branch parity).
+      if (record.terminalRevision === 1) {
         log('[orchestrator-wake] terminal publication wake skipped', {
           sessionID: record.parentSessionID,
           taskID: record.taskID,

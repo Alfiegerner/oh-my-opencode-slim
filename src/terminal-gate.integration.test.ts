@@ -1,5 +1,7 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
+import * as path from 'node:path';
 import * as hookFactories from './hooks';
 import { isVolatileTaggedMessage } from './hooks/cache-safe-injection';
 import { resetOrchestratorWakeGateForTests } from './hooks/orchestrator-wake/wake-gate';
@@ -858,6 +860,9 @@ function captureGateLogs() {
           entry.message === message &&
           (entry.data as { taskID?: string } | undefined)?.taskID === taskID,
       ),
+    /** Every captured line (cache-monitor warnings key on sessionID, not
+     * taskID, so they are unreachable through `of`). */
+    all: () => entries.slice(),
     restore: () => spy.mockRestore(),
   };
 }
@@ -953,20 +958,25 @@ test('guard: unattributable succeeded outcome with no transcript source publishe
 //
 // Live 2.0.8 verification (plugin log 2026-09-18T19:18/23:42) proved the
 // hand-shaped `{get}`-only fixture above lied about the production client
-// shape: `buildPluginInput` ALWAYS defines `session.messages` (mapped from
-// `session.context`, with a `{data: []}` fallback), so the gate's
-// transcriptSourceAbsent predicate is false on every v2 host and the
-// starvation-fix commit path is unreachable in production. The real
-// starvation lived in the mapped transcript itself: the live probe child
-// (DB-verified) ends with user → assistant(tool, finish tool-calls) →
-// assistant(finish 'stop', time.completed set, text) → an `{type:'idle',
-// outcome}` lifecycle marker, and the mapping reduced every entry to
-// `{id, role}` — so the trailing-turn scan hit the non-assistant `idle`
-// role and classification retried forever (4 accepted host-outcome
-// attributions, zero publications, gave-up). This probe builds the client
-// through the REAL shim factory over a ctx mirroring the adapter session
-// domain — `get` AND `context`, the latter returning full 2.0.8-shaped
-// SessionMessage.Info entries — so the divergence is reproducible in vitro.
+// shape: at the time `buildPluginInput` ALWAYS defined `session.messages`
+// (mapped from `session.context`, with a `{data: []}` fallback), so the
+// gate's transcriptSourceAbsent predicate was false on every v2 host and
+// the starvation-fix commit path was unreachable in production. The shim
+// has since been corrected to expose `messages` ONLY when the host
+// provides `session.context` (capability omission mirroring `get`), so
+// the predicate reads honest capability absence and the host-outcome
+// commit path is reachable exactly for genuinely source-absent hosts.
+// The real starvation lived in the mapped transcript itself: the live
+// probe child (DB-verified) ends with user → assistant(tool, finish
+// tool-calls) → assistant(finish 'stop', time.completed set, text) → an
+// `{type:'idle', outcome}` lifecycle marker, and the mapping reduced
+// every entry to `{id, role}` — so the trailing-turn scan hit the
+// non-assistant `idle` role and classification retried forever (4
+// accepted host-outcome attributions, zero publications, gave-up). This
+// probe builds the client through the REAL shim factory over a ctx
+// mirroring the adapter session domain — `get` AND `context`, the latter
+// returning full 2.0.8-shaped SessionMessage.Info entries — so the
+// divergence is reproducible in vitro.
 
 /** Live 2.0.8 transcript shape (from the starving probe child's durable
  * messages): user prompt, tool-calling assistant turn, final assistant
@@ -1035,10 +1045,13 @@ function liveProbeTranscript(): Array<Record<string, unknown>> {
 
 /** Real-shim v2 host probe: the client comes from `buildPluginInput` —
  * the production v1-shaped client for v2 hosts — over a ctx with the
- * adapter session domain's `get` and `context`. */
+ * adapter session domain's `get` and (when `transcript` is given)
+ * `context`. A ctx WITHOUT `context` models the context-less host: the
+ * shim must omit `session.messages` entirely (capability absence), not
+ * install a fake-empty stub. */
 function realShimV2Client(options: {
   outcome: string;
-  transcript: () => Array<Record<string, unknown>>;
+  transcript?: () => Array<Record<string, unknown>>;
 }): V2HostProbe & { contextCalls: () => number } {
   const host = {
     outcome: options.outcome,
@@ -1059,10 +1072,14 @@ function realShimV2Client(options: {
     location: { directory: '/proj', project: { id: 'proj_1' } },
     session: {
       get: async (_i: { sessionID: string }) => get({}),
-      context: async () => {
-        calls += 1;
-        return options.transcript();
-      },
+      ...(options.transcript
+        ? {
+            context: async () => {
+              calls += 1;
+              return options.transcript?.();
+            },
+          }
+        : {}),
     },
   } as never);
   return {
@@ -1116,6 +1133,55 @@ test('live gap: the real client shim publishes the transcript result of a comple
       taskID: 'child',
       state: 'completed',
       attribution: 'transcript',
+      parentSessionID: 'parent',
+    });
+  } finally {
+    capture.restore();
+  }
+});
+
+// The context-less complement of the live-gap probe above: a real-shim
+// host whose session domain exposes `get` but NOT `context`. The shim
+// used to install a fake-empty `messages` stub there (`{data: []}`),
+// which the terminal gate read as "source present but empty" —
+// classifier verdict `absent` → a baseline-less gen-1 child
+// STOPPED_WITHOUT_TERMINAL_RESULT — while the window-attributed
+// `succeeded` publish path (transcriptSourceAbsent = messages is not a
+// function) stayed dead. With the stub omitted, capability absence is
+// honest: the host-outcome publish path fires for genuinely
+// source-absent hosts and the absent→STOP misroute is gone.
+test('real shim on a context-less host omits messages: attributed success publishes via host-outcome, never stopped', async () => {
+  const capture = captureGateLogs();
+  try {
+    const probe = realShimV2Client({ outcome: 'succeeded' });
+    // The omitted-capability shape: no session.context → no
+    // session.messages on the v1-shaped client the gate probes.
+    const session = (probe.client as { session: Record<string, unknown> })
+      .session;
+    expect(typeof session.messages).toBe('undefined');
+    const board = await driveV2Lifecycle(probe, [
+      {
+        type: 'session.created',
+        data: { sessionID: 'child', parentID: 'parent', agent: 'explorer' },
+      },
+      { type: 'session.execution.started', data: { sessionID: 'child' } },
+      { type: 'session.execution.succeeded', data: { sessionID: 'child' } },
+    ]);
+    const record = board.get('child');
+    if (record?.completedAt === undefined)
+      throw new Error('source-absent completion never published');
+    // The window-attributed success publishes `completed` — not the
+    // absent-evidence STOPPED_WITHOUT_TERMINAL_RESULT the fake-empty
+    // stub produced.
+    expect(record.state).toBe('completed');
+    expect(record.state).not.toBe('stopped');
+    expect(record.resultSummary).not.toContain('stopped without');
+    const published = capture.of('[terminal-gate] terminal published', 'child');
+    expect(published).toHaveLength(1);
+    expect(published[0]?.data).toMatchObject({
+      taskID: 'child',
+      state: 'completed',
+      attribution: 'host-outcome',
       parentSessionID: 'parent',
     });
   } finally {
@@ -1904,14 +1970,18 @@ test('regression: first publication is native-owned; a later publication of the 
 
 // ── I1 pin: the launch-lineage discriminator ──────────────────────────────
 //
-// The native notifier owns the FIRST terminal publication of a
-// natively-spawned run (taskGeneration 1, terminalRevision 1 — live-verified
-// on a 2.0.8 host: a probe child's first completion woke an idle parent via
-// native execution.wake with zero plugin wake). Later publications of the
-// lineage — and first publications of later (relaunched) generations the
-// tracker does NOT own — keep the plugin wake as their only notifier.
+// The native notifier owns the FIRST terminal publication of EVERY
+// generation (terminalRevision 1 — live-verified on a 2.0.8 host: a probe
+// child's first completion woke an idle parent via native execution.wake
+// with zero plugin wake). On v2 every plugin task launch AND relaunch is a
+// host `subagent` tool call that arms the native background notifier — a
+// relaunch re-arms it with a fresh `started_at`, defeating the notify
+// dedupe — so even an UNOWNED second generation's first publication is
+// natively delivered. Only later revisions of the same generation (rev>1:
+// child self-continuation, a direct prompt to the child session) have no
+// native notifier and keep the plugin wake as their only notifier.
 
-test('first publication of an unowned second generation still wakes exactly once', async () => {
+test('first publication of an unowned second generation is native-owned: skipped, zero plugin wakes', async () => {
   resetOrchestratorWakeGateForTests();
   const capture = captureGateLogs();
   try {
@@ -1960,8 +2030,12 @@ test('first publication of an unowned second generation still wakes exactly once
 
     // Past the throttle window, relaunch WITHOUT tracker registration —
     // the exact ownership shape of a tracker that exhausted its retry
-    // budget (willNotifyParent false): the plugin wake is the degraded
-    // fallback and must fire for the new generation's publication.
+    // budget (willNotifyParent false). Under the native-contract
+    // correction this is STILL a natively-notified publication: on v2
+    // the relaunch is itself a host `subagent` tool call that re-arms
+    // the native background notifier with a fresh `started_at` (defeating
+    // the notify dedupe), so the plugin wake must NOT fire beside the
+    // native delivery (F1).
     await Bun.sleep(1_100);
     const lease = h.board.acquireRelaunchLease('child', first.generation);
     if (!lease) throw new Error('missing relaunch lease');
@@ -2009,8 +2083,14 @@ test('first publication of an unowned second generation still wakes exactly once
     }
     if (!second) throw new Error('second-generation publication never landed');
 
-    // The second generation's first publication wakes exactly once: the
-    // first-publication suppression is scoped to the NATIVE lineage.
+    // The second generation's FIRST publication (fresh generation,
+    // terminalRevision 1) is delivered by the host's native notifier —
+    // the `subagent` tool call that relaunched the child armed it — and
+    // the plugin wake beside it would double-notify: exactly the skip
+    // with `first-publication-native-owned`, zero plugin wakes. If that
+    // native delivery is ever lost host-side, the fallback is board
+    // injection on the parent's next activity (pre-branch parity), never
+    // a speculative plugin wake.
     await flush();
     await Bun.sleep(30);
     const waking = capture
@@ -2020,8 +2100,26 @@ test('first publication of an unowned second generation still wakes exactly once
           (entry.data as { verdict?: string } | undefined)?.verdict ===
           'waking',
       );
-    expect(waking).toHaveLength(1);
-    expect(promptAsync).toHaveBeenCalledTimes(1);
+    const nativeOwnedSkips = capture
+      .of('[orchestrator-wake] terminal publication wake skipped', 'child')
+      .filter(
+        (entry) =>
+          (entry.data as { reason?: string; generation?: number } | undefined)
+            ?.reason === 'first-publication-native-owned',
+      );
+    expect(waking).toHaveLength(0);
+    // One native-owned skip per generation's first publication: run 1's
+    // rev-1 (the original launch) AND the relaunched generation's rev-1
+    // — each armed its own host `subagent` notifier call.
+    expect(nativeOwnedSkips).toHaveLength(2);
+    expect(
+      nativeOwnedSkips.filter(
+        (entry) =>
+          (entry.data as { generation?: number } | undefined)?.generation ===
+          relaunched.generation,
+      ),
+    ).toHaveLength(1);
+    expect(promptAsync).not.toHaveBeenCalled();
   } finally {
     capture.restore();
   }
@@ -2372,3 +2470,593 @@ test('recovery wake stays suppressed beside a tracker-delivered terminal for the
     capture.restore();
   }
 });
+
+// ── Runbook §3-D: cache-safety probe across a revival/notification turn ──
+//
+// The deleted v2-wake runbook's §3-D checked, live, that a full revival
+// window produces exactly one queued admission (the revived-run
+// tracker's `<task>` notification) with the publication wake suppressed
+// beside it — and ZERO [cache-monitor] warnings across the whole window:
+// the wake, tracker notification, and corrective surfaces ride the
+// cache-safe trailing zone, so a revival turn that busts the provider
+// prefix is a regression. This pin automates the automatable core: the
+// REAL plugin factory (cache-monitor, wake listeners, tracker all wired
+// by src/index.ts), the REAL v2 event mapping (session.usage.updated →
+// message.updated through mapV2EventToV1, production pump order), and
+// realistic per-turn usage telemetry for the parent (turn 1 cold
+// cache.read=0 with a prefix write, every later turn cache.read>0 and
+// growing — never zero again). A live model turn is the only piece
+// `bun test` cannot run; the telemetry events are exactly what the host
+// reports per completed request, so the residual gap is the provider
+// itself, not the pipeline. The trailing CONTROL leg replays the proven
+// bust signature (setup.e2e.test.ts "event pump maps v2 events…")
+// through this same harness to prove the monitor is armed and WOULD
+// have warned — the zero above is a property of the revival turn, not a
+// dead monitor.
+
+test('runbook §3-D: zero cache-monitor warnings across a full revival/notification turn', async () => {
+  resetOrchestratorWakeGateForTests();
+  const capture = captureGateLogs();
+  try {
+    const promptAsync = mock(async () => ({}));
+    let hostChildren: Array<Record<string, unknown>> = [
+      { id: 'child', parentID: 'parent' },
+    ];
+    const probe = v2ShimClient({
+      outcome: 'succeeded',
+      wakeSurface: {
+        listChildren: () => hostChildren,
+        promptAsync,
+      },
+    });
+    const { h, pump, awaitPublication } = await openV2Lifecycle(probe, {
+      hostFlavor: 'v2',
+      configOverrides: {
+        orchestratorWake: { publicationWakeMinIntervalMs: 1_000 },
+      },
+    });
+    const tracker = h.revivedTracker;
+    if (!tracker) {
+      throw new Error('assembly did not expose the revived-run tracker');
+    }
+    // Parent usage telemetry (session.usage.updated, live wire shape):
+    // one completed assistant request per turn, keyed like the host
+    // reports it. Pumped through the REAL event hook chain.
+    const parentTurn = (tokens: {
+      input: number;
+      read: number;
+      write?: number;
+    }) =>
+      pump({
+        type: 'session.usage.updated',
+        data: {
+          sessionID: 'parent',
+          tokens: {
+            input: tokens.input,
+            output: 5,
+            reasoning: 0,
+            cache: { read: tokens.read, write: tokens.write ?? 0 },
+          },
+        },
+      });
+
+    // Turn 1 — the launch request (cold): no prefix to read yet, the
+    // turn WRITES it. cache.read=0 here is the honest cold-start
+    // signature, never a bust (the monitor arms only after a hit).
+    await h.requestTask('native', 'v2 runbook 3-D revival probe');
+    await parentTurn({ input: 9_000, read: 0, write: 8_200 });
+
+    // Run 1: launch → execution → terminal → publication #1 (gen 1,
+    // rev 1 — natively owned per the corrected contract; zero plugin
+    // wakes beside the native delivery).
+    await pump({
+      type: 'session.created',
+      data: { sessionID: 'child', parentID: 'parent', agent: 'explorer' },
+    });
+    await pump({
+      type: 'session.execution.started',
+      data: { sessionID: 'child' },
+    });
+    hostChildren = [
+      {
+        id: 'child',
+        parentID: 'parent',
+        outcome: 'succeeded',
+        time: { updated: Date.now() },
+      },
+    ];
+    await pump({
+      type: 'session.execution.succeeded',
+      data: { sessionID: 'child' },
+    });
+    const first = await awaitPublication('child', 0);
+    expect(first).toMatchObject({ state: 'completed' });
+    await flush();
+    await Bun.sleep(30);
+    expect(
+      capture
+        .of('[orchestrator-wake] terminal publication wake skipped', 'child')
+        .filter(
+          (entry) =>
+            (entry.data as { reason?: string } | undefined)?.reason ===
+            'first-publication-native-owned',
+        ),
+    ).toHaveLength(1);
+    expect(promptAsync).not.toHaveBeenCalled();
+
+    // Turn 2 — the parent consumes the natively delivered report: warm,
+    // the prefix is read and grows.
+    await parentTurn({ input: 3_000, read: 8_500, write: 1_200 });
+
+    // Revival past the throttle window: tracker-owned relaunch
+    // (task_revive's exact post-admission shape).
+    await Bun.sleep(1_100);
+    const lease = h.board.acquireRelaunchLease('child', first.generation);
+    if (!lease) throw new Error('missing relaunch lease');
+    const relaunched = h.board.registerLaunch({
+      taskID: 'child',
+      parentSessionID: 'parent',
+      agent: 'explorer',
+      description: 'runbook 3-D revival',
+      background: true,
+      relaunchLease: lease,
+    });
+    h.board.releaseLease(lease);
+    tracker.register({
+      taskID: 'child',
+      generation: relaunched.generation,
+      parentSessionID: 'parent',
+      description: 'runbook 3-D revival',
+    });
+
+    hostChildren = [
+      { id: 'child', parentID: 'parent', time: { updated: Date.now() } },
+    ];
+    await pump({
+      type: 'session.execution.started',
+      data: { sessionID: 'child' },
+    });
+    hostChildren = [
+      {
+        id: 'child',
+        parentID: 'parent',
+        outcome: 'succeeded',
+        time: { updated: Date.now() },
+      },
+    ];
+    await pump({
+      type: 'session.execution.succeeded',
+      data: { sessionID: 'child' },
+    });
+    let revived: BackgroundJobRecord | undefined;
+    for (let i = 0; i < 400 && revived === undefined; i++) {
+      const record = h.board.get('child');
+      if (
+        record &&
+        record.state !== 'running' &&
+        record.generation === relaunched.generation
+      ) {
+        revived = record;
+      } else {
+        await Bun.sleep(5);
+      }
+    }
+    if (!revived) throw new Error('revived publication never landed');
+
+    // §3-D's exactly-one-admission contract: the tracker's `<task>`
+    // notification is the ONE queued admission for the revived
+    // completion; the publication wake stays suppressed beside it.
+    await flush();
+    await Bun.sleep(30);
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    const trackerCall = promptAsync.mock.calls.at(-1)?.[0] as {
+      path?: { id?: string };
+      delivery?: string;
+      body?: { parts?: Array<{ text?: string }> };
+    };
+    expect(trackerCall).toMatchObject({
+      path: { id: 'parent' },
+      delivery: 'queue',
+    });
+    expect(trackerCall?.body?.parts?.[0]?.text).toContain('<task ');
+    expect(
+      capture
+        .of('[orchestrator-wake] terminal publication wake skipped', 'child')
+        .filter(
+          (entry) =>
+            (entry.data as { reason?: string } | undefined)?.reason ===
+            'revived-tracker-owns-delivery',
+        ),
+    ).toHaveLength(1);
+    expect(
+      capture
+        .of('[orchestrator-wake] terminal publication wake', 'child')
+        .filter(
+          (entry) =>
+            (entry.data as { verdict?: string } | undefined)?.verdict ===
+            'waking',
+        ),
+    ).toHaveLength(0);
+
+    // Turn 3 — the woken turn (consuming the tracker notification) and
+    // turn 4 — the post-notification reconcile: both warm, the read
+    // prefix keeps growing, never zero again.
+    await parentTurn({ input: 3_600, read: 9_700, write: 300 });
+    await parentTurn({ input: 3_100, read: 10_200, write: 200 });
+    await flush();
+
+    // THE §3-D assertion: across the whole revival/notification window
+    // the captured plugin log contains zero [cache-monitor] warnings —
+    // none of the three runbook §3-D signatures.
+    const cacheMonitorLines = capture
+      .all()
+      .filter((entry) => entry.message.startsWith('[cache-monitor]'));
+    expect(cacheMonitorLines).toEqual([]);
+    const wholeLog = capture
+      .all()
+      .map((entry) => entry.message)
+      .join('\n');
+    expect(wholeLog).not.toContain('prompt-cache bust');
+    expect(wholeLog).not.toContain('never hit the provider cache');
+    expect(wholeLog).not.toContain('cache-read plateau');
+
+    // Non-vacuous control (same harness, same mapping layer): the
+    // proven bust signature for a separate session DOES warn, proving
+    // the monitor was armed across the window above.
+    await pump({
+      type: 'session.usage.updated',
+      data: {
+        sessionID: 'ses_control',
+        tokens: {
+          input: 8_000,
+          output: 5,
+          reasoning: 0,
+          cache: { read: 0, write: 7_000 },
+        },
+      },
+    });
+    await pump({
+      type: 'session.usage.updated',
+      data: {
+        sessionID: 'ses_control',
+        tokens: {
+          input: 500,
+          output: 5,
+          reasoning: 0,
+          cache: { read: 9_000, write: 0 },
+        },
+      },
+    });
+    await pump({
+      type: 'session.usage.updated',
+      data: {
+        sessionID: 'ses_control',
+        tokens: {
+          input: 12_000,
+          output: 5,
+          reasoning: 0,
+          cache: { read: 0, write: 0 },
+        },
+      },
+    });
+    await flush();
+    const controlWarnings = capture
+      .all()
+      .filter(
+        (entry) =>
+          entry.message.startsWith('[cache-monitor]') &&
+          entry.message.includes('prompt-cache bust'),
+      );
+    expect(controlWarnings).toHaveLength(1);
+    expect(controlWarnings[0]?.data).toMatchObject({
+      sessionID: 'ses_control',
+    });
+  } finally {
+    capture.restore();
+  }
+});
+
+// ── Runbook §6: attribution window containment (DB-row ground truth) ──
+//
+// The deleted v2-wake runbook's §6 cross-checked the gate's accepted
+// attribution windows against the host DB row — `session_v2.idle_outcome`
+// (one of the host's schema literals) plus `session_v2.time_idle`
+// (integer epoch ms recorded at the idle transition) — and required
+// `windowLower < time_idle <= windowUpper` for the row the gate
+// accepted, with a stale prior run's row rejected. These pins make the
+// containment contract explicit and named, so a future regression reads
+// as "window containment broken" instead of a diffuse attribution
+// failure. The fixture rows mirror the DB semantics exactly: outcome +
+// integer-ms time.idle surfaced through session.get, committed at the
+// idle transition.
+
+/** Drive one v2 child lifecycle whose session.get serves a FIXED host
+ * DB row ({idle_outcome, time_idle}) once the run is live, then settle
+ * the gate's evidence-retry cadence. `idleFor` receives the board's
+ * live lower bound (the started event's busy stamp — the max of
+ * runStartedAt/attemptStartedAt/lastLiveBusyAt the window uses) so each
+ * test constructs its row relative to the real boundary. */
+async function driveHostRowLifecycle(options: {
+  outcome: string;
+  idleFor: (lowerBoundFromBoard: number) => number;
+}) {
+  const capture = captureGateLogs();
+  const probe = v2ShimClient({ outcome: 'succeeded' });
+  const { h, pump } = await openV2Lifecycle(probe, { hostFlavor: 'v2' });
+  await h.requestTask('native', 'v2 window containment probe');
+  await pump({
+    type: 'session.created',
+    data: { sessionID: 'child', parentID: 'parent', agent: 'explorer' },
+  });
+  await pump({
+    type: 'session.execution.started',
+    data: { sessionID: 'child' },
+  });
+  const lowerBoundFromBoard = h.board.get('child')?.lastLiveBusyAt;
+  if (lowerBoundFromBoard === undefined)
+    throw new Error('run never went busy on the board');
+  const idle = options.idleFor(lowerBoundFromBoard);
+  if (!Number.isInteger(idle))
+    throw new Error('DB-row time_idle must be integer epoch ms');
+  probe.get.mockImplementation(async () => ({
+    data: { parentID: 'parent', outcome: options.outcome, time: { idle } },
+  }));
+  await pump({
+    type: 'session.execution.succeeded',
+    data: { sessionID: 'child' },
+  });
+  // Settle: wait for the first attribution read, then let the retry
+  // cadence run out (the guard suites' polling pattern).
+  for (
+    let i = 0;
+    i < 400 &&
+    capture.of('[terminal-gate] host-outcome attribution', 'child').length ===
+      0;
+    i++
+  )
+    await Bun.sleep(5);
+  for (let i = 0; i < 40; i++) await Bun.sleep(5);
+  const attributions = capture.of(
+    '[terminal-gate] host-outcome attribution',
+    'child',
+  );
+  return {
+    capture,
+    board: h.board,
+    lowerBoundFromBoard,
+    idle,
+    attributions: attributions.map(
+      (entry) =>
+        entry.data as {
+          verdict?: string;
+          reason?: string;
+          windowLower?: number;
+          windowUpper?: number;
+          outcome?: string;
+        },
+    ),
+  };
+}
+
+test('window containment: an accepted attribution satisfies windowLower < time_idle <= windowUpper', async () => {
+  const capture = captureGateLogs();
+  try {
+    // Default v2 probe semantics: the row commits at the idle transition
+    // (the terminal execution event) — exactly when the host DB writes
+    // time_idle — with integer epoch ms.
+    const committedIdles: number[] = [];
+    const base = v2ShimClient({ outcome: 'succeeded' });
+    const probe = {
+      ...base,
+      commitTerminalOutcome: (idleAt: number) => {
+        committedIdles.push(idleAt);
+        base.commitTerminalOutcome(idleAt);
+      },
+    };
+    const { h, pump } = await openV2Lifecycle(probe, { hostFlavor: 'v2' });
+    await h.requestTask('native', 'v2 window containment accepted probe');
+    await pump({
+      type: 'session.created',
+      data: { sessionID: 'child', parentID: 'parent', agent: 'explorer' },
+    });
+    await pump({
+      type: 'session.execution.started',
+      data: { sessionID: 'child' },
+    });
+    await Bun.sleep(2);
+    await pump({
+      type: 'session.execution.succeeded',
+      data: { sessionID: 'child' },
+    });
+    for (let i = 0; i < 400 && h.board.get('child')?.state === 'running'; i++)
+      await Bun.sleep(5);
+    expect(h.board.get('child')).toMatchObject({
+      state: 'completed',
+      resultSummary: 'Host reported outcome: succeeded.',
+    });
+    const accepted = capture
+      .of('[terminal-gate] host-outcome attribution', 'child')
+      .map(
+        (entry) =>
+          entry.data as {
+            verdict?: string;
+            windowLower?: number;
+            windowUpper?: number;
+          },
+      )
+      .filter((data) => data.verdict === 'accepted');
+    expect(accepted.length).toBeGreaterThan(0);
+    expect(committedIdles.length).toBeGreaterThan(0);
+    for (const data of accepted) {
+      // The committed DB row (integer epoch ms, stamped at the idle
+      // transition) sits strictly inside the logged window: a failure
+      // here IS the window containment contract breaking.
+      const inside = committedIdles.some(
+        (idle) =>
+          Number.isInteger(idle) &&
+          (data.windowLower ?? Number.NaN) < idle &&
+          idle <= (data.windowUpper ?? Number.NaN),
+      );
+      expect(
+        inside,
+        `window containment broken: windowLower=${data.windowLower} windowUpper=${data.windowUpper} time_idle=[${committedIdles.join(', ')}]`,
+      ).toBe(true);
+    }
+  } finally {
+    capture.restore();
+  }
+});
+
+test('window containment: a stale prior run (time_idle below windowLower) is rejected and publishes nothing', async () => {
+  const { capture, board, lowerBoundFromBoard, idle, attributions } =
+    await driveHostRowLifecycle({
+      outcome: 'succeeded',
+      // A row from a PRIOR run: its idle transition predates this run's
+      // every boundary.
+      idleFor: (lowerBound) => lowerBound - 60_000,
+    });
+  try {
+    expect(attributions.length).toBeGreaterThan(0);
+    for (const data of attributions) {
+      expect(data.verdict).toBe('rejected');
+      expect(data.reason).toBe('idle-not-after-window-lower');
+    }
+    // The fixture's bound identity: the logged window lower bound IS
+    // the board's live busy stamp the row was constructed against.
+    expect(attributions[0]?.windowLower).toBe(lowerBoundFromBoard);
+    expect(idle).toBeLessThan(lowerBoundFromBoard);
+    expect(board.get('child')?.state).toBe('running');
+    expect(capture.of('[terminal-gate] terminal published', 'child')).toEqual(
+      [],
+    );
+  } finally {
+    capture.restore();
+  }
+});
+
+test('window containment: time_idle exactly ON windowLower (stale tie) is rejected, not accepted', async () => {
+  const { capture, board, lowerBoundFromBoard, idle, attributions } =
+    await driveHostRowLifecycle({
+      outcome: 'succeeded',
+      // Same-millisecond tie with the run's last boundary: equality is
+      // ambiguous (the idle may predate the run), so the window must
+      // reject it — the strict lower inequality is load-bearing.
+      idleFor: (lowerBound) => lowerBound,
+    });
+  try {
+    expect(attributions.length).toBeGreaterThan(0);
+    for (const data of attributions) {
+      expect(data.verdict).toBe('rejected');
+      expect(data.reason).toBe('idle-not-after-window-lower');
+    }
+    expect(attributions[0]?.windowLower).toBe(lowerBoundFromBoard);
+    expect(idle).toBe(lowerBoundFromBoard);
+    expect(board.get('child')?.state).toBe('running');
+    expect(capture.of('[terminal-gate] terminal published', 'child')).toEqual(
+      [],
+    );
+  } finally {
+    capture.restore();
+  }
+});
+
+test('window containment: time_idle above windowUpper (clock-skew row) is rejected — the upper fence', async () => {
+  const { capture, board, idle, attributions } = await driveHostRowLifecycle({
+    outcome: 'succeeded',
+    // On a shared unix-ms clock this row cannot exist by construction:
+    // the host writes time_idle at the idle transition, strictly before
+    // the gate's read completes, and windowUpper IS that read-completion
+    // stamp. A future-dated row is only reachable through clock skew —
+    // and the window must still refuse it.
+    idleFor: (lowerBound) => lowerBound + 120_000,
+  });
+  try {
+    expect(attributions.length).toBeGreaterThan(0);
+    for (const data of attributions) {
+      expect(data.verdict).toBe('rejected');
+      expect(data.reason).toBe('idle-after-read-completion');
+      expect(data.windowUpper).toBeDefined();
+      expect(data.windowUpper as number).toBeLessThan(idle);
+    }
+    expect(board.get('child')?.state).toBe('running');
+    expect(capture.of('[terminal-gate] terminal published', 'child')).toEqual(
+      [],
+    );
+  } finally {
+    capture.restore();
+  }
+});
+
+// ── Runbook §6: host-schema drift contract ──
+//
+// The gate's attributable-outcome vocabulary is an intentional SUPERSET
+// of the host schema's emitted literals (the extra 'cancelled' is the
+// stop-family fail-safe). Host literals must stay a subset and unknown
+// strings must route to the unrecognized-outcome rejection — never a
+// publication. This pin reads the CLONED host schema source so a host
+// schema change (literal added/removed) surfaces as a visible test
+// signal instead of a silent misclassification.
+
+const HOST_SCHEMA_PATH = path.join(
+  path.resolve(import.meta.dir, '..'),
+  '.slim/clonedeps/repos/opencode/packages/schema/src/session.ts',
+);
+const hostSchemaAvailable = existsSync(HOST_SCHEMA_PATH);
+const driftTest = hostSchemaAvailable ? test : test.skip;
+
+driftTest(
+  'runbook §6 — host-schema drift: gate outcome literals track the cloned host session schema' +
+    (hostSchemaAvailable
+      ? ''
+      : ' [SKIPPED: host clone absent — fetch it with the clonedeps skill into .slim/clonedeps/repos/opencode]'),
+  async () => {
+    const source = readFileSync(HOST_SCHEMA_PATH, 'utf8');
+    // Info.outcome Literals — the host's idle_outcome vocabulary
+    // ("Outcome of the last completed execution, recorded at
+    // time.idle. Absent until a run reaches a terminal transition.").
+    const outcomeMatch = source.match(
+      /outcome:\s*Schema\.Literals\(\s*\[([^\]]*)\]/,
+    );
+    expect(outcomeMatch).toBeDefined();
+    const hostLiterals = [...(outcomeMatch?.[1] ?? '').matchAll(/"([^"]+)"/g)]
+      .map((m) => m[1])
+      .sort();
+    expect(hostLiterals.length).toBeGreaterThan(0);
+    // time.idle is millis-since-epoch on the host schema — the DB row's
+    // time_idle semantics the window-containment fixtures mirror.
+    expect(source).toMatch(/idle:\s*DateTimeUtcFromMillis/);
+    // The pinned host vocabulary: additions AND removals both trip
+    // (either is host-schema drift this test exists to surface).
+    expect(hostLiterals).toEqual(['failed', 'interrupted', 'succeeded']);
+    // Contract: host literals ⊆ gate accepted. The gate's extra
+    // 'cancelled' is the documented stop-family fail-safe superset.
+    const gateAccepted = gateFactories.ACCEPTED_HOST_OUTCOMES;
+    for (const literal of hostLiterals) {
+      expect(gateAccepted).toContain(literal);
+    }
+    expect(gateAccepted).toContain('cancelled');
+    expect(hostLiterals).not.toContain('cancelled');
+    // And a string outside BOTH vocabularies routes to the
+    // unrecognized-outcome rejection, never a publication — the literal
+    // gate precedes the window check in the rejection cascade, so an
+    // unknown outcome refuses publication regardless of where its
+    // time_idle sits.
+    const { capture, board, attributions } = await driveHostRowLifecycle({
+      outcome: 'detonated-unknown',
+      idleFor: (lowerBound) => lowerBound + 1,
+    });
+    try {
+      expect(attributions.length).toBeGreaterThan(0);
+      for (const data of attributions) {
+        expect(data.verdict).toBe('rejected');
+        expect(data.reason).toBe('unrecognized-outcome:detonated-unknown');
+      }
+      expect(board.get('child')?.state).toBe('running');
+      expect(capture.of('[terminal-gate] terminal published', 'child')).toEqual(
+        [],
+      );
+    } finally {
+      capture.restore();
+    }
+  },
+);

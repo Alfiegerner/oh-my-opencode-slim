@@ -310,6 +310,18 @@ dead end, never a pending transcript, and a host whose transcript is present but
 unfinalized keeps waiting exactly as on v1. Independent runtime maps, native
 returns and cancellation keep their fences.
 
+Known limitation (documented dead end): a host outcome that becomes
+attributable only after the gate's evidence retry budget is exhausted (initial
+read plus 3 retries at `stopConfirmationMs` cadence, with no further events
+arriving) strands the board entry at `running` until the parent's next
+activity rehydrate reconciles it. The parked probe test in
+`src/terminal-gate.integration.test.ts` (`probe: late-attributable outcome
+after exhaustion terminalizes the stranded board`, `test.skip`) records the
+mechanism: neither a later idle pair nor a busy→idle contrast cycle re-arms
+an outcome read. Note `stopConfirmationMs` doubles as the retry cadence —
+raising it stretches the stranding window proportionally (~4× its value at
+the default budget).
+
 ## Feature matrix
 
 | Capability | v1 (`opencode`) | v2 (`opencode2`) | Notes |
@@ -845,10 +857,14 @@ respawn, bounded by the same no-progress cap as v1.
 
 ### Terminal-publication wake（终态后唤醒）
 
-The native notifier fires once per original job — the FIRST completion. A
-terminal publication that lands while the parent sits idle (a child that
-self-continues via its own background-shell notification and finishes
-again, or a later child's completion) would otherwise wait for the periodic
+The native notifier fires on the FIRST terminal publication of every
+generation — on v2 every plugin task launch AND relaunch is a host
+`subagent` tool call that arms the native background notifier (a relaunch
+re-arms it with a fresh `started_at`, defeating the notify dedupe). Only a
+terminal publication that lands while the parent sits idle on a LATER
+revision of the same generation (a child that self-continues via its own
+background-shell notification and finishes again, or a completion after a
+direct prompt to the child session) would otherwise wait for the periodic
 idle evaluation (up to `orchestratorWake.intervalMs`, default 5 minutes).
 The **terminal-publication wake** closes that gap on both host flavors:
 
@@ -858,9 +874,12 @@ The **terminal-publication wake** closes that gap on both host flavors:
   no input wait is open AND at least `publicationWakeMinIntervalMs` has
   passed since this parent's last *delivered* publication wake (the
   per-parent throttle is consumed only on delivery; a suppressed attempt
-  burns nothing). The FIRST terminal publication of a natively-spawned
-  run is suppressed with `reason: "first-publication-native-owned"` —
-  the native notifier already delivers that one to an idle parent.
+  burns nothing). The FIRST terminal publication of ANY generation
+  (`terminalRevision` 1) is suppressed with `reason:
+  "first-publication-native-owned"` — the native notifier armed by that
+  generation's `subagent` tool call already delivers it to an idle
+  parent; if that native delivery is ever lost host-side, the job falls
+  back to board injection on the parent's next activity.
 - **Busy parent → skip entirely:** the native steer already delivered the
   first completion; a queued wake would double-notify.
 - **Delivery:** the same `promptAsync` machinery as the periodic wake —

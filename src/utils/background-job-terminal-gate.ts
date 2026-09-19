@@ -202,6 +202,22 @@ function validHostTime(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
 
+/** Host `session.outcome` literals the gate treats as attributable
+ * terminal outcomes. Intentionally a SUPERSET of the host schema's
+ * emitted literals (packages/schema session.ts `Info.outcome`): the
+ * extra `'cancelled'` is the plugin's stop-family fail-safe so a
+ * cancel-shaped row never publishes as an error. Host literals MUST
+ * stay a subset — pinned against the cloned host schema by
+ * src/terminal-gate.integration.test.ts (runbook §6 drift contract);
+ * anything outside this set routes to the unrecognized-outcome
+ * rejection, never a publication. */
+export const ACCEPTED_HOST_OUTCOMES: readonly string[] = [
+  'succeeded',
+  'failed',
+  'interrupted',
+  'cancelled',
+];
+
 function attributableHostOutcome(
   response: unknown,
   bounds: {
@@ -222,7 +238,7 @@ function attributableHostOutcome(
     !validHostTime(bounds.lowerBound) ||
     !validHostTime(bounds.readCompletedAt) ||
     typeof outcome !== 'string' ||
-    !['succeeded', 'failed', 'interrupted', 'cancelled'].includes(outcome) ||
+    !ACCEPTED_HOST_OUTCOMES.includes(outcome) ||
     !(bounds.lowerBound < idleAt && idleAt <= bounds.readCompletedAt)
   )
     return;
@@ -251,7 +267,7 @@ function hostOutcomeRejectionReason(
   if (!validHostTime(bounds.lowerBound)) return 'invalid-window-lower';
   if (!validHostTime(bounds.readCompletedAt)) return 'invalid-read-completion';
   if (typeof outcome !== 'string') return 'outcome-missing';
-  if (!['succeeded', 'failed', 'interrupted', 'cancelled'].includes(outcome))
+  if (!ACCEPTED_HOST_OUTCOMES.includes(outcome))
     return `unrecognized-outcome:${String(outcome)}`;
   if (!(bounds.lowerBound < idleAt)) return 'idle-not-after-window-lower';
   return 'idle-after-read-completion';

@@ -343,18 +343,23 @@ export function buildPluginInput(
               id: sessionIDOf(args),
             });
           },
-      messages: s.context
-        ? async (args: Record<string, unknown>) => ({
-            data: (
-              (await s.context?.({ sessionID: sessionIDOf(args) })) ?? []
-            ).map(toV1Message),
-          })
-        : async (args: Record<string, unknown>) => {
-            log('[v2][shim] session.context unavailable', {
-              id: sessionIDOf(args),
-            });
-            return { data: [] };
-          },
+      // `messages` is exposed only when the host provides
+      // session.context — the terminal gate's transcriptSourceAbsent
+      // predicate methods-presence as the capability signal, and a
+      // fake-empty `{data: []}` stub here would read as "source present
+      // but empty" (classifier verdict `absent` → a baseline-less child
+      // STOPPED_WITHOUT_TERMINAL_RESULT) instead of honest capability
+      // absence (same no-fake-success doctrine as the `get` omission
+      // above).
+      ...(s.context
+        ? {
+            messages: async (args: Record<string, unknown>) => ({
+              data: (
+                (await s.context?.({ sessionID: sessionIDOf(args) })) ?? []
+              ).map(toV1Message),
+            }),
+          }
+        : {}),
       // `status` is intentionally OMITTED: v2 has no equivalent of the v1
       // live session-status map, and a stub returning `{data: {}}` would be
       // an empty-but-valid map. getRuntimeSessionStatusSnapshot treats
