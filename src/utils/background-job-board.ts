@@ -1614,6 +1614,9 @@ function isReusable(
  *  acknowledgment is NOT required — the transcript exists as soon as
  *  the child finishes. */
 function isSidebarHistory(job: BackgroundJobRecord): boolean {
+  // Unattributed placeholders stay out of advertised surfaces until
+  // attribution (same exclusion as the prompt's reusable section).
+  if (job.provisional) return false;
   if (job.statusUncertain) return false;
   const terminal = job.terminalState ?? terminalStateOf(job.state);
   return (
