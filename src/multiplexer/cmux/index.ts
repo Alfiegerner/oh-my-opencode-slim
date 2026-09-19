@@ -2,7 +2,7 @@ import type { MultiplexerLayout } from '../../config/schema';
 import { crossSpawn } from '../../utils/compat';
 import { log } from '../../utils/logger';
 import {
-  applyDirectoryParam,
+  buildDirectoryHeaders,
   buildOpencodeAttachCommand,
   defaultSessionReady,
   findBinary,
@@ -18,6 +18,7 @@ export interface CmuxReadinessOptions {
     url: URL,
     sessionId: string,
     signal: AbortSignal,
+    headers?: Record<string, string>,
   ) => Promise<boolean>;
   delay?: (milliseconds: number) => Promise<void>;
   readinessAttemptTimeoutMs?: number;
@@ -103,6 +104,7 @@ export class CmuxMultiplexer implements Multiplexer {
     url: URL,
     sessionId: string,
     signal: AbortSignal,
+    headers?: Record<string, string>,
   ) => Promise<boolean>;
   private readonly delay: (milliseconds: number) => Promise<void>;
   private readonly readinessAttemptTimeoutMs: number;
@@ -151,8 +153,8 @@ export class CmuxMultiplexer implements Multiplexer {
     if (!this.opencodeBinary) return { success: false, error: 'hard' };
     const opencodeBinary = this.opencodeBinary;
     const statusUrl = new URL('/session/status', serverUrl);
-    applyDirectoryParam(statusUrl, directory);
-    if (!(await this.waitForSession(statusUrl, sessionId))) {
+    const headers = buildDirectoryHeaders(directory);
+    if (!(await this.waitForSession(statusUrl, sessionId, headers))) {
       log('[cmux] spawnPane failed', {
         stage: 'readinessTimeout',
         sessionId,
@@ -337,7 +339,11 @@ export class CmuxMultiplexer implements Multiplexer {
     }
   }
 
-  private async waitForSession(url: URL, sessionId: string): Promise<boolean> {
+  private async waitForSession(
+    url: URL,
+    sessionId: string,
+    headers?: Record<string, string>,
+  ): Promise<boolean> {
     for (let attempt = 0; attempt <= READINESS_DELAYS_MS.length; attempt++) {
       const controller = new AbortController();
       const timeout = setTimeout(
@@ -348,7 +354,7 @@ export class CmuxMultiplexer implements Multiplexer {
       try {
         if (
           await Promise.race([
-            this.checkSessionReady(url, sessionId, controller.signal),
+            this.checkSessionReady(url, sessionId, controller.signal, headers),
             new Promise<boolean>((resolve) =>
               controller.signal.addEventListener(
                 'abort',

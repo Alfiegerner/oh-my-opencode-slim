@@ -252,6 +252,7 @@ export interface SessionReadinessOptions {
     url: URL,
     sessionId: string,
     signal: AbortSignal,
+    headers?: Record<string, string>,
   ) => Promise<boolean>;
   /** Injectable cancellation-safe delay for backoff between attempts. */
   delay?: (milliseconds: number) => Promise<void>;
@@ -275,9 +276,10 @@ export interface SessionReadinessOptions {
    * Project directory of the child session. Required in shared
    * `opencode serve` topologies: without it the server routes
    * `/session/status` to its own process.cwd() and never reports
-   * sessions spawned in other project directories as ready. Paths with a
-   * literal '%' are skipped (the core decodes the query twice), and
-   * servers rejecting the query fall back to a directory-less probe.
+   * sessions spawned in other project directories as ready. Sent as the
+   * `x-opencode-directory` header (pre-encoded, the official SDK
+   * contract), so percent-bearing and non-ASCII paths resolve exactly
+   * and older servers simply ignore it.
    */
   directory?: string;
 }
@@ -315,7 +317,7 @@ export async function waitForSessionReady(
   const signal = options.signal;
   const deadlineAt = now() + deadlineMs;
   const url = new URL('/session/status', serverUrl);
-  applyDirectoryParam(url, options.directory ?? '');
+  const headers = buildDirectoryHeaders(options.directory ?? '');
 
   const abortedPromise = signal
     ? new Promise<false>((resolve) => {
@@ -345,7 +347,7 @@ export async function waitForSessionReady(
     let ready = false;
     try {
       ready = await Promise.race([
-        check(url, sessionId, controller.signal),
+        check(url, sessionId, controller.signal, headers),
         abortedPromise ?? neverPromise,
         new Promise<boolean>((resolve) =>
           controller.signal.addEventListener('abort', () => resolve(false), {
@@ -376,28 +378,26 @@ export async function waitForSessionReady(
 }
 
 /**
- * Attach the child directory to a status URL. Paths containing a literal
- * '%' are skipped: the core decodes the value twice, so percent-bearing
- * paths would route to the wrong instance.
+ * Headers that route the status request to the child's project directory.
+ * The value is pre-encoded: the server reads it raw and decodes it exactly
+ * once (the same contract the official SDK uses), so percent-bearing and
+ * non-ASCII paths resolve correctly. Unlike the query parameter, headers
+ * are not schema-validated, so older servers ignore them without a 400.
  */
-export function applyDirectoryParam(url: URL, directory: string): void {
-  if (!directory || directory.includes('%')) return;
-  url.searchParams.set('directory', directory);
+export function buildDirectoryHeaders(
+  directory: string,
+): Record<string, string> {
+  if (!directory) return {};
+  return { 'x-opencode-directory': encodeURIComponent(directory) };
 }
 
 export async function defaultSessionReady(
   url: URL,
   sessionId: string,
   signal: AbortSignal,
+  headers?: Record<string, string>,
 ): Promise<boolean> {
-  let response = await fetch(url, { signal });
-  if (response.status === 400 && url.searchParams.has('directory')) {
-    // Servers older than 2026-05-09 reject the query: fall back to the
-    // directory-less probe instead of timing out a live session. The URL
-    // keeps the param off for the remaining attempts.
-    url.searchParams.delete('directory');
-    response = await fetch(url, { signal });
-  }
+  const response = await fetch(url, { signal, headers });
   if (!response.ok) return false;
   const statuses = (await response.json()) as Record<
     string,
