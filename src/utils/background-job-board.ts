@@ -1337,7 +1337,13 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     const active = jobs.filter(
       (job) => job.state === 'running' || job.terminalUnreconciled,
     );
-    const reusable = this.listReusable(parentSessionID);
+    // listReusable predates the provisional provenance contract and is
+    // unaware of it: without this filter a reconciled completed
+    // placeholder would surface in the Reusable Sessions section even
+    // though it was never attributed (same exclusion as `jobs` above).
+    const reusable = this.listReusable(parentSessionID).filter(
+      (job) => job.provisional !== true,
+    );
     const retained = jobs.filter(isRetainedStopped);
     const acknowledgedFailedSession = reusable.some((job) => {
       const terminal = job.terminalState ?? terminalStateOf(job.state);
