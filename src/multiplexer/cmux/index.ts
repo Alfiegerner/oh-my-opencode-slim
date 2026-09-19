@@ -149,6 +149,7 @@ export class CmuxMultiplexer implements Multiplexer {
     if (!this.opencodeBinary) return { success: false, error: 'hard' };
     const opencodeBinary = this.opencodeBinary;
     const statusUrl = new URL('/session/status', serverUrl);
+    statusUrl.searchParams.set('directory', directory);
     if (!(await this.waitForSession(statusUrl, sessionId))) {
       log('[cmux] spawnPane failed', {
         stage: 'readinessTimeout',

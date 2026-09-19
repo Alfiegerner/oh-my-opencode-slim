@@ -81,7 +81,9 @@ describe('CmuxMultiplexer', () => {
     let attempt = 0;
     const readiness = mock(async (url: URL, sessionId: string) => {
       events.push('status');
-      expect(url.href).toBe('https://example.test/session/status');
+      expect(url.href).toBe(
+        'https://example.test/session/status?directory=%2Frepo',
+      );
       expect(sessionId).toBe('session-1');
       attempt += 1;
       if (attempt === 2) throw new Error('network');
@@ -172,7 +174,9 @@ describe('CmuxMultiplexer', () => {
         pathExists: () => true,
       }).spawnPane('target', 'agent', 'http://127.0.0.1:7777/base', '/repo'),
     ).toEqual(expect.objectContaining({ success: true }));
-    expect(requested).toEqual(['http://127.0.0.1:7777/session/status']);
+    expect(requested).toEqual([
+      'http://127.0.0.1:7777/session/status?directory=%2Frepo',
+    ]);
   });
 
   test('uses stable create IDs for right/down anchors and close', async () => {
