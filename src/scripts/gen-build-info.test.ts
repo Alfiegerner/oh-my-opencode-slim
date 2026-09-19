@@ -18,6 +18,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   generateBuildInfo,
@@ -27,7 +28,7 @@ import {
 const outputRelative = join('src', 'generated', 'build-info.ts');
 
 function createFixture(version = '9.9.99'): string {
-  const rootDir = mkdtempSync('/tmp/opencode/omo-gen-build-info-');
+  const rootDir = mkdtempSync(join(tmpdir(), 'omo-gen-build-info-'));
   mkdirSync(join(rootDir, 'src', 'generated'), { recursive: true });
   writeFileSync(
     join(rootDir, 'package.json'),
