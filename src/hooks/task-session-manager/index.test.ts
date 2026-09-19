@@ -5353,20 +5353,24 @@ describe('task-session-manager hook', () => {
     });
   });
 
-  test('rejects unknown native resume ids before launching the host', async () => {
+  test('drops hallucinated UUID task_ids and spawns fresh instead of refusing', async () => {
     const { hook } = createHook();
-    const resume = {
-      args: { subagent_type: 'fixer', task_id: 'ses_existing' },
+    // The exact shape from the 2026-09-19 outage: a fallback provider invented
+    // random UUIDs in task_id, then models copied the pattern from compacted
+    // history while every refusal blocked all delegations.
+    const spawn = {
+      args: {
+        subagent_type: 'fixer',
+        task_id: '474bd269-eac6-40a9-9408-9fe430e8cd19',
+      },
     };
 
-    await expect(
-      hook['tool.execute.before'](
-        { tool: 'task', sessionID: 'parent-1', callID: 'resume-1' },
-        resume,
-      ),
-    ).rejects.toThrow(/Unknown task ID or alias: ses_existing/);
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'resume-1' },
+      spawn,
+    );
 
-    expect(resume.args.task_id).toBe('ses_existing');
+    expect(spawn.args.task_id).toBeUndefined();
   });
 
   test('refuses unknown reusable aliases without dropping task_id', async () => {

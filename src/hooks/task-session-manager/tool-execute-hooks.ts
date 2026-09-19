@@ -48,6 +48,10 @@ function normalizeObjectiveKey(value: string): string {
   return value.replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
+/** Random-UUID shape: the signature of hallucinated task_ids (see unknown-id branch). */
+const UUID_SHAPE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function refuseExplicitTaskId(
   requested: string,
   message: string,
@@ -234,6 +238,16 @@ export async function handleToolExecuteBefore(
 
       if (knownManagedTask) {
         refuseKnownTaskResume(requested, knownManagedTask, agentType);
+      } else if (UUID_SHAPE.test(requested)) {
+        // Hallucinated id: random UUIDs name nothing in this board and are the
+        // known failure signature of degraded fallback providers (2026-09-19:
+        // grok invented task_ids during a 429 window, then models copied the
+        // pattern from compacted history while every refusal blocked all
+        // delegations). Drop the id and proceed as a fresh spawn.
+        log('[task-session-manager] dropped hallucinated UUID task_id', {
+          task_id: requested,
+        });
+        delete args.task_id;
       } else {
         refuseExplicitTaskId(
           requested,
