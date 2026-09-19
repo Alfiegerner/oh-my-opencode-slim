@@ -386,6 +386,11 @@ export async function handleToolExecuteAfter(
     };
     backgroundJobSupervisor?: BackgroundJobSupervisor;
     bindConcurrencyTicket?: (taskID: string, pending: PendingTaskCall) => void;
+    backgroundTaskConcurrency?: BackgroundTaskConcurrency;
+    getModelForAgent?: (
+      agentType: string,
+      parentSessionID?: string,
+    ) => string | undefined;
     /** Record direct task cleanup even when the store is a thin facade. */
     recordLifecycleSuppression?: (taskID: string) => void;
     /** Clear a deletion guard when a new native task output proves a run exists. */
@@ -493,6 +498,44 @@ export async function handleToolExecuteAfter(
 
   try {
     if (typeof output.output !== 'string') return;
+    const backgroundMeta = output.metadata as
+      | { background?: unknown }
+      | undefined;
+    // The host only reports background:true here when it promoted the
+    // foreground waiter (or the launch was native): it is authoritative
+    // for the child this output describes, regardless of call identity.
+    const hostConfirmedBackground = backgroundMeta?.background === true;
+    if (hostConfirmedBackground && !pending.background) {
+      // Foreground-fallback promoted this waiter to background before its
+      // fallback abort: the tool resolved via backgroundResult, so the
+      // pending (registered as a foreground call) must follow suit or the
+      // board record would stay foreground and miss the background-only
+      // observation and supervision paths.
+      pending.background = true;
+      // The foreground call skipped concurrency admission, so the
+      // promoted run would otherwise bypass the configured limits: take
+      // the same ticket a native background launch holds. No ready-await
+      // — the child is already running; registration below binds the
+      // ticket and the terminal path releases it.
+      if (deps.backgroundTaskConcurrency && !pending.concurrencyTicket) {
+        const isManagedTask = deps.backgroundJobBoard
+          .taskIDs()
+          .has(pending.parentSessionId);
+        if (!isManagedTask) {
+          pending.concurrencyTicket = deps.backgroundTaskConcurrency.acquire({
+            model: deps.getModelForAgent?.(
+              pending.agentType,
+              pending.parentSessionId,
+            ),
+          });
+          // Fire-and-forget accounting: nobody awaits ticket.ready here,
+          // so a rejection (queue cancelled by disposal while waiting)
+          // must be marked handled or it surfaces as an unhandled
+          // rejection. A granted or released ticket is unaffected.
+          void pending.concurrencyTicket.ready.catch(() => {});
+        }
+      }
+    }
     if (pending.earlyRegistrationRejected) {
       log(
         '[task-session-manager] task output previously fenced; re-evaluating registration against board state',
@@ -506,6 +549,7 @@ export async function handleToolExecuteAfter(
         launch.taskID,
         pending,
         exactCallConfirmed,
+        hostConfirmedBackground,
         deps,
       );
       if (!record) return;
@@ -534,6 +578,7 @@ export async function handleToolExecuteAfter(
         status.taskID,
         pending,
         exactCallConfirmed,
+        hostConfirmedBackground,
         deps,
       );
       if (!record) return;
@@ -652,6 +697,7 @@ function registerTaskOutputLaunch(
   taskID: string,
   pending: PendingTaskCall,
   exactCallConfirmed: boolean,
+  hostConfirmedBackground: boolean,
   deps: {
     backgroundJobBoard: BackgroundJobStore;
     backgroundJobSupervisor?: BackgroundJobSupervisor;
@@ -743,7 +789,8 @@ function registerTaskOutputLaunch(
             description: pending.label,
             objective: pending.fullObjective ?? pending.label,
           }),
-      background: exactCallConfirmed && pending.background,
+      background:
+        (exactCallConfirmed || hostConfirmedBackground) && pending.background,
       preserveRun:
         pending.earlyRegisteredTaskID === taskID ||
         pending.resumedTaskId === undefined,
