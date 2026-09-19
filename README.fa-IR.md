@@ -1,13 +1,13 @@
 <div align="center">
   <a href="https://github.com/alvinunreal/oh-my-opencode-slim/stargazers">
-    <img src="img/v3-beta.webp" alt="oh-my-opencode-slim V3 Beta Release" style="border-radius: 10px;">
+    <img src="img/v3-beta.webp" alt="انتشار نسخه Beta 3 از oh-my-opencode-slim" style="border-radius: 10px;">
   </a>
   <h3>✨ oh-my-opencode-slim ✨</h3>
 
-  <p><i>Seven divine beings emerged from the dawn of code, each an immortal master of their craft,<br>awaiting your command to forge order from chaos and build what was once thought impossible.</i></p>
+  <p><i>هفت موجود افسانه‌ای از دل دنیای کد ظهور کرده‌اند؛ هرکدام استادی بی‌همتا در تخصص خود،<br>آماده‌اند تا به فرمان شما آشوب را به نظم تبدیل کنند و چیزهایی بسازند که روزی ناممکن به نظر می‌رسیدند.</i></p>
 
-  <p><b>Opencode Multi Agent Suite</b> · Mix any models · Auto delegate tasks</p>
-  <p><sub>by <b>Boring Dystopia Development</b></sub></p>
+  <p><b>مجموعه Multi-Agent برای OpenCode</b> · ترکیب آزادانه مدل‌ها · واگذاری خودکار taskها</p>
+  <p><sub>ساخته‌شده توسط <b>Boring Dystopia Development</b></sub></p>
   <p>
     <a href="https://boringdystopia.ai/"><img src="https://img.shields.io/badge/boringdystopia.ai-111111?style=for-the-badge&logo=vercel&logoColor=white" alt="boringdystopia.ai"></a>&nbsp;
     <a href="https://x.com/alvinunreal"><img src="https://img.shields.io/badge/X-@alvinunreal-000000?style=for-the-badge&logo=x&logoColor=white" alt="X @alvinunreal"></a>&nbsp;
@@ -15,70 +15,75 @@
   </p>
 
   <p>
-    <b>English</b> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.ja-JP.md">日本語</a> | <a href="README.ko-KR.md">한국어</a> | <a href="README.fa-IR.md">فارسی</a>
+    <a href="README.md">English</a> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.ja-JP.md">日本語</a> | <a href="README.ko-KR.md">한국어</a> | <b>فارسی</b>
   </p>
 
   <p><sub>✦ ✦ ✦</sub></p>
 
 </div>
 
-## What's This Plugin
+## این Plugin چیست؟
 
-oh-my-opencode-slim is an agent orchestration plugin for OpenCode. It includes a built-in team of specialized agents that can scout a codebase, look up fresh documentation, review architecture, handle UI work, and execute well-scoped implementation tasks under one orchestrator.
+افزونه oh-my-opencode-slim یک Plugin برای هماهنگ‌سازی و مدیریت Agentها در OpenCode است. این افزونه یک تیم داخلی از Agentهای تخصصی دارد که می‌توانند Codebase را بررسی کنند، مستندات به‌روز را پیدا کنند، معماری را بازبینی کنند، کارهای UI را انجام دهند و taskهای پیاده‌سازی با محدوده مشخص را زیر نظر Orchestrator اجرا کنند.
 
-The main idea is simple: instead of forcing one model to do everything, the plugin routes each part of the job to the agent best suited for it, balancing **quality, speed and cost**. The Orchestrator plans the work graph, dispatches specialists as background tasks, and reconciles their results before continuing.
+ایده اصلی ساده است: به‌جای اینکه یک مدل مجبور باشد همه‌چیز را انجام دهد، Plugin هر بخش از کار را به مناسب‌ترین Agent می‌سپارد تا بین **کیفیت، سرعت و هزینه** تعادل برقرار شود. Orchestrator گراف کار را برنامه‌ریزی می‌کند، Agentهای تخصصی را به‌صورت background task اجرا می‌کند و پیش از ادامه، نتایج آن‌ها را یکپارچه می‌کند.
 
-### ✨ Highlights
+### ✨ نکات برجسته
 
-- **[Seven specialized agents](#meet-the-pantheon)** - Orchestrator, Explorer,
-  Oracle, Council, Librarian, Designer, and Fixer. Each part of the job goes to
-  the agent best suited for it - mix any models across any providers.
-- **[Background orchestration](docs/background-orchestration.md)** - the
-  Orchestrator dispatches specialists as background tasks, tracks them, and
-  reconciles results before continuing - parallel work by default.
-- **[Bundled skills](#skills)** - prompt-based workflows like `deepwork`,
-  `codemap`, `verification-planning`, and `reflect`, assigned per agent.
-- **[Council](docs/council.md)** - run multiple models in parallel on the same
-  question and synthesize a single answer with `@council`.
-- **[Companion](docs/companion.md)** - an optional floating desktop window
-  showing which agents are active, including parallel background specialists.
-- **[Multiplexer integration](docs/multiplexer-integration.md)** - watch agents
-  work live in Tmux, Zellij, Herdr, cmux, or kitty panes.
-- **[Preset switching](docs/preset-switching.md)** - swap the whole team's
-  models at runtime with `/preset`.
-- **[Code intelligence tools](docs/tools.md)** - LSP tools, AST-aware search
-  across 25 languages, and built-in MCPs for docs and GitHub code
-  search.
-- **[Fully customizable](docs/configuration.md)** - custom agents, prompt
-  overrides, per-agent skill/MCP permissions, and
-  [project-local customization](docs/project-local-customization.md).
+* **[هفت Agent تخصصی / Seven specialized agents](#meet-the-pantheon)** — شامل Orchestrator، Explorer،
+  همچنین Oracle، Council، Librarian، Designer و Fixer است. هر بخش از کار به
+  مناسب‌ترین Agent سپرده می‌شود و می‌توانید مدل‌های مختلف از Providerهای مختلف را با هم ترکیب کنید.
+* **[هماهنگ‌سازی پس‌زمینه / Background orchestration](docs/background-orchestration.md)** — در این حالت
+  عامل Orchestrator متخصص‌ها را به‌صورت background task اجرا و پیگیری می‌کند و
+  پیش از ادامه، نتایج را یکپارچه می‌کند؛ اجرای موازی نیز به‌صورت پیش‌فرض فعال است.
+* **[مهارت‌های همراه / Bundled skills](#skills)** — شامل workflowهای مبتنی بر Prompt مانند `deepwork`،
+  همچنین `codemap`، `verification-planning` و `reflect` است که برای هر Agent قابل تخصیص هستند.
+* **[شورای مدل‌ها / Council](docs/council.md)** — چند مدل را به‌صورت موازی روی یک
+  سؤال اجرا می‌کند و با `@council` از نتایج یک پاسخ واحد می‌سازد.
+* **[همراه میزکار / Companion](docs/companion.md)** — یک پنجره شناور اختیاری روی Desktop است
+  که Agentهای فعال، از جمله متخصص‌های در حال اجرای موازی در پس‌زمینه، را نمایش می‌دهد.
+* **[یکپارچه‌سازی Multiplexer / Multiplexer integration](docs/multiplexer-integration.md)** — امکان مشاهده کار Agentها را
+  به‌صورت زنده در paneهای Tmux، Zellij، Herdr، cmux یا kitty فراهم می‌کند.
+* **[تغییر Preset / Preset switching](docs/preset-switching.md)** — مدل‌های کل تیم را
+  هنگام اجرا با `/preset` تغییر می‌دهد.
+* **[ابزارهای هوشمند کد / Code intelligence tools](docs/tools.md)** — شامل ابزارهای LSP و جست‌وجوی آگاه از AST است
+  و برای ۲۵ زبان، همراه با MCPهای داخلی برای مستندات و جست‌وجوی کد GitHub،
+  امکانات لازم را در اختیار شما قرار می‌دهد.
+* **[سفارشی‌سازی کامل / Fully customizable](docs/configuration.md)** — شامل Agentهای سفارشی و Prompt
+  و همچنین override، دسترسی Skill/MCP برای هر Agent و
+  [سفارشی‌سازی در سطح پروژه / Project-local customization](docs/project-local-customization.md) است.
 
-### What Users Say
 
-> “Task management went from 5/10 to 8-9/10 easily. The Orchestrator sends
-> Fixers and Explorers, and I can still talk and plan with the Orchestrator in
-> the same session. The experience feels way smoother now.”
+### نظر کاربران
+
+> «مدیریت taskها خیلی راحت از ۵/۱۰ به ۸ یا ۹/۱۰ رسید. Orchestrator،
+> Fixerها و Explorerها را می‌فرستد و من همچنان می‌توانم در همان session با Orchestrator
+> صحبت و برنامه‌ریزی کنم. تجربه کار حالا خیلی روان‌تر شده است.»
 >
 > \- `vipor_idk`
 
-> “I ditched all my harnesses for this beta version of omo-slim and don't look
-> back or miss anything. Great work and IMHO all in the right direction.”
+> «برای این نسخه Beta از omo-slim همه harnessهای قبلی‌ام را کنار گذاشتم و
+> هیچ دلتنگشان نیستم. کار عالی است و به‌نظر من همه‌چیز در مسیر درستی پیش می‌رود.»
 >
 > \- `stephanschielke`
 
-> “I love omo-slim, and can't imagine running opencode without it. I love that I
-> can create a Frankenstein of models... Makes the setup such a beast.”
+
+> «من omo-slim را دوست دارم و دیگر نمی‌توانم اجرای OpenCode بدون آن را تصور کنم. اینکه
+می‌توانم ترکیبی Frankenstein‌وار از مدل‌ها بسازم فوق‌العاده است... این setup را واقعاً قدرتمند می‌کند.»
 >
 > \- `Capital-One3039`
 
-> “It has significantly improved my workflow... Now, it is working very
-> smoothly, and I love it.”
+
+
+> «این پلاگین workflow من را به‌شکل محسوسی بهتر کرده است... حالا خیلی
+> روان کار می‌کند و واقعاً دوستش دارم.»
 >
 > \- `xenstar1`
 
-### Quick Start
 
-Copy and paste this prompt to your LLM agent (Claude Code, AmpCode, Cursor, etc.):
+### راه‌اندازی سریع
+
+این Prompt را کپی کنید و در LLM Agent خود (Claude Code، AmpCode، Cursor و غیره) قرار دهید:
 
 
 ```
@@ -86,23 +91,22 @@ Install and configure oh-my-opencode-slim: https://raw.githubusercontent.com/alv
 ```
 
 
-### Manual Installation
+### نصب دستی
 
 ```bash
 bunx oh-my-opencode-slim@latest install
 ```
 
-The published CLI is a Node-compatible bundle, so `npx` works too if you don't
-have Bun installed:
+رابط خط فرمان منتشرشده با Node سازگار است؛ بنابراین اگر Bun را نصب ندارید، می‌توانید از `npx` هم استفاده کنید:
 
 ```bash
 npx oh-my-opencode-slim@latest install
 ```
 
-### Run from Master
+### اجرا از شاخه Master
 
-Use this if you want the latest code, easier bug fixes, or a local setup for
-development and contributions:
+اگر آخرین کد، رفع باگ آسان‌تر یا یک setup محلی برای
+توسعه و مشارکت می‌خواهید، از این روش استفاده کنید:
 
 ```bash
 git clone https://github.com/alvinunreal/oh-my-opencode-slim.git ~/repos/oh-my-opencode-slim
@@ -112,9 +116,7 @@ bun run build
 bun dist/cli/index.js install
 ```
 
-The installer adds the local repo path to the `plugin` array in
-`~/.config/opencode/opencode.json`, so OpenCode loads the plugin from that
-folder. To update later:
+نصب‌کننده مسیر repository محلی را به آرایه `plugin` در `~/.config/opencode/opencode.json` اضافه می‌کند تا OpenCode افزونه را مستقیماً از همان پوشه بارگذاری کند. برای به‌روزرسانی‌های بعدی:
 
 ```bash
 cd ~/repos/oh-my-opencode-slim
@@ -123,39 +125,39 @@ bun install
 bun run build
 ```
 
-### Getting Started
+### راه‌اندازی اولیه
 
-The installer generates both OpenAI and OpenCode Go presets, with OpenAI active by default.
+نصب‌کننده هر دو Preset مربوط به OpenAI و OpenCode Go را ایجاد می‌کند و به‌صورت پیش‌فرض OpenAI فعال است.
 
 > [!TIP]
-> Tune the models and agents for your own workflow. The defaults are only a
-> starting point; the plugin is designed for deep flexibility and customization.
+> مدل‌ها و Agentها را متناسب با workflow خود تنظیم کنید. مقادیر پیش‌فرض فقط
+> نقطه شروع هستند؛ Plugin برای انعطاف‌پذیری و سفارشی‌سازی گسترده طراحی شده است.
 
-To make OpenCode Go active during install, run `bunx oh-my-opencode-slim@latest install --preset=opencode-go` or change the default preset name in `~/.config/opencode/oh-my-opencode-slim.json` after installation.
+برای فعال‌کردن OpenCode Go هنگام نصب، `bunx oh-my-opencode-slim@latest install --preset=opencode-go` را اجرا کنید یا بعد از نصب نام Preset پیش‌فرض را در `~/.config/opencode/oh-my-opencode-slim.json` تغییر دهید.
 
-Then:
+سپس:
 
-1. **Log in to the providers you want to use if you haven't already**:
+1. **اگر هنوز وارد Providerهای موردنظر نشده‌اید، وارد شوید**:
 
    ```bash
    opencode auth login
    ```
-2. **Refresh and list the models OpenCode can see**:
+2. **فهرست مدل‌هایی را که OpenCode می‌بیند refresh و نمایش دهید**:
 
    ```bash
    opencode models --refresh
    ```
-3. **Open your plugin config** at `~/.config/opencode/oh-my-opencode-slim.json`
+3. **فایل تنظیمات Plugin را باز کنید**: `~/.config/opencode/oh-my-opencode-slim.json`
 
-4. **Update the models you want for each agent**
-
-> [!TIP]
-> It's **recommended** to understand how background orchestration works. The **[Orchestrator prompt](https://github.com/alvinunreal/oh-my-opencode-slim/blob/master/src/agents/orchestrator.ts#L28)** contains the scheduler rules, specialist routing logic, and thresholds for when work should be assigned to background agents. You can always delegate manually by calling a subagent via: `@agentName <task>`
+4. **مدل موردنظر برای هر Agent را تنظیم کنید**
 
 > [!TIP]
-> Because background agents are now the default workflow, it is **highly recommended** to enable and configure **[Multiplexer Integration](docs/multiplexer-integration.md)**. It automatically opens each agent in a dedicated Tmux, Zellij, Herdr, cmux, or kitty pane, so you can watch specialists work live while the Orchestrator continues coordinating the session.
+> توصیه می‌شود نحوه کار background orchestration را بشناسید. **[Prompt مربوط به Orchestrator](https://github.com/alvinunreal/oh-my-opencode-slim/blob/master/src/agents/orchestrator.ts#L28)** شامل قوانین scheduler، منطق routing متخصص‌ها و thresholdهای واگذاری کار به Agentهای پس‌زمینه است. همیشه می‌توانید با `@agentName <task>` یک subagent را به‌صورت دستی فراخوانی کنید.
 
-The default generated configuration includes both `openai` and `opencode-go` presets.
+> [!TIP]
+> چون Agentهای پس‌زمینه حالا workflow پیش‌فرض هستند، **به‌شدت توصیه می‌شود** **[Multiplexer Integration](docs/multiplexer-integration.md)** را فعال و تنظیم کنید. این قابلیت هر Agent را به‌صورت خودکار در یک pane اختصاصی از Tmux، Zellij، Herdr، cmux یا kitty باز می‌کند تا هم‌زمان با ادامه هماهنگی session توسط Orchestrator، کار متخصص‌ها را زنده ببینید.
+
+تنظیمات پیش‌فرض تولیدشده شامل هر دو Preset یعنی `openai` و `opencode-go` است.
 
 ```jsonc
 {
@@ -174,383 +176,395 @@ The default generated configuration includes both `openai` and `opencode-go` pre
 }
 ```
 
-### Preset Docs
+### مستندات Presetها
 
-Consider presets as guidelines as they are often outdated.
+پیشنهاد می‌شود Presetها را بیشتر به‌عنوان راهنما در نظر بگیرید، چون ممکن است همیشه کاملاً به‌روز نباشند.
 
-- **[OpenAI Preset](docs/openai-preset.md)** — the default generated preset; runs all agents on OpenAI models.
-- **[OpenCode Go Preset](docs/opencode-go-preset.md)** — runs the agents on OpenCode Go models; enables the Observer agent for visual analysis since its orchestrator model isn't multimodal.
-- **[Author's Preset](docs/authors-preset.md)** — the exact config the author runs day to day, with third-party skills.
-- **[$30 Preset](docs/thirty-dollars-preset.md)** — a mixed-provider setup built around Codex Plus and GitHub Copilot Pro for about $30/month.
-- **[OpenCode Zen Free Preset](docs/opencode-zen-free-preset.md)** — every agent runs on an opencode free model; no usage cost.
+<ul dir="rtl" align="right">
+  <li><strong><a href="docs/openai-preset.md">OpenAI Preset</a></strong> — Preset پیش‌فرضی که همه Agentها را با مدل‌های OpenAI اجرا می‌کند.</li>
+  <li><strong><a href="docs/opencode-go-preset.md">OpenCode Go Preset</a></strong> — Agentها را با مدل‌های OpenCode Go اجرا می‌کند و چون مدل Orchestrator آن multimodal نیست، Agent مربوط به Observer را برای تحلیل تصویری فعال می‌کند.</li>
+  <li><strong><a href="docs/authors-preset.md">Author's Preset</a></strong> — همان تنظیماتی است که نویسنده در استفاده روزمره به کار می‌برد و شامل Skillهای شخص ثالث نیز می‌شود.</li>
+  <li><strong><a href="docs/thirty-dollars-preset.md">$30 Preset</a></strong> — یک setup چند-Provider مبتنی بر Codex Plus و GitHub Copilot Pro با هزینه تقریبی ۳۰ دلار در ماه است.</li>
+  <li><strong><a href="docs/opencode-zen-free-preset.md">OpenCode Zen Free Preset</a></strong> — همه Agentها را با مدل‌های رایگان OpenCode اجرا می‌کند و هزینه‌ای بابت مصرف مدل ندارد.</li>
+</ul>
 
-### For Alternative Providers
+### برای Providerهای جایگزین
 
-To use custom providers or a mixed-provider setup, use **[Configuration](docs/configuration.md)** for the full reference.
+برای استفاده از Providerهای سفارشی یا ستاپ multi-Provider، مرجع کامل **[Configuration](docs/configuration.md)** را ببینید.
 
-### ✅ Verify Your Setup
+### ✅ بررسی setup
 
-After installation and authentication, verify all agents are configured and responding:
+پس از نصب و authentication، بررسی کنید همه Agentها درست تنظیم شده‌اند و پاسخ می‌دهند:
 
 ```bash
 opencode
 ```
 
-Then run:
+سپس اجرا کنید:
 
 ```
 ping all agents
 ```
 
 <div align="center">
-  <img src="img/ping.png" alt="Ping all agents" width="600">
-  <p><i>Confirmation that all configured agents are online and ready.</i></p>
+  <img src="img/ping.png" alt="بررسی پاسخ‌گویی همه Agentها" width="600">
+  <p dir="rtl" align="center"><i>تأیید اینکه همه Agentهای پیکربندی‌شده online و آماده هستند.</i></p>
 </div>
 
-If any agent fails to respond, check your provider authentication and config file.
+اگر Agentی پاسخ نمی‌دهد، authentication مربوط به Provider و فایل تنظیمات را بررسی کنید.
 
 ---
 
 <a id="meet-the-pantheon"></a>
 
-## 🏛️ Meet the Pantheon
+## 🏛️ آشنایی با Pantheon
+> مجمع خدایان
 
-### 01. Orchestrator: The Embodiment Of Order
+<h3 dir="rtl" align="right">01. Orchestrator: مظهر نظم</h3>
 
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
       <img src="img/orchestrator.jpg" width="240" style="border-radius: 10px;">
-      <br><sub><i>Forged in the void of complexity.</i></sub>
+      <br><sub><i>.در خلأ پیچیدگی ساخته شده است</i></sub>
     </td>
-    <td width="70%" valign="top">
-      The Orchestrator was born when the first codebase collapsed under its own complexity. Neither god nor mortal would claim responsibility - so The Orchestrator emerged from the void, forging order from chaos. It determines the optimal path to any goal, balancing speed, quality, and cost. It guides the team, summoning the right specialist for each task and delegating to achieve the best possible outcome.
-    </td>
-  </tr>
-  <tr>
-    <td colspan="2">
-      <b>Role:</b> <code>Master delegator and strategic coordinator</code>
+    <td width="70%" valign="top" dir="rtl" align="right">
+      عامل Orchestrator زمانی پدید آمد که نخستین Codebase زیر بار پیچیدگی خودش فرو ریخت. نه خدایان و نه انسان‌ها حاضر نبودند مسئولیت این آشوب را بپذیرند؛ پس Orchestrator از دل خلأ برخاست تا به بی‌نظمی، نظم ببخشد.
+
+برای رسیدن به هر هدف، با درنظرگرفتن سرعت، کیفیت و هزینه بهترین مسیر را انتخاب می‌کند. تیم را هدایت می‌کند، متخصص مناسب هر task را به کار می‌گیرد و وظایف را میان آن‌ها تقسیم می‌کند تا بهترین نتیجه ممکن به دست آید.
     </td>
   </tr>
   <tr>
-    <td colspan="2">
+    <td colspan="2" dir="rtl" align="right">
+      <b>نقش:</b> <code>واگذارکننده اصلی و هماهنگ‌کننده راهبردی</code>
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" dir="rtl" align="right">
       <b>Prompt:</b> <a href="src/agents/orchestrator.ts"><code>orchestrator.ts</code></a>
     </td>
   </tr>
   <tr>
-    <td colspan="2">
-      <b>Default Model:</b> <code>openai/gpt-5.6-terra (medium)</code>
+    <td colspan="2" dir="rtl" align="right">
+      <b>مدل پیش‌فرض:</b> <code>openai/gpt-5.6-terra (medium)</code>
     </td>
   </tr>
   <tr>
-    <td colspan="2">
-      <b>Recommended Models:</b> <code>claude-fable-5</code> <code>claude-opus-4-8</code> <code>glm-5.2</code> <code>gpt-5.6-terra</code> <code>mimo-v2.5</code> <code>minimax-m3</code> <code>qwen3.7-plus</code>
+    <td colspan="2" dir="rtl" align="right">
+      <b>مدل‌های پیشنهادی:</b> <code>claude-fable-5</code> <code>claude-opus-4-8</code> <code>glm-5.2</code> <code>gpt-5.6-terra</code> <code>mimo-v2.5</code> <code>minimax-m3</code> <code>qwen3.7-plus</code>
     </td>
   </tr>
   <tr>
-    <td colspan="2">
-      <b>Model Guidance:</b> Choose your strongest planning and judgment model. Orchestrator is the workflow manager: it plans, schedules background specialists, reconciles results, and verifies outcomes, so it needs reliable instruction-following and high-level technical judgment more than raw worker throughput.
+    <td colspan="2" dir="rtl" align="right">
+      <b>راهنمای انتخاب مدل:</b> برای انتخاب مدل، قوی‌ترین مدل خود در planning و تصمیم‌گیری را در نظر بگیرید. Orchestrator مدیر workflow است: برنامه‌ریزی می‌کند، متخصص‌های پس‌زمینه را زمان‌بندی می‌کند، نتایج را یکپارچه می‌کند و خروجی را بررسی می‌کند. بنابراین بیش از توان پردازشی خام، به پیروی دقیق از دستورها و قضاوت فنی سطح‌بالا نیاز دارد.
     </td>
   </tr>
 </table>
 
 ---
 
-### 02. Explorer: The Eternal Wanderer
+<h3 dir="rtl" align="right">02. Explorer: کاوشگر جاودانه</h3>
 
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
       <img src="img/explorer.jpg" width="240" style="border-radius: 10px;">
-      <br><sub><i>The wind that carries knowledge.</i></sub>
+      <br><sub><i>.بادی که دانش را با خود می‌آورد</i></sub>
     </td>
-    <td width="70%" valign="top">
-      The Explorer is an immortal wanderer who has traversed the corridors of a million codebases since the dawn of programming. Cursed with the gift of eternal curiosity, they cannot rest until every file is known, every pattern understood, every secret revealed. Legends say they once searched the entire internet in a single heartbeat. They are the wind that carries knowledge, the eyes that see all, the spirit that never sleeps.
-    </td>
-  </tr>
-  <tr>
-    <td colspan="2">
-      <b>Role:</b> <code>Codebase reconnaissance</code>
+    <td width="70%" valign="top" dir="rtl" align="right">
+      عامل Explorer کاوشگری جاودانه است که از همان روزهای نخست برنامه‌نویسی، میلیون‌ها Codebase را کاوش کرده است. کنجکاوی بی‌پایانش نمی‌گذارد تا وقتی همه فایل‌ها را پیدا نکرده، الگوها را نفهمیده و رازهای پنهان را کشف نکرده، آرام بگیرد.
+
+افسانه‌ها می‌گویند زمانی تمام اینترنت را در یک چشم‌برهم‌زدن جست‌وجو کرده است. او بادی است که دانش را با خود می‌آورد، چشمی که هیچ چیز از آن پنهان نمی‌ماند و روحی که هرگز از جست‌وجو خسته نمی‌شود.
     </td>
   </tr>
   <tr>
-    <td colspan="2">
+    <td colspan="2" dir="rtl" align="right">
+      <b>نقش:</b> <code>شناسایی و بررسی Codebase</code>
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" dir="rtl" align="right">
       <b>Prompt:</b> <a href="src/agents/explorer.ts"><code>explorer.ts</code></a>
     </td>
   </tr>
   <tr>
-    <td colspan="2">
-      <b>Default Model:</b> <code>openai/gpt-5.6-luna</code>
+    <td colspan="2" dir="rtl" align="right">
+      <b>مدل پیش‌فرض:</b> <code>openai/gpt-5.6-luna</code>
     </td>
   </tr>
   <tr>
-    <td colspan="2">
-      <b>Recommended Models:</b> <code>deepseek-v4-flash</code> <code>gpt-5.3-codex</code>
+    <td colspan="2" dir="rtl" align="right">
+      <b>مدل‌های پیشنهادی:</b> <code>deepseek-v4-flash</code> <code>gpt-5.3-codex</code>
     </td>
   </tr>
   <tr>
-    <td colspan="2">
-      <b>Model Guidance:</b> Choose a fast, low-cost model. Explorer handles broad scouting work, so speed and efficiency usually matter more than using your strongest reasoning model.
+    <td colspan="2" dir="rtl" align="right">
+      <b>راهنمای انتخاب مدل:</b> برای انتخاب مدل، یک مدل سریع و کم‌هزینه مناسب‌تر است. Explorer وظیفه بررسی و جست‌وجوی گسترده را بر عهده دارد، بنابراین معمولاً سرعت و بهره‌وری از استفاده از قوی‌ترین مدل reasoning اهمیت بیشتری دارد.
     </td>
   </tr>
 </table>
 
 ---
 
-### 03. Oracle: The Guardian of Paths
+<h3 dir="rtl" align="right">03. Oracle: نگهبان مسیرها</h3>
 
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
       <img src="img/oracle.jpg" width="240" style="border-radius: 10px;">
-      <br><sub><i>The voice at the crossroads.</i></sub>
+      <br><sub><i>.صدایی در دوراهی‌ها</i></sub>
     </td>
-    <td width="70%" valign="top">
-      The Oracle stands at the crossroads of every architectural decision. They have walked every road, seen every destination, know every trap that lies ahead. When you stand at the precipice of a major refactor, they are the voice that whispers which way leads to ruin and which way leads to glory. They don't choose for you - they illuminate the path so you can choose wisely.
-    </td>
-  </tr>
-  <tr>
-    <td colspan="2">
-      <b>Role:</b> <code>Strategic advisor and debugger of last resort</code>
+    <td width="70%" valign="top" dir="rtl" align="right">
+      عامل Oracle بر سر دوراهی هر تصمیم معماری ایستاده است. همه راه‌ها را پیموده، همه مقصدها را دیده و همه تله‌های پیش رو را می‌شناسد. وقتی در آستانه یک refactor بزرگ قرار دارید، همان صدایی است که نشان می‌دهد کدام مسیر به شکست و کدام به موفقیت می‌رسد. به‌جای شما تصمیم نمی‌گیرد؛ مسیرها را روشن می‌کند تا بتوانید آگاهانه انتخاب کنید.
     </td>
   </tr>
   <tr>
-    <td colspan="2">
+    <td colspan="2" dir="rtl" align="right">
+      <b>نقش:</b> <code>مشاور راهبردی و آخرین گزینه برای debugging</code>
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" dir="rtl" align="right">
       <b>Prompt:</b> <a href="src/agents/oracle.ts"><code>oracle.ts</code></a>
     </td>
   </tr>
   <tr>
-    <td colspan="2">
-      <b>Default Model:</b> <code>openai/gpt-5.6-sol (high)</code>
+    <td colspan="2" dir="rtl" align="right">
+      <b>مدل پیش‌فرض:</b> <code>openai/gpt-5.6-sol (high)</code>
     </td>
   </tr>
   <tr>
-    <td colspan="2">
-      <b>Recommended Models:</b> <code>claude-fable-5</code> <code>claude-opus-4-8</code> <code>deepseek-v4-pro</code> <code>glm-5.2</code> <code>gpt-5.6-sol</code> <code>qwen3.7-max</code>
+    <td colspan="2" dir="rtl" align="right">
+      <b>مدل‌های پیشنهادی:</b> <code>claude-fable-5</code> <code>claude-opus-4-8</code> <code>deepseek-v4-pro</code> <code>glm-5.2</code> <code>gpt-5.6-sol</code> <code>qwen3.7-max</code>
     </td>
   </tr>
   <tr>
-    <td colspan="2">
-      <b>Model Guidance:</b> Choose your strongest high-reasoning model for architecture, hard debugging, trade-offs, and code review.
+    <td colspan="2" dir="rtl" align="right">
+      <b>راهنمای انتخاب مدل:</b> برای معماری، debugging دشوار، trade-offها و code review، قوی‌ترین مدل high-reasoning خود را انتخاب کنید.
     </td>
   </tr>
 </table>
 
 ---
 
-### 04. Council: The Chorus of Minds
+<h3 dir="rtl" align="right">04. Council: هم‌اندیشی ذهن‌ها</h3>
 
 > [!NOTE]
-> **Why doesn't Orchestrator auto-call Council more often?** This is intentional. Council runs multiple models at once, so automatic delegation is kept strict because it is usually the highest-cost path in the system. In practice, Council is meant to be used manually when you want it, for example: <code>@council compare these two architectures</code>.
+> **چرا Orchestrator بیشتر به‌صورت خودکار Council را فراخوانی نمی‌کند؟** این رفتار عمدی است. Council چند مدل را هم‌زمان اجرا می‌کند، بنابراین delegation خودکار آن سخت‌گیرانه نگه داشته شده چون معمولاً پرهزینه‌ترین مسیر در سیستم است. در عمل Council برای استفاده دستی طراحی شده است؛ برای مثال: <code>@council compare these two architectures</code>.
 
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
       <img src="img/council.jpg" width="240" style="border-radius: 10px;">
-      <br><sub><i>Many minds, one verdict.</i></sub>
+      <br><sub><i>.ذهن‌های بسیار، یک نتیجه</i></sub>
     </td>
-    <td width="70%" valign="top">
-      The Council is not a lone being but a chamber of minds summoned when one answer is not enough. It sends your question to multiple models in parallel, gathers their competing judgments, and then the Council agent itself distills the strongest ideas into a single verdict. Where a solitary agent may miss a path, the Council cross-examines possibility itself.
-    </td>
-  </tr>
-  <tr>
-    <td colspan="2">
-      <b>Role:</b> <code>Multi-LLM consensus and synthesis</code>
+    <td width="70%" valign="top" dir="rtl" align="right">
+      عامل Council یک ذهن واحد نیست؛ مجمعی از چند ذهن است که وقتی یک پاسخ به‌تنهایی کافی نباشد، وارد عمل می‌شود. سؤال را هم‌زمان در اختیار چند مدل قرار می‌دهد، دیدگاه‌های مختلف آن‌ها را جمع می‌کند و در نهایت بهترین ایده‌ها را در یک پاسخ واحد کنار هم می‌گذارد.
+
+جایی که یک Agent ممکن است بخشی از مسئله را نبیند، Council آن را از چند زاویه بررسی می‌کند تا تصویر کامل‌تری به دست آید.
     </td>
   </tr>
   <tr>
-    <td colspan="2">
+    <td colspan="2" dir="rtl" align="right">
+      <b>نقش:</b> <code>اجماع و ترکیب نتایج چند LLM</code>
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" dir="rtl" align="right">
       <b>Prompt:</b> <a href="src/agents/council.ts"><code>council.ts</code></a>
     </td>
   </tr>
   <tr>
-    <td colspan="2">
-      <b>Guide:</b> <a href="docs/council.md"><code>docs/council.md</code></a>
+    <td colspan="2" dir="rtl" align="right">
+      <b>راهنما:</b> <a href="docs/council.md"><code>docs/council.md</code></a>
     </td>
   </tr>
   <tr>
-    <td colspan="2">
-      <b>Default Setup:</b> <code>Config-driven</code> - councillors come from <code>council.presets</code> and the Council agent model comes from your normal <code>council</code> agent config
+    <td colspan="2" dir="rtl" align="right">
+      <b>Setup پیش‌فرض:</b> <code>مبتنی بر تنظیمات</code> - councillorها از <code>council.presets</code> می‌آیند و مدل Agent مربوط به Council از تنظیمات معمول Agent <code>council</code> گرفته می‌شود
     </td>
   </tr>
   <tr>
-    <td colspan="2">
-      <b>Recommended Setup:</b> <code>Strong Council model</code> + <code>diverse councillors</code> across providers
+    <td colspan="2" dir="rtl" align="right">
+      <b>Setup پیشنهادی:</b> <code>مدل قوی برای Council</code> + <code>councillorهای متنوع</code> از Providerهای مختلف
     </td>
   </tr>
   <tr>
-    <td colspan="2">
-      <b>Model Guidance:</b> Use a strong synthesis model for the Council agent and diverse models as councillors. The value of Council comes from comparing different model perspectives, not just picking the single strongest model everywhere.
+    <td colspan="2" dir="rtl" align="right">
+      <b>راهنمای انتخاب مدل:</b> برای انتخاب مدل، بهتر است برای Agent مربوط به Council از یک مدل قدرتمند در synthesis و برای councillorها از مدل‌های متنوع استفاده کنید. ارزش Council در مقایسه دیدگاه مدل‌های مختلف است، نه صرفاً استفاده از یک مدل بسیار قدرتمند برای همه‌چیز.
     </td>
   </tr>
 </table>
 
 ---
 
-### 05. Librarian: The Weaver of Knowledge
+<h3 dir="rtl" align="right">05. Librarian: پیونددهنده دانش</h3>
 
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
       <img src="img/librarian.jpg" width="240" style="border-radius: 10px;">
-      <br><sub><i>The weaver of understanding.</i></sub>
+      <br><sub><i>.جوینده‌ی فهم</i></sub>
     </td>
-    <td width="70%" valign="top">
-      The Librarian was forged when humanity realized that no single mind could hold all knowledge. They are the weaver who connects disparate threads of information into a tapestry of understanding. They traverse the infinite library of human knowledge, gathering insights from every corner and binding them into answers that transcend mere facts. What they return is not information - it's understanding.
-    </td>
-  </tr>
-  <tr>
-    <td colspan="2">
-      <b>Role:</b> <code>External knowledge retrieval</code>
+    <td width="70%" valign="top" dir="rtl" align="right">
+      Librarian زمانی شکل گرفت که انسان فهمید هیچ ذهنی به‌تنهایی نمی‌تواند همه دانش را در خود نگه دارد. او رشته‌های پراکنده اطلاعات را به تصویری یکپارچه از فهم پیوند می‌دهد. در کتابخانه بی‌پایان دانش بشر می‌گردد، از هر گوشه insight جمع می‌کند و آن‌ها را به پاسخ‌هایی فراتر از مجموعه‌ای از factها تبدیل می‌کند. چیزی که بازمی‌گرداند صرفاً اطلاعات نیست؛ فهم است.
     </td>
   </tr>
   <tr>
-    <td colspan="2">
+    <td colspan="2" dir="rtl" align="right">
+      <b>نقش:</b> <code>بازیابی دانش خارجی</code>
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" dir="rtl" align="right">
       <b>Prompt:</b> <a href="src/agents/librarian.ts"><code>librarian.ts</code></a>
     </td>
   </tr>
   <tr>
-    <td colspan="2">
-      <b>Default Model:</b> <code>openai/gpt-5.6-luna</code>
+    <td colspan="2" dir="rtl" align="right">
+      <b>مدل پیش‌فرض:</b> <code>openai/gpt-5.6-luna</code>
     </td>
   </tr>
   <tr>
-    <td colspan="2">
-      <b>Recommended Models:</b> <code>deepseek-v4-flash</code> <code>gpt-5.3-codex</code> <code>mimo-v2.5</code> <code>minimax-m2.7</code>
+    <td colspan="2" dir="rtl" align="right">
+      <b>مدل‌های پیشنهادی:</b> <code>deepseek-v4-flash</code> <code>gpt-5.3-codex</code> <code>mimo-v2.5</code> <code>minimax-m2.7</code>
     </td>
   </tr>
   <tr>
-    <td colspan="2">
-      <b>Model Guidance:</b> Choose a fast, low-cost model. Librarian handles research and documentation lookups, so speed and efficiency usually matter more than using your strongest reasoning model.
+    <td colspan="2" dir="rtl" align="right">
+      <b>راهنمای انتخاب مدل:</b> یک مدل سریع و کم‌هزینه انتخاب کنید. Librarian مسئول research و جست‌وجوی مستندات است، بنابراین معمولاً سرعت و بهره‌وری مهم‌تر از استفاده از قوی‌ترین مدل reasoning شماست.
     </td>
   </tr>
 </table>
 
 ---
 
-### 06. Designer: The Guardian of Aesthetics
+<h3 dir="rtl" align="right">06. Designer: معمار زیبایی</h3>
 
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
       <img src="img/designer.jpg" width="240" style="border-radius: 10px;">
-      <br><sub><i>Beauty is essential.</i></sub>
+      <br><sub><i>.زیبایی ضروری است</i></sub>
     </td>
-    <td width="70%" valign="top">
-      The Designer is an immortal guardian of beauty in a world that often forgets it matters. They have seen a million interfaces rise and fall, and they remember which ones were remembered and which were forgotten. They carry the sacred duty to ensure that every pixel serves a purpose, every animation tells a story, every interaction delights. Beauty is not optional - it's essential.
-    </td>
-  </tr>
-  <tr>
-    <td colspan="2">
-      <b>Role:</b> <code>UI/UX implementation and visual excellence</code>
+    <td width="70%" valign="top" dir="rtl" align="right">
+      Designer نگهبانی جاودانه برای زیبایی در جهانی است که اغلب فراموش می‌کند زیبایی اهمیت دارد. ظهور و سقوط میلیون‌ها interface را دیده و به یاد دارد کدام‌ها ماندگار شدند و کدام‌ها فراموش. وظیفه‌اش این است که هر pixel هدفی داشته باشد، هر animation داستانی بگوید و هر interaction دلپذیر باشد. زیبایی اختیاری نیست؛ ضروری است.
     </td>
   </tr>
   <tr>
-    <td colspan="2">
+    <td colspan="2" dir="rtl" align="right">
+      <b>نقش:</b> <code>پیاده‌سازی UI/UX و کیفیت بصری</code>
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" dir="rtl" align="right">
       <b>Prompt:</b> <a href="src/agents/designer.ts"><code>designer.ts</code></a>
     </td>
   </tr>
   <tr>
-    <td colspan="2">
-      <b>Default Model:</b> <code>openai/gpt-5.6-luna</code>
+    <td colspan="2" dir="rtl" align="right">
+      <b>مدل پیش‌فرض:</b> <code>openai/gpt-5.6-luna</code>
     </td>
   </tr>
   <tr>
-    <td colspan="2">
-      <b>Recommended Models:</b> <code>gemini-3.5-flash</code> <code>kimi-k2.7-code</code> <code>minimax-m3</code>
+    <td colspan="2" dir="rtl" align="right">
+      <b>مدل‌های پیشنهادی:</b> <code>gemini-3.5-flash</code> <code>kimi-k2.7-code</code> <code>minimax-m3</code>
     </td>
   </tr>
   <tr>
-    <td colspan="2">
-      <b>Model Guidance:</b> Choose a model that is strong at UI/UX judgment, frontend implementation, and visual polish.
+    <td colspan="2" dir="rtl" align="right">
+      <b>راهنمای انتخاب مدل:</b> مدلی انتخاب کنید که در قضاوت UI/UX، پیاده‌سازی frontend و پرداخت بصری قوی باشد.
     </td>
   </tr>
 </table>
 
 ---
 
-### 07. Fixer: The Last Builder
+<h3 dir="rtl" align="right">07. Fixer: آخرین سازنده</h3>
 
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
       <img src="img/fixer.jpg" width="240" style="border-radius: 10px;">
-      <br><sub><i>The final step between vision and reality.</i></sub>
+      <br><sub><i>.آخرین گام میان تصور و واقعیت</i></sub>
     </td>
-    <td width="70%" valign="top">
-      The Fixer is the last of a lineage of builders who once constructed the foundations of the digital world. When the age of planning and debating began, they remained - the ones who actually build. They carry the ancient knowledge of how to turn thought into thing, how to transform specification into implementation. They are the final step between vision and reality.
-    </td>
-  </tr>
-  <tr>
-    <td colspan="2">
-      <b>Role:</b> <code>Fast implementation specialist</code>
+    <td width="70%" valign="top" dir="rtl" align="right">
+      Fixer آخرین بازمانده از تبار سازندگانی است که زمانی پایه‌های دنیای دیجیتال را بنا کردند. وقتی عصر planning و بحث آغاز شد، آن‌ها ماندند؛ کسانی که واقعاً می‌سازند. دانشی کهن برای تبدیل فکر به محصول و specification به implementation با خود دارند. آن‌ها آخرین گام میان تصور و واقعیت‌اند.
     </td>
   </tr>
   <tr>
-    <td colspan="2">
+    <td colspan="2" dir="rtl" align="right">
+      <b>نقش:</b> <code>متخصص پیاده‌سازی سریع</code>
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" dir="rtl" align="right">
       <b>Prompt:</b> <a href="src/agents/fixer.ts"><code>fixer.ts</code></a>
     </td>
   </tr>
   <tr>
-    <td colspan="2">
-      <b>Default Model:</b> <code>openai/gpt-5.6-luna</code>
+    <td colspan="2" dir="rtl" align="right">
+      <b>مدل پیش‌فرض:</b> <code>openai/gpt-5.6-luna</code>
     </td>
   </tr>
   <tr>
-    <td colspan="2">
-      <b>Recommended Models:</b> <code>claude-sonnet-4-6</code> <code>deepseek-v4-flash</code> <code>gpt-5.6-luna</code> <code>kimi-k2.7-code</code>
+    <td colspan="2" dir="rtl" align="right">
+      <b>مدل‌های پیشنهادی:</b> <code>claude-sonnet-4-6</code> <code>deepseek-v4-flash</code> <code>gpt-5.6-luna</code> <code>kimi-k2.7-code</code>
     </td>
   </tr>
   <tr>
-    <td colspan="2">
-      <b>Model Guidance:</b> Choose a reliable coding model for scoped implementation work. Fixer receives a concrete plan or bounded instructions from Orchestrator, making it a good place for efficient execution tasks and straightforward code changes.
+    <td colspan="2" dir="rtl" align="right">
+      <b>راهنمای انتخاب مدل:</b> برای کارهای پیاده‌سازی با محدوده مشخص، یک مدل coding قابل‌اعتماد انتخاب کنید. Fixer یک plan مشخص یا دستورهای محدود و روشن از Orchestrator می‌گیرد، بنابراین جای مناسبی برای taskهای اجرایی کارآمد و تغییرات مستقیم کد است.
     </td>
   </tr>
 </table>
 
 ---
 
-## Optional Agents
+<h2 dir="rtl" align="right">Agentهای اختیاری</h2>
 
-### Observer: The Silent Witness
+<h3 dir="rtl" align="right">Observer: شاهد خاموش</h3>
 
 > [!NOTE]
-> **Why a separate agent?** If your Orchestrator model is not multimodal, enable Observer to handle images, screenshots, and other visual files. Observer is disabled by default and gives the Orchestrator a dedicated multimodal reader without forcing you to change your main reasoning model. Set `disabled_agents: []` and an `observer` model in your configuration. The bundled `opencode-go` install preset does this automatically because its GLM Orchestrator is not multimodal. Omitting `image_routing` preserves existing conditional Observer behavior. Set `image_routing: "auto"` only when Observer is enabled, or `"direct"` to always pass image attachments to the Orchestrator.
+> **چرا یک Agent جداگانه؟** اگر مدل Orchestrator شما قابلیت multimodal ندارد، می‌توانید Observer را برای پردازش تصویرها، اسکرین‌شات‌ها و فایل‌های تصویری فعال کنید. Observer به‌صورت پیش‌فرض غیرفعال است و بدون اینکه لازم باشد مدل اصلی Orchestrator را تغییر دهید، یک Agent جداگانه برای تحلیل محتوای تصویری در اختیار آن قرار می‌دهد. برای فعال‌کردنش، `observer` را به یک مدل مناسب متصل کنید و `disabled_agents` را طوری تنظیم کنید که Observer غیرفعال نباشد. در Preset مربوط به `opencode-go` این تنظیم به‌صورت خودکار انجام می‌شود، چون مدل GLM مورد استفاده برای Orchestrator قابلیت multimodal ندارد. اگر `image_routing` را مشخص نکنید، رفتار پیش‌فرض حفظ می‌شود. با `image_routing: "auto"` فایل‌های تصویری در صورت فعال بودن Observer به آن ارسال می‌شوند؛ اگر می‌خواهید همیشه مستقیماً به Orchestrator بروند، مقدار آن را روی `"direct"` قرار دهید.
+
 
 <table>
   <tr>
     <td width="30%" align="center" valign="top">
       <img src="img/observer.jpg" width="240" style="border-radius: 10px;">
-      <br><sub><i>The eye that reads what others cannot.</i></sub>
+      <br><sub><i>.چشمی که آنچه دیگران نمی‌توانند بخوانند، می‌خواند</i></sub>
     </td>
-    <td width="70%" valign="top">
+    <td width="70%" valign="top" dir="rtl" align="right">
 
-**Read-only visual analysis** - interprets images, screenshots, PDFs, and diagrams. Returns structured observations to the orchestrator without loading raw file bytes into the main context window.
+**تحلیل محتوای تصویری** — تصویرها، اسکرین‌شات‌ها، PDFها و نمودارها را بررسی می‌کند و بدون وارد کردن داده خام فایل‌ها به context اصلی، نتایج ساختاریافته را به Orchestrator برمی‌گرداند.
 
-- Images, screenshots, diagrams → `read` tool (native image support)
-- PDFs and binary documents → `read` tool (text + structure extraction)
-- **Disabled by default** - enable with `"disabled_agents": []` and configure a vision-capable model; installing with `--preset=opencode-go` enables it with `opencode-go/mimo-v2.5`. Image attachments route to Observer by default when it is enabled; set `"image_routing": "direct"` to keep them on the Orchestrator.
+- تصویرها، اسکرین‌شات‌ها و نمودارها → ابزار `read` با پشتیبانی مستقیم از تصویر
+- PDFها و فایل‌های باینری → ابزار `read` برای استخراج متن و ساختار
+- **به‌صورت پیش‌فرض غیرفعال است.** برای فعال‌کردن Observer، مقدار `disabled_agents` را روی `[]` قرار دهید و یک مدل دارای قابلیت پردازش تصویر برای آن تنظیم کنید. نصب با `--preset=opencode-go` این کار را به‌صورت خودکار با مدل `opencode-go/mimo-v2.5` انجام می‌دهد.
+
+وقتی Observer فعال باشد، فایل‌های تصویری پیوست‌شده به‌صورت پیش‌فرض به آن هدایت می‌شوند. اگر می‌خواهید این فایل‌ها مستقیماً به Orchestrator ارسال شوند، مقدار `image_routing` را روی `"direct"` قرار دهید.
 
     </td>
   </tr>
   <tr>
-    <td colspan="2">
+    <td colspan="2" dir="rtl" align="right">
       <b>Prompt:</b> <a href="src/agents/observer.ts"><code>observer.ts</code></a>
     </td>
   </tr>
   <tr>
-    <td colspan="2">
-      <b>Default Model:</b> <code>openai/gpt-5.6-luna</code> - <i>configure a vision-capable model to enable</i>
+    <td colspan="2" dir="rtl" align="right">
+      <b>مدل پیش‌فرض:</b> <code>openai/gpt-5.6-luna</code> - <i>برای فعال‌کردن، یک مدل vision-capable تنظیم کنید</i>
     </td>
   </tr>
   <tr>
-    <td colspan="2">
-      <b>Recommended Models:</b> <code>mimo-v2.5</code> <code>qwen3.5-plus</code>
+    <td colspan="2" dir="rtl" align="right">
+      <b>مدل‌های پیشنهادی:</b> <code>mimo-v2.5</code> <code>qwen3.5-plus</code>
     </td>
   </tr>
   <tr>
-    <td colspan="2">
-      <b>Model Guidance:</b> Choose a vision-capable model if you want the agent to read screenshots, images, PDFs, and other visual files.
+    <td colspan="2" dir="rtl" align="right">
+      <b>راهنمای انتخاب مدل:</b> اگر می‌خواهید Agent بتواند screenshot، تصویر، PDF و فایل‌های تصویری دیگر را بخواند، یک مدل vision-capable انتخاب کنید.
     </td>
   </tr>
 </table>
@@ -559,111 +573,226 @@ If any agent fails to respond, check your provider authentication and config fil
 
 <a id="skills"></a>
 
-## 🧩 Skills
+<h2 dir="rtl" align="right">🧩 Skillها</h2>
 
-Skills are prompt-based instructions injected into an agent's system prompt to
-guide decisions, workflows, and tool use. Unlike MCPs (which are running
-servers), a skill runs no process — it is a focused playbook an agent activates
-when the task calls for it. The installer bundles eight skills and keeps them
-updated on plugin auto-update; local customizations are preserved.
+<p dir="rtl" align="right">
+Skillها مجموعه‌ای از دستورهای مبتنی بر Prompt هستند که به system prompt یک Agent تزریق می‌شوند تا
+تصمیم‌گیری، workflow و استفاده از ابزارها را هدایت کنند. برخلاف MCPها که سرورهای در حال اجرا هستند،
+یک Skill هیچ process جداگانه‌ای اجرا نمی‌کند؛ بلکه playbook متمرکزی است که Agent
+هر زمان task مناسب باشد آن را فعال می‌کند. Installer هشت Skill را همراه Plugin نصب می‌کند و در
+auto-updateهای Plugin آن‌ها را به‌روز نگه می‌دارد؛ customizationهای محلی حفظ می‌شوند.
+</p>
 
 > [!TIP]
-> To discard local bundled-skill customizations and receive package updates, run
-> `bunx oh-my-opencode-slim install --skills=force`. This deliberately replaces
-> installed bundled skills with the package versions.
+> برای کنارگذاشتن customizationهای محلی Skillهای همراه و دریافت updateهای package، اجرا کنید:
+> `bunx oh-my-opencode-slim install --skills=force`. این دستور عمداً Skillهای همراه نصب‌شده را
+> با نسخه‌های موجود در package جایگزین می‌کند.
 
-| Skill | Purpose | Default agent | How to invoke |
-|:-----:|---------|---------------|---------------|
-| <img src="img/skills/codemap.webp" width="120" alt="Codemap artifact"><br>[`codemap`](src/skills/codemap/SKILL.md) | Hierarchical repository maps so agents understand codebases without re-reading everything | `orchestrator` | `run codemap` |
-| <img src="img/skills/deepwork.webp" width="120" alt="Deepwork artifact"><br>[`deepwork`](src/skills/deepwork/SKILL.md) | Structured workflow for large, risky, multi-phase coding sessions with review gates | `orchestrator` | `/deepwork <task>` |
-| <img src="img/skills/verification-planning.webp" width="120" alt="Verification Planning artifact"><br>[`verification-planning`](src/skills/verification-planning/SKILL.md) | Plans a project-specific evidence path before non-trivial changes | `orchestrator` | automatic before non-trivial work |
-| <img src="img/skills/simplify.webp" width="120" alt="Simplify artifact"><br>[`simplify`](src/skills/simplify/SKILL.md) | Behavior-preserving simplification for readability and maintainability | `oracle` | ask for simplification or during review |
-| <img src="img/skills/worktrees.webp" width="120" alt="Worktrees artifact"><br>[`worktrees`](src/skills/worktrees/SKILL.md) | Git worktrees as safe, isolated coding lanes for risky or parallel work | `orchestrator` | `work in a worktree` |
-| <img src="img/skills/clonedeps.webp" width="120" alt="Clonedeps artifact"><br>[`clonedeps`](src/skills/clonedeps/SKILL.md) | Clones dependency source locally so agents can inspect library internals | `orchestrator` | `clone dependencies` |
-| <img src="img/skills/reflect.webp" width="120" alt="Reflect artifact"><br>[`reflect`](src/skills/reflect/SKILL.md) | Turns repeated workflow friction into reusable skills, agents, or config | `orchestrator` | `/reflect` |
-| <img src="img/skills/oh-my-opencode-slim.webp" width="120" alt="oh-my-opencode-slim artifact"><br>[`oh-my-opencode-slim`](src/skills/oh-my-opencode-slim/SKILL.md) | Configures and safely improves the plugin setup itself | `orchestrator` | ask to tune your setup |
+<table>
+  <tr>
+    <th>Skill</th>
+    <th dir="rtl" align="right">کاربرد</th>
+    <th>Agent پیش‌فرض</th>
+    <th>نحوه فراخوانی</th>
+  </tr>
+  <tr>
+    <td align="center"><img src="img/skills/codemap.webp" width="120" alt="خروجی Codemap"><br><a href="src/skills/codemap/SKILL.md"><code>codemap</code></a></td>
+    <td dir="rtl" align="right">نقشه سلسله‌مراتبی repository تا Agentها بدون خواندن دوباره همه‌چیز Codebase را درک کنند</td>
+    <td><code>orchestrator</code></td>
+    <td><code>run codemap</code></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="img/skills/deepwork.webp" width="120" alt="خروجی Deepwork"><br><a href="src/skills/deepwork/SKILL.md"><code>deepwork</code></a></td>
+    <td dir="rtl" align="right">یک workflow ساخت‌یافته برای sessionهای coding بزرگ، پرریسک و چندمرحله‌ای همراه با gateهای review</td>
+    <td><code>orchestrator</code></td>
+    <td><code>/deepwork &lt;task&gt;</code></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="img/skills/verification-planning.webp" width="120" alt="خروجی Verification Planning"><br><a href="src/skills/verification-planning/SKILL.md"><code>verification-planning</code></a></td>
+    <td dir="rtl" align="right">پیش از تغییرات غیرساده، یک مسیر evidence متناسب با پروژه برنامه‌ریزی می‌کند</td>
+    <td><code>orchestrator</code></td>
+    <td>خودکار، پیش از کارهای غیرساده</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="img/skills/simplify.webp" width="120" alt="خروجی Simplify"><br><a href="src/skills/simplify/SKILL.md"><code>simplify</code></a></td>
+    <td dir="rtl" align="right">ساده‌سازی با حفظ رفتار برای خوانایی و maintainability بهتر</td>
+    <td><code>oracle</code></td>
+    <td>درخواست ساده‌سازی یا هنگام review</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="img/skills/worktrees.webp" width="120" alt="خروجی Worktrees"><br><a href="src/skills/worktrees/SKILL.md"><code>worktrees</code></a></td>
+    <td dir="rtl" align="right">برای کارهای پرریسک یا موازی، Git worktree محیطی امن و ایزوله برای coding فراهم می‌کند</td>
+    <td><code>orchestrator</code></td>
+    <td><code>work in a worktree</code></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="img/skills/clonedeps.webp" width="120" alt="خروجی Clonedeps"><br><a href="src/skills/clonedeps/SKILL.md"><code>clonedeps</code></a></td>
+    <td dir="rtl" align="right">وابستگی‌های source را به‌صورت local clone می‌کند تا Agentها بتوانند internals کتابخانه را بررسی کنند</td>
+    <td><code>orchestrator</code></td>
+    <td><code>clone dependencies</code></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="img/skills/reflect.webp" width="120" alt="خروجی Reflect"><br><a href="src/skills/reflect/SKILL.md"><code>reflect</code></a></td>
+    <td dir="rtl" align="right">اصطکاک‌های تکراری workflow را به Skill، Agent یا config قابل استفاده مجدد تبدیل می‌کند</td>
+    <td><code>orchestrator</code></td>
+    <td><code>/reflect</code></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="img/skills/oh-my-opencode-slim.webp" width="120" alt="خروجی oh-my-opencode-slim"><br><a href="src/skills/oh-my-opencode-slim/SKILL.md"><code>oh-my-opencode-slim</code></a></td>
+    <td dir="rtl" align="right">خود Plugin را تنظیم و با ایمنی بهبود می‌دهد</td>
+    <td><code>orchestrator</code></td>
+    <td>درخواست برای بهینه‌سازی setup</td>
+  </tr>
+</table>
 
-Skill assignments are permission grants — an agent can only activate skills it
-has been given. Configure them per agent with the `skills` array in
-`~/.config/opencode/oh-my-opencode-slim.json`: an explicit list, `"*"` for
-everything, or `"!skill-name"` to deny one.
+تخصیص Skill در واقع اعطای permission است؛ یک Agent فقط Skillهایی را می‌تواند فعال کند که
+به آن داده شده‌اند. آن‌ها را برای هر Agent با آرایه `skills` در
+`~/.config/opencode/oh-my-opencode-slim.json` تنظیم کنید: یک فهرست صریح، `"*"` برای
+همه Skillها یا `"!skill-name"` برای منع یک Skill.
 
-See **[Skills](docs/skills.md)** for full documentation, or browse the
-illustrated overview at
-**[ohmyopencodeslim.com/skills](https://ohmyopencodeslim.com/skills)**.
+مستندات کامل را در **[Skills](docs/skills.md)** ببینید، یا نمای تصویری
+آن را در
+**[ohmyopencodeslim.com/skills](https://ohmyopencodeslim.com/skills)** مشاهده کنید.
 
 ---
 
 <a id="companion"></a>
 
-## 🖥️ Companion
+<h2 dir="rtl" align="right">🖥️ Companion (همراهِ میزکار)</h2>
 
-The optional Companion is a floating desktop status window for live agent
-activity. It shows the current session state and which agents are active, so
-background work is easier to follow at a glance.
+این پنجره شناور (Companion) اختیاری است، status زنده فعالیت Agentها را روی Desktop
+نمایش می‌دهد. state فعلی session و Agentهای فعال را نشان می‌دهد تا
+پیگیری کارهای پس‌زمینه در یک نگاه ساده‌تر باشد.
 
 <div align="center">
-  <img src="img/companion.gif" alt="Companion showing active agents" width="600">
-  <p><i>Left bottom visual companion.</i></p>
+  <img src="img/companion.gif" alt="Companion در حال نمایش Agentهای فعال" width="600">
+  <p dir="rtl"><i>Companion بصری در پایین سمت چپ.</i></p>
 </div>
 
-During interactive install, the installer asks whether to enable Companion and
-defaults to `no`. For automation, enable it explicitly with:
+در نصب interactive، Installer می‌پرسد آیا Companion فعال شود یا نه و
+مقدار پیش‌فرض `no` است. برای automation، آن را صریحاً با این دستور فعال کنید:
 
 ```bash
 bunx oh-my-opencode-slim@latest install --companion=yes
 ```
 
-See **[Companion](docs/companion.md)** for configuration, positions, sizes, and
-install details.
+برای تنظیمات، موقعیت‌ها، اندازه‌ها و جزئیات نصب، **[Companion](docs/companion.md)** را
+ببینید.
 
 ---
 
-## 📚 Documentation
+## 📚 مستندات
 
-Use this section as a map: start with installation, then jump to features, configuration, or example presets depending on what you need.
+از این بخش مثل یک نقشه استفاده کنید: از نصب شروع کنید و سپس بسته به نیازتان به featureها، تنظیمات یا Presetهای نمونه بروید.
 
 <a id="features-and-workflows"></a>
 
-### ✨ Features & Workflows
+<h3 dir="rtl" align="right">✨ قابلیت‌ها و Workflow</h3>
 
-| Doc | What it covers |
-|-----|----------------|
-| **[Council](docs/council.md)** | Run multiple models in parallel and synthesize a single answer with `@council` |
-| **[Custom Agents](docs/configuration.md#custom-agents)** | Define your own specialists with custom prompts, models, MCP access, and Orchestrator delegation rules |
-| **[ACP Agents](docs/acp-agents.md)** | Connect external ACP-compatible agents such as Claude Code ACP or Gemini ACP as delegatable subagents |
-| **[Multiplexer Integration](docs/multiplexer-integration.md)** | Watch agents work live in Tmux, Zellij, Herdr, cmux, or kitty panes |
-| **[Codemap](docs/codemap.md)** | Generate hierarchical codemaps to understand large codebases faster |
-| **[Clonedeps](docs/clonedeps.md)** | Clone selected dependency source into an ignored local workspace for inspection |
-| **[Worktrees](docs/worktrees.md)** | Use `.slim/worktrees/` lanes for isolated parallel or risky coding work |
-| **[Preset Switching](docs/preset-switching.md)** | Switch agent model presets at runtime with `/preset` |
-| **[Interview](docs/interview.md)** | Turn rough ideas into a structured markdown spec through a browser-based Q&A flow |
-| **[Companion](docs/companion.md)** | Floating window companion for parsing, help, and types |
+<table>
+  <tr>
+    <th>سند</th>
+    <th dir="rtl" align="right">چه چیزی را پوشش می‌دهد</th>
+  </tr>
+  <tr>
+    <td><strong><a href="docs/council.md">Council</a></strong></td>
+    <td dir="rtl" align="right">چند مدل را موازی اجرا می‌کند و با <code>@council</code> یک پاسخ واحد می‌سازد</td>
+  </tr>
+  <tr>
+    <td dir="rtl" align="right"><strong><a href="docs/configuration.md#custom-agents">Agentهای سفارشی</a></strong></td>
+    <td dir="rtl" align="right">متخصص‌های خود را با Prompt، مدل، دسترسی MCP و قوانین delegation برای Orchestrator تعریف کنید</td>
+  </tr>
+  <tr>
+    <td><strong><a href="docs/acp-agents.md">ACP Agents</a></strong></td>
+    <td dir="rtl" align="right">برای اتصال Agentهای خارجی سازگار با ACP مانند Claude Code ACP یا Gemini ACP، از آن‌ها به‌عنوان subagentهای قابل delegation استفاده کنید</td>
+  </tr>
+  <tr>
+    <td><strong><a href="docs/multiplexer-integration.md">Multiplexer Integration</a></strong></td>
+    <td dir="rtl" align="right">کار Agentها را به‌صورت زنده در paneهای Tmux، Zellij، Herdr، cmux یا kitty ببینید</td>
+  </tr>
+  <tr>
+    <td><strong><a href="docs/codemap.md">Codemap</a></strong></td>
+    <td dir="rtl" align="right">برای درک سریع‌تر Codebaseهای بزرگ، codemapهای سلسله‌مراتبی تولید کنید</td>
+  </tr>
+  <tr>
+    <td><strong><a href="docs/clonedeps.md">Clonedeps</a></strong></td>
+    <td dir="rtl" align="right">وابستگی‌های source انتخاب‌شده را برای بررسی در یک workspace محلیِ ignore‌شده clone کنید</td>
+  </tr>
+  <tr>
+    <td><strong><a href="docs/worktrees.md">Worktrees</a></strong></td>
+    <td dir="rtl" align="right">از laneهای <code>.slim/worktrees/</code> برای coding ایزوله، موازی یا پرریسک استفاده کنید</td>
+  </tr>
+  <tr>
+    <td dir="rtl" align="right"><strong><a href="docs/preset-switching.md">تغییر Preset</a></strong></td>
+    <td dir="rtl" align="right">برای تغییر Preset مدل‌های Agent هنگام اجرا، از <code>/preset</code> استفاده کنید</td>
+  </tr>
+  <tr>
+    <td><strong><a href="docs/interview.md">Interview</a></strong></td>
+    <td dir="rtl" align="right">ایده‌های اولیه را از طریق یک جریان پرسش‌وپاسخ مرورگری به specification ساخت‌یافته Markdown تبدیل کنید</td>
+  </tr>
+  <tr>
+    <td><strong><a href="docs/companion.md">Companion</a></strong></td>
+    <td dir="rtl" align="right">همراه شناور Companion برای parsing، help و typeها</td>
+  </tr>
+</table>
 
-### ⚙️ Config & Reference
+<h3 dir="rtl" align="right">⚙️ تنظیمات و ارجاعات</h3>
 
-| Doc | What it covers |
-|-----|----------------|
-| **[Installation Guide](docs/installation.md)** | Install the plugin, use CLI flags, reset config, and troubleshoot setup |
-| **[OpenCode v2 Compatibility](docs/opencode-v2-compatibility.md)** | Run the same plugin on `opencode2`: feature matrix, v2.0.x compatibility baseline, version pinning |
-| **[Configuration](docs/configuration.md)** | Config file locations, JSONC support, prompt overrides, and full option reference |
-| **[Project Customization](docs/project-local-customization.md)** | Repository-specific custom agents, prompt overrides, per-agent skills, and precedence |
-| **[Background Orchestration](docs/background-orchestration.md)** | Scheduler-first orchestrator model built around native background subagents |
-| **[Maintainer Guide](docs/maintainers.md)** | Issue triage rules, label meanings, support routing, and repo maintenance workflow |
-| **[Skills](docs/skills.md)** | Bundled skills such as `simplify`, `codemap`, `clonedeps`, `deepwork`, `verification-planning`, `reflect`, `worktrees`, and `oh-my-opencode-slim` |
-| **[MCPs](docs/mcps.md)** | `context7`, `gh_grep`, and how MCP permissions work per agent |
-| **[Tools](docs/tools.md)** | Built-in tool capabilities like `webfetch`, LSP tools, code search, and formatters |
+<table>
+  <tr>
+    <th>سند</th>
+    <th dir="rtl" align="right">چه چیزی را پوشش می‌دهد</th>
+  </tr>
+  <tr>
+    <td><strong><a href="docs/installation.md">راهنمای نصب</a></strong></td>
+    <td dir="rtl" align="right">نصب Plugin، استفاده از flagهای CLI، reset کردن config و عیب‌یابی setup</td>
+  </tr>
+  <tr>
+    <td dir="rtl" align="right"><strong><a href="docs/opencode-v2-compatibility.md">سازگاری با OpenCode v2</a></strong></td>
+    <td dir="rtl" align="right">اجرای همان Plugin روی <code>opencode2</code>: ماتریس featureها، baseline سازگاری با v2.0.x و pin کردن version</td>
+  </tr>
+  <tr>
+    <td><strong><a href="docs/configuration.md">Configuration</a></strong></td>
+    <td dir="rtl" align="right">محل فایل‌های config، پشتیبانی JSONC، Prompt override و مرجع کامل optionها</td>
+  </tr>
+  <tr>
+    <td><strong><a href="docs/project-local-customization.md">سفارشی‌سازی پروژه</a></strong></td>
+    <td dir="rtl" align="right">Agentهای سفارشی مخصوص repository، Prompt override، Skillهای هر Agent و precedence</td>
+  </tr>
+  <tr>
+    <td><strong><a href="docs/background-orchestration.md">Background Orchestration</a></strong></td>
+    <td dir="rtl" align="right">مدل Orchestrator مبتنی بر scheduler که حول subagentهای native پس‌زمینه ساخته شده است</td>
+  </tr>
+  <tr>
+    <td dir="rtl" align="right"><strong><a href="docs/maintainers.md">راهنمای Maintainer</a></strong></td>
+    <td dir="rtl" align="right">قوانین triage کردن issueها، معنی labelها، routing پشتیبانی و workflow نگهداری repository</td>
+  </tr>
+  <tr>
+    <td><strong><a href="docs/skills.md">Skills</a></strong></td>
+    <td dir="rtl" align="right">Skillهای همراه مانند <code>simplify</code>، <code>codemap</code>، <code>clonedeps</code>، <code>deepwork</code>، <code>verification-planning</code>، <code>reflect</code>، <code>worktrees</code> و <code>oh-my-opencode-slim</code></td>
+  </tr>
+  <tr>
+    <td><strong><a href="docs/mcps.md">MCPها</a></strong></td>
+    <td dir="rtl" align="right"><code>context7</code>، <code>gh_grep</code> و نحوه کار permissionهای MCP برای هر Agent</td>
+  </tr>
+  <tr>
+    <td><strong><a href="docs/tools.md">Tools</a></strong></td>
+    <td dir="rtl" align="right">قابلیت‌های داخلی ابزارها مانند <code>webfetch</code>، ابزارهای LSP، جست‌وجوی کد و formatterها</td>
+  </tr>
+</table>
 
 ---
 
-## 🏛️ Contributors
+<a id="contributors-"></a>
+
+## 🏛️ مشارکت‌کنندگان
 
 <div align="center">
-  <p><i>The builders, debuggers, writers, and wanderers who have earned their place in the pantheon.</i></p>
-  <p><sub>Every merged contribution leaves a mark on the realm.</sub></p>
+  <p dir="rtl" align="right"><i>سازندگان، debuggerها، نویسندگان و جست‌وجوگرانی که جایگاه خود را در Pantheon به دست آورده‌اند.</i></p>
+  <p dir="rtl" align="right"><sub>هر contribution که merge شود، اثری در این قلمرو بر جا می‌گذارد.</sub></p>
 
   <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
-[![All Contributors](https://img.shields.io/badge/all_contributors-115-orange.svg?style=flat-square)](#contributors-)
+[![همه مشارکت‌کنندگان](https://img.shields.io/badge/all_contributors-115-orange.svg?style=flat-square)](#contributors-)
 <!-- ALL-CONTRIBUTORS-BADGE:END -->
 </div>
 
@@ -839,7 +968,7 @@ Use this section as a map: start with installation, then jump to features, confi
 
 ---
 
-## 📄 License
+## 📄 مجوز
 
 MIT
 
