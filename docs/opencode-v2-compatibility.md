@@ -856,7 +856,11 @@ The **terminal-publication wake** closes that gap on both host flavors:
   outcome (state-disjoint from the stopped-job recovery listener, which
   keys on `stopped` + terminal-unreconciled) AND the parent is idle AND
   no input wait is open AND at least `publicationWakeMinIntervalMs` has
-  passed since this parent's last publication wake (per-parent throttle).
+  passed since this parent's last *delivered* publication wake (the
+  per-parent throttle is consumed only on delivery; a suppressed attempt
+  burns nothing). The FIRST terminal publication of a natively-spawned
+  run is suppressed with `reason: "first-publication-native-owned"` —
+  the native notifier already delivers that one to an idle parent.
 - **Busy parent → skip entirely:** the native steer already delivered the
   first completion; a queued wake would double-notify.
 - **Delivery:** the same `promptAsync` machinery as the periodic wake —
@@ -869,7 +873,8 @@ The **terminal-publication wake** closes that gap on both host flavors:
   changed the children fingerprint un-stops the session; an unchanged
   fingerprint keeps the cap tripped.
 
-Config knobs (see `backgroundJobs.orchestratorWake`):
+Config knobs (see the `backgroundJobs.orchestratorWake` rows in the
+[configuration reference](configuration.md#background-job-management)):
 `wakeOnTerminalPublication` (boolean, default `true` — the feature flag)
 and `publicationWakeMinIntervalMs` (integer ms, default `30_000` — the
 per-parent throttle window; a burst of publications collapses into one

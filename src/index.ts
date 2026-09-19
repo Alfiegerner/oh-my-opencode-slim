@@ -45,6 +45,7 @@ import {
   ForegroundFallbackManager,
   formatStoppedJobDelta,
   SessionLifecycle,
+  stoppedJobRecoveryReason,
 } from './hooks';
 import { processImageAttachments } from './hooks/image-hook';
 import { clearAllWakeSessions } from './hooks/orchestrator-wake/wake-gate';
@@ -779,6 +780,28 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     });
     backgroundJobCoordinator.addTerminalOutcomeListener((record) => {
       if (record.state !== 'stopped' || !record.terminalUnreconciled) return;
+      // Symmetric tracker suppression (M4): when the revived-run tracker
+      // owns this generation's delivery — it already delivered the run's
+      // terminal <task> notification — a recovery wake beside it would
+      // queue a second admission for a lineage the parent already heard
+      // from. Scoped like the publication listener's check: a stop that
+      // is the generation's FIRST publication has no tracker delivery
+      // beside it (the tracker only delivers completed/error), so the
+      // recovery wake stays that stop's one and only notification.
+      if (
+        record.terminalRevision > 1 &&
+        revivedRunTracker.willNotifyParent(record.taskID, record.generation)
+      ) {
+        log('[orchestrator-wake] stopped-job recovery wake skipped', {
+          sessionID: record.parentSessionID,
+          taskID: record.taskID,
+          generation: record.generation,
+          trigger: 'stopped-job-recovery',
+          verdict: 'skipped',
+          reason: 'revived-tracker-owns-delivery',
+        });
+        return;
+      }
       orchestratorWakeScheduler.triggerStoppedJobRecovery(
         record.parentSessionID,
         // Self-contained stop facts: the recovery wake is an
@@ -790,11 +813,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           taskID: record.taskID,
           generation: record.generation,
           state: record.state,
-          reason: record.timedOut
-            ? 'wall-clock deadline exceeded'
-            : record.statusUncertain
-              ? 'runtime status uncertain'
-              : 'stopped without a terminal result',
+          reason: stoppedJobRecoveryReason(record),
         }),
         `${record.taskID}:${record.generation}`,
       );
@@ -823,6 +842,27 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
           trigger: 'terminal-publication',
           verdict: 'skipped',
           reason: 'revived-tracker-owns-delivery',
+        });
+        return;
+      }
+      // First-publication ownership (live-verified on a 2.0.8 host): the
+      // native notifier delivers a run's FIRST terminal publication to
+      // the parent even while it sits idle, so a plugin wake beside it
+      // would double-notify. The native contract covers exactly the
+      // first publication of a natively-spawned lineage — the task's
+      // original launch (taskGeneration 1) publishing its first terminal
+      // revision. Every later publication of the lineage (a reopened
+      // self-continuation republishing under a new revision) and every
+      // relaunched generation has no native notifier and still wakes
+      // (the unowned-relaunch/degraded-fallback path above).
+      if (record.taskGeneration === 1 && record.terminalRevision === 1) {
+        log('[orchestrator-wake] terminal publication wake skipped', {
+          sessionID: record.parentSessionID,
+          taskID: record.taskID,
+          generation: record.generation,
+          trigger: 'terminal-publication',
+          verdict: 'skipped',
+          reason: 'first-publication-native-owned',
         });
         return;
       }

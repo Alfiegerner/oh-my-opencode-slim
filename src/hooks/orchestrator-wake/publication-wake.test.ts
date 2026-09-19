@@ -16,7 +16,16 @@
  *   parent with no active children is not classified 'no-work' (the same
  *   trap triggerStoppedJobRecovery solves with its recovery flag).
  */
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from 'bun:test';
+import * as loggerModule from '../../utils/logger';
 import { resetUserWaitGateForTests } from '../task-session-manager/user-wait-gate';
 import {
   createOrchestratorWakeScheduler,
@@ -314,6 +323,79 @@ describe('terminal-publication wake', () => {
     await scheduler.triggerTerminalPublicationWake('p1', 'child-1', 1);
     await clock.advance(0);
     expect(promptAsync).not.toHaveBeenCalled();
+  });
+
+  test('input-wait suppression does not consume the throttle window', async () => {
+    const promptAsync = mock(async () => ({}));
+    let inputWait = true;
+    const { scheduler } = createPublicationScheduler({
+      hostFlavor: 'v2',
+      // A wide window: the second publication below lands WELL inside it,
+      // so it may only wake when the suppressed attempt burned nothing.
+      publicationWakeMinIntervalMs: 60_000,
+      hasInputWait: (id) => id === 'p1' && inputWait,
+      sessionClient: makeV2Client({
+        promptAsync,
+        listChildren: [terminalChild('child-1'), terminalChild('child-2')],
+      }),
+    });
+
+    // First publication while an input wait is open: suppressed.
+    await scheduler.triggerTerminalPublicationWake('p1', 'child-1', 1);
+    await clock.advance(0);
+    expect(promptAsync).not.toHaveBeenCalled();
+
+    // The wait clears; the very next publication still wakes: the
+    // suppressed attempt must not have consumed the throttle window.
+    inputWait = false;
+    await scheduler.triggerTerminalPublicationWake('p1', 'child-2', 1);
+    await clock.advance(0);
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+  });
+
+  test('no waking log unless a wake is actually delivered', async () => {
+    const promptAsync = mock(async () => ({}));
+    const entries: Array<{ message: string; data: unknown }> = [];
+    const spy = spyOn(loggerModule, 'log').mockImplementation(
+      (message: string, data?: unknown) => {
+        entries.push({ message, data });
+      },
+    );
+    let inputWait = true;
+    const { scheduler } = createPublicationScheduler({
+      hostFlavor: 'v2',
+      publicationWakeMinIntervalMs: 60_000,
+      hasInputWait: (id) => id === 'p1' && inputWait,
+      sessionClient: makeV2Client({
+        promptAsync,
+        listChildren: [terminalChild('child-1')],
+      }),
+    });
+    const wakingLogs = () =>
+      entries.filter(
+        (entry) =>
+          entry.message === '[orchestrator-wake] terminal publication wake' &&
+          (entry.data as { verdict?: string } | undefined)?.verdict ===
+            'waking',
+      );
+
+    try {
+      // Suppressed by the input wait: no wake may be logged as waking.
+      await scheduler.triggerTerminalPublicationWake('p1', 'child-1', 1);
+      await clock.advance(0);
+      expect(wakingLogs()).toHaveLength(0);
+      expect(promptAsync).not.toHaveBeenCalled();
+
+      // Delivered once the wait clears: exactly one waking log line.
+      inputWait = false;
+      entries.length = 0;
+      await scheduler.triggerTerminalPublicationWake('p1', 'child-1', 1);
+      await clock.advance(0);
+      expect(wakingLogs()).toHaveLength(1);
+      expect(promptAsync).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test('wakeOnTerminalPublication=false disables the wake', async () => {

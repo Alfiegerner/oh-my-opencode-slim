@@ -145,6 +145,28 @@ export function formatStoppedJobDelta(record: {
   return `<stopped-job>\nalias: ${record.alias}\ntask: ${record.taskID}\ngeneration: ${record.generation}\nstate: ${record.state}\nreason: ${record.reason}\n</stopped-job>`;
 }
 
+/** Reason line for a stopped-job recovery delta. A stop committed from a
+ * host-attributed interruption/cancellation DOES carry a terminal result
+ * (the host's own outcome report); blaming a missing result misinforms
+ * the woken parent about what recovery means here. */
+export function stoppedJobRecoveryReason(record: {
+  timedOut: boolean;
+  statusUncertain: boolean;
+  resultSummary?: string;
+}): string {
+  if (record.timedOut) return 'wall-clock deadline exceeded';
+  if (record.statusUncertain) return 'runtime status uncertain';
+  const attributed = /^Host reported outcome: (interrupted|cancelled)\./.exec(
+    record.resultSummary ?? '',
+  );
+  if (attributed) {
+    const kind =
+      attributed[1] === 'interrupted' ? 'interruption' : 'cancellation';
+    return `host-attributed ${kind} (terminal result present)`;
+  }
+  return 'stopped without a terminal result';
+}
+
 /** Children-mode variant (v2 degraded mode): watchdog over background
  * children and unreconciled jobs instead of the todo list. */
 export const ORCHESTRATOR_CHILDREN_WAKE_TEXT =
@@ -1750,6 +1772,10 @@ export function createOrchestratorWakeScheduler(
    *   publications collapses into one wake;
    * - `hasInputWait` / fallback / archived (via canSchedule).
    *
+   * The throttle window is consumed and the `waking` verdict logged only
+   * AFTER canSchedule passes — a suppressed wake burns nothing, so the
+   * next eligible publication inside the window still wakes.
+   *
    * Unlike stopped-job recovery this does NOT rearm the no-progress cap:
    * the publication path enters evaluation past the cap pre-check, and the
    * in-evaluation fingerprint comparison decides — a publication that
@@ -1804,6 +1830,19 @@ export function createOrchestratorWakeScheduler(
     if (localSessions.get(sessionID)?.archived) {
       return;
     }
+    if (
+      !canSchedule(sessionID, {
+        // The fingerprint comparison inside evaluate is the authoritative
+        // no-progress test for this path (see the docstring above).
+        ignoreProgressCap: true,
+      })
+    )
+      return;
+    // Delivered wake: only now is the throttle window consumed and the
+    // wake logged. A publication suppressed by canSchedule (input wait,
+    // fallback in progress) burns nothing — the next eligible
+    // publication inside the window still wakes — and the runbook's
+    // verdict:"waking" count stays an honest delivered-wake count.
     log('[orchestrator-wake] terminal publication wake', {
       sessionID,
       taskID,
@@ -1813,14 +1852,6 @@ export function createOrchestratorWakeScheduler(
     });
     lastPublicationWakeAt.set(sessionID, now);
     boundTrackedMap(lastPublicationWakeAt);
-    if (
-      !canSchedule(sessionID, {
-        // The fingerprint comparison inside evaluate is the authoritative
-        // no-progress test for this path (see the docstring above).
-        ignoreProgressCap: true,
-      })
-    )
-      return;
     const state = touchLocal(sessionID);
     clearTimer(state);
     bumpGeneration(state);

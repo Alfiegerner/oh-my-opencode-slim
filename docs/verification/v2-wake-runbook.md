@@ -103,24 +103,35 @@ next system-reminder (the `### Background Job Board` /
 or `running, unreconciled` under `#### Active / Unreconciled`. After the
 parent consumes the report, the board snapshot reconciles the job.
 
-**(c) Exactly one terminal-publication wake for an idle parent.** Because
-the parent sat idle, the plugin log must contain exactly one:
+**(c) First publication: native delivery, zero plugin wakes.** The job's
+first completion is delivered by the host's native notifier even to an
+idle parent (live-verified on a 2.0.8 host), so the plugin log must
+contain exactly one skip line for it:
 
 ```
-[orchestrator-wake] terminal publication wake {"sessionID":"<parent>","taskID":"...","generation":1,"trigger":"terminal-publication","verdict":"waking"}
+[orchestrator-wake] terminal publication wake skipped {"sessionID":"<parent>","taskID":"...","generation":1,"trigger":"terminal-publication","verdict":"skipped","reason":"first-publication-native-owned"}
 ```
 
-and the parent must receive **one** queued wake admission — a single new
-admitted internal turn carrying the children-mode wake text (a
+and **zero** `verdict: "waking"` publication-wake lines plus zero queued
+wake admissions for that publication — a plugin wake beside the native
+delivery double-notifies and is a failure. A LATER publication of the
+same lineage (the child resumes and finishes again) or of a later
+generation is the plugin's to deliver: exactly one
+`[orchestrator-wake] terminal publication wake` with
+`verdict: "waking"` and **one** queued wake admission (a single new
+admitted internal turn carrying the children-mode wake text, a
 `<system-reminder>` telling the orchestrator to check on unfinished
-background child sessions), delivered via `promptAsync` with
-`delivery: "queue"`. Two wakes for one publication (or a wake plus the
-native completion steer double-notifying) is a failure. Expected
-suppression shapes, for contrast: a **busy** parent logs
+background child sessions, delivered via `promptAsync` with
+`delivery: "queue"`). Other expected suppression shapes, for contrast: a
+**busy** parent logs
 `[orchestrator-wake] terminal publication wake skipped` with
 `reason: "parent-busy"` (the native steer already delivered the first
-completion — zero wakes is correct there), and a burst of publications
-inside the throttle collapses with `reason: "throttled"`.
+completion — zero wakes is correct there), a publication during an open
+input wait or fallback is suppressed **without** consuming the throttle
+window (the next eligible publication still wakes), and a burst of
+publications inside the throttle collapses with `reason: "throttled"`.
+The `verdict: "waking"` count is therefore an honest delivered-wake
+count: it only appears when a wake is actually delivered.
 
 ## 3. Adopted #1066 acceptance scenarios
 
