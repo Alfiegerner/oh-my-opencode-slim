@@ -18,6 +18,11 @@ function createHarness(
     maxNotificationRetries?: number;
     stabilizationProbeDelayMs?: number;
     handoffExpiryMs?: number;
+    onOwnershipReleased?: (
+      parentSessionID: string,
+      taskID: string,
+      generation: number,
+    ) => void;
     resolveSelection?: (sessionID: string) => Promise<{
       agent?: string;
       model?: { providerID: string; modelID: string };
@@ -1531,6 +1536,86 @@ describe('revived run tracker', () => {
         ),
       ).toBe(true);
       retrying.tracker.dispose();
+    });
+  });
+
+  describe('onOwnershipReleased', () => {
+    test('fires exactly once with the run ids when every retry fails', async () => {
+      const released: Array<{
+        parentSessionID: string;
+        taskID: string;
+        generation: number;
+      }> = [];
+      const harness = createHarness(
+        () => ({ data: [] }),
+        mock(async () => {
+          throw new Error('parent unavailable');
+        }),
+        false,
+        {
+          maxNotificationRetries: 2,
+          onOwnershipReleased: (parentSessionID, taskID, generation) => {
+            released.push({ parentSessionID, taskID, generation });
+          },
+        },
+      );
+      const terminal = publish(harness);
+      await flushNotify();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      // Attempt 1 failed, one retry fired and failed: the budget is
+      // spent with nothing sent and no timer armed — the organic
+      // give-up point.
+      expect(harness.prompt).toHaveBeenCalledTimes(2);
+      expect(released).toEqual([
+        {
+          parentSessionID: 'parent',
+          taskID: harness.run.taskID,
+          generation: harness.run.generation,
+        },
+      ]);
+
+      // A duplicate terminal observation of the SAME revision re-enters
+      // notifyParent (a third transport attempt) but must NOT re-fire
+      // the release: exactly-once per notification lifecycle.
+      harness.tracker.onTerminal(terminal);
+      await flushNotify();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(harness.prompt).toHaveBeenCalledTimes(3);
+      expect(released).toHaveLength(1);
+
+      // Plain dispose never fires the release either.
+      harness.tracker.dispose();
+      expect(released).toHaveLength(1);
+    });
+
+    test('never fires on successful delivery', async () => {
+      const released: string[] = [];
+      let resultReady = false;
+      const harness = createHarness(
+        completedTranscript(() => resultReady),
+        mock(async () => ({})),
+        false,
+        {
+          onOwnershipReleased: (parentSessionID) =>
+            released.push(parentSessionID),
+        },
+      );
+      harness.tracker.register({
+        taskID: harness.run.taskID,
+        generation: harness.run.generation,
+        parentSessionID: 'parent',
+        baselineMessageID: 'baseline',
+        description: 'inspect the change',
+      });
+      resultReady = true;
+      await harness.tracker.probe(harness.run.taskID, harness.run.generation);
+      await flushNotify();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(harness.prompt).toHaveBeenCalledTimes(1);
+      expect(released).toEqual([]);
+      harness.tracker.dispose();
     });
   });
 });

@@ -1850,6 +1850,208 @@ test('revived-run completion on an idle parent queues exactly one admission: the
   }
 });
 
+// ── Exhausted revived-run tracker: the suppressed publication is
+// re-emitted exactly once as the degraded fallback ──
+//
+// When EVERY tracker notification attempt fails, ownership is released
+// at the organic retry-exhaustion give-up point — but the publication
+// the listener already suppressed (revived-tracker-owns-delivery) must
+// not stay swallowed: the idle parent would get neither the <task>
+// notification nor a wake. The release hook re-emits the publication
+// wake DIRECTLY through the scheduler, bypassing the listener's
+// suppression chain (a revived lineage has no native notifier, so the
+// first-publication-native-owned skip must not apply) while the
+// scheduler's own guards (canSchedule, one-flight, throttle) still do.
+
+test('revived-run tracker exhaustion re-emits exactly one publication wake to the idle parent', async () => {
+  resetOrchestratorWakeGateForTests();
+  const capture = captureGateLogs();
+  try {
+    const isTrackerNotification = (args: unknown) => {
+      const parts = (
+        args as { body?: { parts?: Array<{ text?: string }> } } | undefined
+      )?.body?.parts;
+      return Boolean(
+        Array.isArray(parts) && parts[0]?.text?.startsWith('<task '),
+      );
+    };
+    // The tracker's <task> transport fails for its whole retry budget
+    // (default 3 attempts); any other promptAsync consumer (the wake)
+    // succeeds.
+    let notificationFailures = 3;
+    const promptAsync = mock(async (args: unknown) => {
+      if (isTrackerNotification(args) && notificationFailures > 0) {
+        notificationFailures -= 1;
+        throw new Error('parent transport unavailable');
+      }
+      return {};
+    });
+    let hostChildren: Array<Record<string, unknown>> = [
+      { id: 'child', parentID: 'parent' },
+    ];
+    const probe = v2ShimClient({
+      outcome: 'succeeded',
+      wakeSurface: {
+        listChildren: () => hostChildren,
+        promptAsync,
+      },
+    });
+    const { h, pump, awaitPublication } = await openV2Lifecycle(probe, {
+      hostFlavor: 'v2',
+      configOverrides: {
+        orchestratorWake: { publicationWakeMinIntervalMs: 1_000 },
+      },
+    });
+    const tracker = h.revivedTracker;
+    if (!tracker) {
+      throw new Error('assembly did not expose the revived-run tracker');
+    }
+
+    // Run 1 (non-revived): the lineage's first publication is natively
+    // owned — no plugin wake, no promptAsync.
+    await h.requestTask('native', 'v2 tracker-exhaustion fallback probe');
+    await pump({
+      type: 'session.created',
+      data: { sessionID: 'child', parentID: 'parent', agent: 'explorer' },
+    });
+    await pump({
+      type: 'session.execution.started',
+      data: { sessionID: 'child' },
+    });
+    hostChildren = [
+      {
+        id: 'child',
+        parentID: 'parent',
+        outcome: 'succeeded',
+        time: { updated: Date.now() },
+      },
+    ];
+    await pump({
+      type: 'session.execution.succeeded',
+      data: { sessionID: 'child' },
+    });
+    const first = await awaitPublication('child', 0);
+    expect(first).toMatchObject({ state: 'completed' });
+    await flush();
+    await Bun.sleep(30);
+    expect(promptAsync).not.toHaveBeenCalled();
+
+    // Past the throttle window, revive the child (the exact
+    // post-admission state task_revive leaves behind).
+    await Bun.sleep(1_100);
+    const lease = h.board.acquireRelaunchLease('child', first.generation);
+    if (!lease) throw new Error('missing relaunch lease');
+    const relaunched = h.board.registerLaunch({
+      taskID: 'child',
+      parentSessionID: 'parent',
+      agent: 'explorer',
+      description: 'revived continuation',
+      background: true,
+      relaunchLease: lease,
+    });
+    h.board.releaseLease(lease);
+    tracker.register({
+      taskID: 'child',
+      generation: relaunched.generation,
+      parentSessionID: 'parent',
+      description: 'revived continuation',
+    });
+    const sinceRevision = h.board.get('child')?.terminalRevision ?? 0;
+
+    // The revived run executes and completes; the tracker owns the
+    // delivery, so the publication listener suppresses the wake.
+    hostChildren = [
+      { id: 'child', parentID: 'parent', time: { updated: Date.now() } },
+    ];
+    await pump({
+      type: 'session.execution.started',
+      data: { sessionID: 'child' },
+    });
+    hostChildren = [
+      {
+        id: 'child',
+        parentID: 'parent',
+        outcome: 'succeeded',
+        time: { updated: Date.now() },
+      },
+    ];
+    await pump({
+      type: 'session.execution.succeeded',
+      data: { sessionID: 'child' },
+    });
+    let revived: BackgroundJobRecord | undefined;
+    for (let i = 0; i < 400 && revived === undefined; i++) {
+      const record = h.board.get('child');
+      if (
+        record &&
+        record.state !== 'running' &&
+        record.generation === relaunched.generation &&
+        record.terminalRevision > sinceRevision
+      ) {
+        revived = record;
+      } else {
+        await Bun.sleep(5);
+      }
+    }
+    if (!revived) throw new Error('revived publication never landed');
+    expect(revived).toMatchObject({
+      state: 'completed',
+      generation: relaunched.generation,
+    });
+    expect(
+      capture
+        .of('[orchestrator-wake] terminal publication wake skipped', 'child')
+        .filter(
+          (entry) =>
+            (entry.data as { reason?: string } | undefined)?.reason ===
+            'revived-tracker-owns-delivery',
+        ),
+    ).toHaveLength(1);
+
+    // The tracker burns its whole retry budget (3 attempts, 1s retry
+    // delay), gives up, and the release hook must deliver EXACTLY ONE
+    // publication wake to the idle parent — poll rather than sleep a
+    // fixed window so the assertion is timing-tolerant.
+    const wakeCalls = () =>
+      promptAsync.mock.calls.filter((call) => !isTrackerNotification(call[0]));
+    for (let i = 0; i < 600 && wakeCalls().length === 0; i += 1) {
+      await Bun.sleep(10);
+    }
+    await flush();
+
+    const notificationCalls = promptAsync.mock.calls.filter((call) =>
+      isTrackerNotification(call[0]),
+    );
+    expect(notificationCalls).toHaveLength(3);
+    expect(wakeCalls()).toHaveLength(1);
+    expect(promptAsync).toHaveBeenCalledTimes(4);
+    expect(
+      capture
+        .of('[orchestrator-wake] terminal publication wake', 'child')
+        .filter(
+          (entry) =>
+            (entry.data as { verdict?: string } | undefined)?.verdict ===
+            'waking',
+        ),
+    ).toHaveLength(1);
+    const wakeCall = wakeCalls()[0]?.[0] as {
+      path?: { id?: string };
+      delivery?: string;
+      modelSelection?: string;
+      body?: { agent?: string; parts?: Array<{ text?: string }> };
+    };
+    expect(wakeCall).toMatchObject({
+      path: { id: 'parent' },
+      delivery: 'queue',
+      modelSelection: 'inherit',
+    });
+    expect(wakeCall?.body?.agent).toBe('orchestrator');
+    expect(wakeCall?.body?.parts?.[0]?.text).not.toContain('<task ');
+  } finally {
+    capture.restore();
+  }
+});
+
 test('regression: first publication is native-owned; a later publication of the same lineage still wakes exactly once', async () => {
   resetOrchestratorWakeGateForTests();
   const capture = captureGateLogs();

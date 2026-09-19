@@ -634,6 +634,21 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       onSettled: (taskID) => markRevivedRunSettled(taskID),
       contextFilesForPrompt: (taskID) => getRevivedContextFiles(taskID),
       pruneContext: () => pruneRevivedContext(),
+      // Degraded-fallback wiring (revived-lineage strand): when every
+      // tracker notification attempt has failed, the publication this
+      // tracker suppressed in the terminal-outcome listener would
+      // otherwise never reach the idle parent. Re-emit it DIRECTLY
+      // through the wake scheduler — never through the listener's
+      // suppression chain: a revived lineage has no native notifier, so
+      // the first-publication-native-owned (and tracker-owned) skips
+      // must not apply to this fallback. The scheduler's own guards
+      // (canSchedule, one-flight wake gate, publication throttle) still
+      // apply, correctly.
+      onOwnershipReleased: (parentSessionID, taskID, generation) => {
+        void orchestratorWakeScheduler
+          .triggerTerminalPublicationWake(parentSessionID, taskID, generation)
+          .catch(() => undefined);
+      },
     });
     backgroundJobCoordinator.addTerminalOutcomeListener((record) => {
       revivedRunTracker.onTerminal(record);

@@ -873,13 +873,22 @@ The **terminal-publication wake** closes that gap on both host flavors:
   keys on `stopped` + terminal-unreconciled) AND the parent is idle AND
   no input wait is open AND at least `publicationWakeMinIntervalMs` has
   passed since this parent's last *delivered* publication wake (the
-  per-parent throttle is consumed only on delivery; a suppressed attempt
-  burns nothing). The FIRST terminal publication of ANY generation
+  per-parent throttle is consumed only on delivery — and only after the
+  evaluation actually queues the wake admission; a suppressed OR vetoed
+  attempt, including an in-evaluation no-delivery exit such as the
+  unchanged-fingerprint no-progress stop or an SDK error, burns
+  nothing). The FIRST terminal publication of ANY generation
   (`terminalRevision` 1) is suppressed with `reason:
   "first-publication-native-owned"` — the native notifier armed by that
   generation's `subagent` tool call already delivers it to an idle
   parent; if that native delivery is ever lost host-side, the job falls
-  back to board injection on the parent's next activity.
+  back to board injection on the parent's next activity. Exception: a
+  revived run whose tracker-owned `<task>` notification exhausts its
+  whole retry budget releases ownership and re-emits the publication
+  wake directly through the scheduler (a revived lineage has no native
+  notifier, so the first-publication suppression must not apply to that
+  degraded fallback) — the idle parent always ends up with exactly one
+  delivery: the notification or the fallback wake.
 - **Busy parent → skip entirely:** the native steer already delivered the
   first completion; a queued wake would double-notify.
 - **Delivery:** the same `promptAsync` machinery as the periodic wake —

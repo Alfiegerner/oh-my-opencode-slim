@@ -353,6 +353,60 @@ describe('terminal-publication wake', () => {
     expect(promptAsync).toHaveBeenCalledTimes(1);
   });
 
+  test('evaluation vetoed mid-evaluate (SDK error) burns no throttle and logs no waking verdict', async () => {
+    let failDelivery = true;
+    const promptAsync = mock(async () => {
+      if (failDelivery) throw new Error('sdk unavailable');
+      return {};
+    });
+    const entries: Array<{ message: string; data: unknown }> = [];
+    const spy = spyOn(loggerModule, 'log').mockImplementation(
+      (message: string, data?: unknown) => {
+        entries.push({ message, data });
+      },
+    );
+    const { scheduler } = createPublicationScheduler({
+      hostFlavor: 'v2',
+      // A wide window: the second publication below lands WELL inside
+      // it, so it may only wake when the vetoed evaluation burned
+      // nothing.
+      publicationWakeMinIntervalMs: 60_000,
+      sessionClient: makeV2Client({
+        promptAsync,
+        listChildren: [terminalChild('child-1'), terminalChild('child-2')],
+      }),
+    });
+    const wakingLogs = () =>
+      entries.filter(
+        (entry) =>
+          entry.message === '[orchestrator-wake] terminal publication wake' &&
+          (entry.data as { verdict?: string } | undefined)?.verdict ===
+            'waking',
+      );
+
+    try {
+      // First publication: canSchedule passes, but the evaluation is
+      // vetoed at the delivery step (promptAsync rejects → the SDK
+      // error no-delivery exit). Nothing may be logged or consumed.
+      await scheduler.triggerTerminalPublicationWake('p1', 'child-1', 1);
+      await clock.advance(0);
+      expect(promptAsync).toHaveBeenCalledTimes(1);
+      expect(wakingLogs()).toHaveLength(0);
+
+      // Second publication well inside the 60s window: the vetoed
+      // first attempt must not have consumed the throttle, and once the
+      // transport recovers the wake delivers — logging exactly one
+      // waking verdict.
+      failDelivery = false;
+      await scheduler.triggerTerminalPublicationWake('p1', 'child-2', 1);
+      await clock.advance(0);
+      expect(promptAsync).toHaveBeenCalledTimes(2);
+      expect(wakingLogs()).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('no waking log unless a wake is actually delivered', async () => {
     const promptAsync = mock(async () => ({}));
     const entries: Array<{ message: string; data: unknown }> = [];

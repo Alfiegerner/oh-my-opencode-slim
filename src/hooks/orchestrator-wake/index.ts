@@ -1343,22 +1343,28 @@ export function createOrchestratorWakeScheduler(
     return true;
   }
 
+  /** Evaluate one wake for `sessionID`. Resolves to true ONLY when this
+   * evaluation actually queued/delivered a wake admission (the
+   * promptAsync success path); every vetoed, stale, suppressed, or
+   * errored exit resolves false so callers that gate side effects on
+   * delivery (the publication throttle) burn nothing on a no-delivery
+   * evaluation. */
   async function evaluate(
     sessionID: string,
     generation: symbol,
     reason: WakeReason = 'periodic',
-  ): Promise<void> {
+  ): Promise<boolean> {
     const recoveryWake = reason === 'recovery';
     const scheduleOptions = {
       ignoreProgressCap: reason === 'publication',
     };
     const state = localSessions.get(sessionID);
-    if (!state || state.generation !== generation) return;
-    if (!state.continuousIdle) return;
-    if (state.archived) return;
+    if (!state || state.generation !== generation) return false;
+    if (!state.continuousIdle) return false;
+    if (state.archived) return false;
     if (!canSchedule(sessionID, scheduleOptions)) {
       suppress(sessionID);
-      return;
+      return false;
     }
 
     const owner = tryBeginWakeEvaluation(sessionID);
@@ -1373,7 +1379,7 @@ export function createOrchestratorWakeScheduler(
           void evaluate(sessionID, generation, reason);
         }
       });
-      return;
+      return false;
     }
     localWakeOwners.set(sessionID, owner);
 
@@ -1382,12 +1388,13 @@ export function createOrchestratorWakeScheduler(
         wakeMode === 'children'
           ? await readChildrenSnapshot(sessionID)
           : await readHostSnapshot(sessionID);
-      if (!snapshot || state.generation !== generation) return;
-      if (!state.continuousIdle) return;
-      if (applyArchiveState(sessionID, state, snapshot.archiveState)) return;
+      if (!snapshot || state.generation !== generation) return false;
+      if (!state.continuousIdle) return false;
+      if (applyArchiveState(sessionID, state, snapshot.archiveState))
+        return false;
       if (!canSchedule(sessionID, scheduleOptions)) {
         suppress(sessionID);
-        return;
+        return false;
       }
 
       if (
@@ -1402,7 +1409,7 @@ export function createOrchestratorWakeScheduler(
           ),
         )
       ) {
-        return;
+        return false;
       }
 
       const fingerprint = buildSnapshotFingerprint(snapshot);
@@ -1416,7 +1423,7 @@ export function createOrchestratorWakeScheduler(
       ) {
         progress.stopped = true;
         state.continuousIdle = false;
-        return;
+        return false;
       }
 
       // Recheck host status/waits immediately before promptAsync.
@@ -1424,12 +1431,13 @@ export function createOrchestratorWakeScheduler(
         wakeMode === 'children'
           ? await readChildrenSnapshot(sessionID)
           : await readHostSnapshot(sessionID);
-      if (!latest || state.generation !== generation) return;
-      if (!state.continuousIdle) return;
-      if (applyArchiveState(sessionID, state, latest.archiveState)) return;
+      if (!latest || state.generation !== generation) return false;
+      if (!state.continuousIdle) return false;
+      if (applyArchiveState(sessionID, state, latest.archiveState))
+        return false;
       if (!canSchedule(sessionID, scheduleOptions)) {
         suppress(sessionID);
-        return;
+        return false;
       }
       if (
         !applySnapshotVerdict(
@@ -1443,7 +1451,7 @@ export function createOrchestratorWakeScheduler(
           ),
         )
       ) {
-        return;
+        return false;
       }
 
       const latestFingerprint = buildSnapshotFingerprint(latest);
@@ -1456,7 +1464,7 @@ export function createOrchestratorWakeScheduler(
       ) {
         latestProgress.stopped = true;
         state.continuousIdle = false;
-        return;
+        return false;
       }
 
       const recoveryBatch = recoveryWake
@@ -1473,7 +1481,7 @@ export function createOrchestratorWakeScheduler(
           recoveryBatch.overflowCount === 0
         ) {
           pendingStoppedRecoveries.delete(sessionID);
-          return;
+          return false;
         }
       }
 
@@ -1491,18 +1499,18 @@ export function createOrchestratorWakeScheduler(
       // The await above is a new race window: an external message can
       // bump generation / end idle, and a Plan/Build host selection
       // must not ride in on stale orchestrator metadata.
-      if (state.generation !== generation) return;
-      if (!state.continuousIdle) return;
+      if (state.generation !== generation) return false;
+      if (!state.continuousIdle) return false;
       if (!canSchedule(sessionID, scheduleOptions)) {
         suppress(sessionID);
-        return;
+        return false;
       }
       const wakeAgent = selection?.agent ?? 'orchestrator';
       if (
         wakeAgent !== 'orchestrator' &&
         !(options.hasPendingDelegatedWork?.(sessionID) ?? false)
       ) {
-        return;
+        return false;
       }
       // Re-prune stop facts after the selection await: a child can leave
       // stopped/unreconciled while parent generation stays put (#1079 r2).
@@ -1514,7 +1522,7 @@ export function createOrchestratorWakeScheduler(
           recoveryBatch.overflowCount === 0
         ) {
           pendingStoppedRecoveries.delete(sessionID);
-          return;
+          return false;
         }
       }
       // Keep model+variant as one selection. Mixing a new model with a
@@ -1527,7 +1535,7 @@ export function createOrchestratorWakeScheduler(
       // Reserve before promptAsync so a failed call cannot storm retries and
       // concurrent hook instances cannot double-wake.
       if (!commitWakeReservation(sessionID, owner, latestFingerprint)) {
-        return;
+        return false;
       }
 
       const wakeText = recoveryWake
@@ -1618,6 +1626,8 @@ export function createOrchestratorWakeScheduler(
           }
         }
       }
+      // Delivered: the wake admission was queued and accepted above.
+      return true;
     } catch (error) {
       // Failed promptAsync already reserved; clear expecting-busy so a later
       // unrelated busy can rearm normally. Pending deltas stay queued.
@@ -1626,6 +1636,7 @@ export function createOrchestratorWakeScheduler(
         sessionID,
         error: error instanceof Error ? error.message : String(error),
       });
+      return false;
     } finally {
       // Always release ownership — even when suppress/endIdle bumped generation.
       releaseWakeEvaluation(sessionID, owner);
@@ -1773,8 +1784,10 @@ export function createOrchestratorWakeScheduler(
    * - `hasInputWait` / fallback / archived (via canSchedule).
    *
    * The throttle window is consumed and the `waking` verdict logged only
-   * AFTER canSchedule passes — a suppressed wake burns nothing, so the
-   * next eligible publication inside the window still wakes.
+   * AFTER a wake is actually DELIVERED (evaluate resolved true — the
+   * promptAsync admission was accepted). A wake suppressed by
+   * canSchedule or vetoed inside evaluate burns nothing, so the next
+   * eligible publication inside the window still wakes.
    *
    * Unlike stopped-job recovery this does NOT rearm the no-progress cap:
    * the publication path enters evaluation past the cap pre-check, and the
@@ -1838,11 +1851,26 @@ export function createOrchestratorWakeScheduler(
       })
     )
       return;
-    // Delivered wake: only now is the throttle window consumed and the
-    // wake logged. A publication suppressed by canSchedule (input wait,
-    // fallback in progress) burns nothing — the next eligible
-    // publication inside the window still wakes — and the runbook's
-    // verdict:"waking" count stays an honest delivered-wake count.
+    // Delivered wake: only after `evaluate` actually queued and delivered
+    // a wake admission (promptAsync accepted) is the throttle window
+    // consumed and the wake logged. A publication suppressed by
+    // canSchedule (input wait, fallback in progress) OR vetoed inside
+    // evaluate (no-work classification, unchanged-fingerprint no-progress
+    // stop, lost reservation, SDK error) burns nothing — the next
+    // eligible publication inside the window still wakes — and the
+    // verdict:"waking" count stays an honest delivered-wake count. The
+    // one-flight wake gate dedups concurrent evaluations, so deferring
+    // consumption until after delivery cannot create a wake storm.
+    const state = touchLocal(sessionID);
+    clearTimer(state);
+    bumpGeneration(state);
+    state.continuousIdle = true;
+    const delivered = await evaluate(
+      sessionID,
+      state.generation,
+      'publication',
+    );
+    if (!delivered) return;
     log('[orchestrator-wake] terminal publication wake', {
       sessionID,
       taskID,
@@ -1850,13 +1878,8 @@ export function createOrchestratorWakeScheduler(
       trigger: 'terminal-publication',
       verdict: 'waking',
     });
-    lastPublicationWakeAt.set(sessionID, now);
+    lastPublicationWakeAt.set(sessionID, Date.now());
     boundTrackedMap(lastPublicationWakeAt);
-    const state = touchLocal(sessionID);
-    clearTimer(state);
-    bumpGeneration(state);
-    state.continuousIdle = true;
-    await evaluate(sessionID, state.generation, 'publication');
   }
 
   async function event(input: {
