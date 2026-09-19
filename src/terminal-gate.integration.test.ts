@@ -12,6 +12,7 @@ import type { BackgroundJobCoordinator } from './utils/background-job-coordinato
 import * as gateFactories from './utils/background-job-terminal-gate';
 import { BackgroundTaskConcurrency } from './utils/background-task-concurrency';
 import * as loggerModule from './utils/logger';
+import { buildPluginInput } from './v2/client-shim';
 import { mapV2EventToV1 } from './v2/event-adapter';
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -943,6 +944,180 @@ test('guard: unattributable succeeded outcome with no transcript source publishe
     expect(capture.of('[terminal-gate] terminal published', 'child')).toEqual(
       [],
     );
+  } finally {
+    capture.restore();
+  }
+});
+
+// ── Task 4 live gap: the REAL shim factory, not a hand-shaped session ──
+//
+// Live 2.0.8 verification (plugin log 2026-09-18T19:18/23:42) proved the
+// hand-shaped `{get}`-only fixture above lied about the production client
+// shape: `buildPluginInput` ALWAYS defines `session.messages` (mapped from
+// `session.context`, with a `{data: []}` fallback), so the gate's
+// transcriptSourceAbsent predicate is false on every v2 host and the
+// starvation-fix commit path is unreachable in production. The real
+// starvation lived in the mapped transcript itself: the live probe child
+// (DB-verified) ends with user → assistant(tool, finish tool-calls) →
+// assistant(finish 'stop', time.completed set, text) → an `{type:'idle',
+// outcome}` lifecycle marker, and the mapping reduced every entry to
+// `{id, role}` — so the trailing-turn scan hit the non-assistant `idle`
+// role and classification retried forever (4 accepted host-outcome
+// attributions, zero publications, gave-up). This probe builds the client
+// through the REAL shim factory over a ctx mirroring the adapter session
+// domain — `get` AND `context`, the latter returning full 2.0.8-shaped
+// SessionMessage.Info entries — so the divergence is reproducible in vitro.
+
+/** Live 2.0.8 transcript shape (from the starving probe child's durable
+ * messages): user prompt, tool-calling assistant turn, final assistant
+ * turn with terminal metadata, and the trailing idle marker. Timestamps
+ * for the FINAL turn are read-time so they land after runStartedAt. */
+function liveProbeTranscript(): Array<Record<string, unknown>> {
+  const now = Date.now();
+  return [
+    {
+      id: 'msg_user',
+      type: 'user',
+      time: { created: now - 9_000 },
+      text: 'Live-verification probe: count the files. Reply PROBE-OK: <N>.',
+    },
+    {
+      id: 'msg_turn1',
+      type: 'assistant',
+      agent: 'explorer',
+      time: { created: now - 8_000, completed: now - 7_000 },
+      finish: 'tool-calls',
+      content: [
+        {
+          type: 'reasoning',
+          text: 'Use glob with a non-recursive pattern.',
+          state: { reasoningField: 'reasoning_content' },
+          time: { created: now - 7_500, completed: now - 7_400 },
+        },
+        {
+          type: 'tool',
+          id: 'call_1',
+          name: 'glob',
+          executed: false,
+          state: {
+            status: 'completed',
+            input: { pattern: 'src/utils/*.ts' },
+            content: [{ type: 'text', text: 'a.ts\nb.ts' }],
+          },
+          time: { created: now - 7_300, completed: now - 7_200 },
+        },
+      ],
+    },
+    {
+      id: 'msg_turn2',
+      type: 'assistant',
+      agent: 'explorer',
+      time: { created: now, streamed: now, completed: now },
+      finish: 'stop',
+      content: [
+        {
+          type: 'reasoning',
+          text: '55 entries.',
+          state: { reasoningField: 'reasoning_content' },
+          time: { created: now, completed: now },
+        },
+        { type: 'text', text: 'PROBE-OK: 55' },
+      ],
+    },
+    {
+      id: 'msg_idle',
+      type: 'idle',
+      time: { created: now },
+      outcome: 'succeeded',
+    },
+  ];
+}
+
+/** Real-shim v2 host probe: the client comes from `buildPluginInput` —
+ * the production v1-shaped client for v2 hosts — over a ctx with the
+ * adapter session domain's `get` and `context`. */
+function realShimV2Client(options: {
+  outcome: string;
+  transcript: () => Array<Record<string, unknown>>;
+}): V2HostProbe & { contextCalls: () => number } {
+  const host = {
+    outcome: options.outcome,
+    idleAt: undefined as number | undefined,
+  };
+  const get = mock(
+    async (_args: unknown): Promise<unknown> => ({
+      parentID: 'parent',
+      // v2 Session.Info carries outcome/time.idle only after the terminal
+      // transition (live-verified: already set at idle).
+      ...(host.idleAt !== undefined
+        ? { outcome: host.outcome, time: { idle: host.idleAt } }
+        : {}),
+    }),
+  );
+  let calls = 0;
+  const input = buildPluginInput({
+    location: { directory: '/proj', project: { id: 'proj_1' } },
+    session: {
+      get: async (_i: { sessionID: string }) => get({}),
+      context: async () => {
+        calls += 1;
+        return options.transcript();
+      },
+    },
+  } as never);
+  return {
+    client: input.client,
+    get,
+    contextCalls: () => calls,
+    commitTerminalOutcome(idleAt: number) {
+      host.idleAt = idleAt;
+    },
+  };
+}
+
+test('live gap: the real client shim publishes the transcript result of a completed child', async () => {
+  const capture = captureGateLogs();
+  try {
+    const probe = realShimV2Client({
+      outcome: 'succeeded',
+      transcript: liveProbeTranscript,
+    });
+    const board = await driveV2Lifecycle(probe, [
+      {
+        type: 'session.created',
+        data: { sessionID: 'child', parentID: 'parent', agent: 'explorer' },
+      },
+      { type: 'session.execution.started', data: { sessionID: 'child' } },
+      { type: 'session.execution.succeeded', data: { sessionID: 'child' } },
+    ]);
+    // The transcript source WAS consulted through the real shim
+    // (session.messages → session.context), and the host outcome was
+    // attributed — the live incident's exact preconditions.
+    expect(probe.contextCalls()).toBeGreaterThan(0);
+    const attributions = capture.of(
+      '[terminal-gate] host-outcome attribution',
+      'child',
+    );
+    expect(attributions.length).toBeGreaterThan(0);
+    expect(attributions[attributions.length - 1]?.data).toMatchObject({
+      outcome: 'succeeded',
+      verdict: 'accepted',
+    });
+    // The mapped transcript must classify normally: the trailing idle
+    // marker is skipped, the final assistant turn carries its terminal
+    // metadata, and the child publishes with its REAL result text.
+    expect(board.get('child')).toMatchObject({
+      state: 'completed',
+      resultSummary: 'PROBE-OK: 55',
+    });
+    const published = capture.of('[terminal-gate] terminal published', 'child');
+    expect(published).toHaveLength(1);
+    expect(published[0]?.data).toMatchObject({
+      taskID: 'child',
+      state: 'completed',
+      attribution: 'transcript',
+      parentSessionID: 'parent',
+    });
   } finally {
     capture.restore();
   }

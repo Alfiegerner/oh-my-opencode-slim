@@ -118,9 +118,13 @@ its probe only ever matters on non-stable host builds.
    (`src/v2/client-shim.ts`): the project directory from `ctx.location`,
    and a shim `client` that **really delegates** the v1 SDK call shapes to
    v2 flat session calls — `session.get`, `session.abort`→`interrupt`
-   (`resume: false` aborts the active run), `session.messages`→`context`,
-   `session.prompt` (default `delivery: "steer"`; `noReply: true` maps to
-   `delivery: "queue", resume: false`), `session.update`→
+   (`resume: false` aborts the active run), `session.messages`→`context`
+   (mapped entries preserve the v2 terminal metadata — `time.completed`,
+   `finish`, `error` — and the 2.0.8 trailing `idle` lifecycle marker maps
+   to the skippable v1 `system` role, so transcript classification works
+   natively on v2), `session.prompt` (default `delivery: "steer"`;
+   `noReply: true` maps to `delivery: "queue", resume: false`),
+   `session.update`→
    `session.update` (`{sessionID, title}`), `session.delete`→`remove` (same
    `DELETE /api/session/:id`; stops the smartfetch secondary-model temp
    sessions leaking), and `session.list` (v2 `Session.Info` page → the v1
