@@ -57,6 +57,17 @@ describe('apply-patch/matching', () => {
     });
   });
 
+  test('rescueByPrefixSuffix does not anchor on indentation-only edges', () => {
+    const result = rescueByPrefixSuffix(
+      ['  left', 'stale-value', 'right'],
+      ['left', 'old-value', 'right'],
+      ['left', 'new-value', 'right'],
+      0,
+    );
+
+    expect(result).toEqual({ kind: 'miss' });
+  });
+
   test('rescueByPrefixSuffix marks ambiguity when multiple locations exist', () => {
     expect(
       rescueByPrefixSuffix(

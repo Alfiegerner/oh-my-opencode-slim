@@ -69,6 +69,14 @@ const MAX_LCS_CANDIDATES = 64;
 export const autoRescueComparators: LineComparator[] =
   autoRescueComparatorEntries.map((entry) => entry.same);
 
+// Fuzzy rescues (prefix/suffix edges, one-line hits) keep the conservative
+// set: full-trim anchors can cross indentation levels and bind a stale chunk
+// at the wrong depth. Direct contiguous matching (seekMatch, prepared
+// targets) keeps the full native-compatible chain.
+const fuzzyRescueComparators: LineComparator[] = autoRescueComparatorEntries
+  .slice(0, 4)
+  .map((entry) => entry.same);
+
 export function prepareAutoRescueTarget(
   target: string,
 ): PreparedAutoRescueTarget {
@@ -322,7 +330,7 @@ export function rescueByPrefixSuffix(
   const hits = new Set<string>();
   let hit: MatchHit | undefined;
 
-  for (const same of autoRescueComparators) {
+  for (const same of fuzzyRescueComparators) {
     const leftHits = list(lines, left, start, same);
     if (leftHits.length === 0) {
       continue;
