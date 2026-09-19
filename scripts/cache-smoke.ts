@@ -294,14 +294,17 @@ let spawnedServe:
   | { child: ReturnType<typeof spawn>; scratch?: string }
   | undefined;
 
-function stopSpawnedServe(signal: NodeJS.Signals): void {
-  const pid = spawnedServe?.child.pid;
+function stopSpawnedServe(
+  spawned: { child: ReturnType<typeof spawn> } | undefined,
+  signal: NodeJS.Signals,
+): void {
+  const pid = spawned?.child.pid;
   if (!pid) return;
   try {
     process.kill(-pid, signal);
   } catch {
     try {
-      spawnedServe?.child.kill(signal);
+      spawned.child.kill(signal);
     } catch {
       // already gone
     }
@@ -313,8 +316,10 @@ function cleanupSpawnedServe(): void {
   const spawned = spawnedServe;
   spawnedServe = undefined;
   if (!spawned) return;
-  stopSpawnedServe('SIGTERM');
-  stopSpawnedServe('SIGKILL');
+  // The record is passed explicitly: the module global is already cleared,
+  // and reading it here would skip both signals and orphan the serve group.
+  stopSpawnedServe(spawned, 'SIGTERM');
+  stopSpawnedServe(spawned, 'SIGKILL');
   if (spawned.scratch) {
     try {
       rmSync(spawned.scratch, { recursive: true, force: true });
