@@ -1186,22 +1186,33 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     return errors >= threshold || timeouts >= threshold;
   }
 
+  private listReusable(parent?: string): BackgroundJobRecord[] {
+    return this.list(parent).filter((j) => isReusable(j, this.maxContextLines));
+  }
+
+  /** Finished sessions the sidebar may surface (dot + idle-row click).
+   *  Independent of parent acknowledgment: a child that has reached a
+   *  canonical terminal state is history even while still unreconciled. */
+  private listSidebarHistory(parent?: string): BackgroundJobRecord[] {
+    return this.list(parent).filter(isSidebarHistory);
+  }
+
   /**
-   * Read-only projection for the sidebar's reusable dot: per agent of a
-   * parent session, the accessible reconciled session with the max
-   * `lastUsedAt` (user override — markUsed/resolve intentionally move
-   * the selection; tie-broken by taskID for determinism). Reuses the
-   * exact `isReusable` predicate from formatForPromptWithMetadata so the
-   * prompt and the dot can never diverge: excludes running/provisional,
-   * terminal-unreconciled, status-uncertain, context-bloated, and
-   * stopped-retained records. Never mutates `lastUsedAt`.
+   * Read-only projection for the sidebar's history dot: per agent of a
+   * parent, the latest finished session (completed/error/cancelled).
+   * Appears as soon as the child reaches a canonical terminal state —
+   * parent acknowledgment (`markReconciled`) is NOT required, otherwise
+   * the dot lags until the parent reads the result.
+   *
+   * Recency is max(lastUsedAt, completedAt): finishing and markUsed
+   * both move the selection. Excludes running, status-uncertain, and
+   * stopped-retained. Never mutates lastUsedAt.
    */
   latestReconciledByAgent(
     parentSessionID: string,
   ): Map<string, ReusableSessionSelection> {
     const latest = new Map<string, ReusableSessionSelection>();
-    for (const job of this.list(parentSessionID)) {
-      if (!isReusable(job, this.maxContextLines)) continue;
+    for (const job of this.listSidebarHistory(parentSessionID)) {
       const selection: ReusableSessionSelection = {
         taskID: job.taskID,
         alias: job.alias,
@@ -1213,14 +1224,27 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       const current = latest.get(job.agent);
       if (
         current === undefined ||
-        selection.lastUsedAt > current.lastUsedAt ||
-        (selection.lastUsedAt === current.lastUsedAt &&
+        sidebarRecency(selection) > sidebarRecency(current) ||
+        (sidebarRecency(selection) === sidebarRecency(current) &&
           selection.taskID > current.taskID)
       ) {
         latest.set(job.agent, selection);
       }
     }
     return latest;
+  }
+
+  /** Same selection as latestReconciledByAgent, for every parent at once. */
+  latestReconciledByParentAgent() {
+    const byParent = new Map<string, Map<string, ReusableSessionSelection>>();
+    for (const { parentSessionID } of this.listSidebarHistory()) {
+      if (byParent.has(parentSessionID)) continue;
+      byParent.set(
+        parentSessionID,
+        this.latestReconciledByAgent(parentSessionID),
+      );
+    }
+    return byParent;
   }
 
   formatForPromptWithMetadata(
@@ -1231,7 +1255,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     const active = jobs.filter(
       (job) => job.state === 'running' || job.terminalUnreconciled,
     );
-    const reusable = jobs.filter((j) => isReusable(j, this.maxContextLines));
+    const reusable = this.listReusable(parentSessionID);
     const retained = jobs.filter(isRetainedStopped);
     const acknowledgedFailedSession = reusable.some((job) => {
       const terminal = job.terminalState ?? terminalStateOf(job.state);
@@ -1495,6 +1519,25 @@ function isReusable(
   }
 
   return sumContextLines(job) <= maxContextLines;
+}
+
+/** Sidebar history: canonical terminal (completed/error/cancelled), not
+ *  running, not status-uncertain, not stopped-retained. Parent
+ *  acknowledgment is NOT required — the transcript exists as soon as
+ *  the child finishes. */
+function isSidebarHistory(job: BackgroundJobRecord): boolean {
+  if (job.statusUncertain) return false;
+  const terminal = job.terminalState ?? terminalStateOf(job.state);
+  return (
+    terminal === 'completed' || terminal === 'error' || terminal === 'cancelled'
+  );
+}
+
+function sidebarRecency(selection: {
+  lastUsedAt: number;
+  completedAt?: number;
+}): number {
+  return Math.max(selection.lastUsedAt, selection.completedAt ?? 0);
 }
 
 function isRetainedStopped(job: BackgroundJobRecord): boolean {

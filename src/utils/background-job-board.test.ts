@@ -1989,12 +1989,29 @@ describe('BackgroundJobBoard', () => {
       });
     });
 
-    test('excludes running, terminal-unreconciled, statusUncertain, stopped-retained, and provisional jobs', () => {
+    test('includes a finished session before the parent acknowledges it', () => {
       const board = new BackgroundJobBoard();
-      // Reconciled baseline that must remain selected.
+      board.registerLaunch({
+        taskID: 'ses_done',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        now: 100,
+      });
+      board.updateStatus({
+        taskID: 'ses_done',
+        state: 'completed',
+        now: 200,
+      });
+
+      expect(
+        board.latestReconciledByAgent('parent-1').get('oracle')?.taskID,
+      ).toBe('ses_done');
+    });
+
+    test('excludes running, statusUncertain, and stopped-retained jobs', () => {
+      const board = new BackgroundJobBoard();
       seedReconciled(board, 'ses_ok');
 
-      // Running (also the "provisional" case: idle not yet confirmed).
       board.registerLaunch({
         taskID: 'ses_running',
         parentSessionID: 'parent-1',
@@ -2002,20 +2019,6 @@ describe('BackgroundJobBoard', () => {
         now: 100,
       });
 
-      // Terminal but never reconciled.
-      board.registerLaunch({
-        taskID: 'ses_unreconciled',
-        parentSessionID: 'parent-1',
-        agent: 'oracle',
-        now: 100,
-      });
-      board.updateStatus({
-        taskID: 'ses_unreconciled',
-        state: 'completed',
-        now: 200,
-      });
-
-      // Reconciled but wall-clock uncertain (not reusable per isReusable).
       board.registerLaunch({
         taskID: 'ses_uncertain',
         parentSessionID: 'parent-1',
@@ -2036,8 +2039,6 @@ describe('BackgroundJobBoard', () => {
       });
       board.markReconciled('ses_uncertain', 300);
 
-      // Stopped then reconciled = stopped-retained: recoverable only via
-      // revive, never a dot target.
       board.registerLaunch({
         taskID: 'ses_stopped',
         parentSessionID: 'parent-1',

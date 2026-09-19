@@ -554,15 +554,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // is never notified after dispose and no explicit unhook is wired
     // into the instance-disposed path. Revisit only if a board ever
     // outlives its generation.
-    const tuiReusableProjection = createTuiReusableProjection({
+    createTuiReusableProjection({
       board: backgroundJobBoard,
       projectDir: ctx.directory,
     });
     backgroundJobCoordinator.addLaunchIdentityListener((event) => {
       const directory = tuiActivityDirectory(event.taskID);
-      // Sidebar reusable dot (#1197 follow-up): track every parent that
-      // launches children so the board projection covers its section.
-      tuiReusableProjection.trackParent(event.parentSessionID);
       if (event.kind === 'registered') {
         if (event.parentSessionID && event.parentSessionID !== event.taskID) {
           recordTuiSessionParent(

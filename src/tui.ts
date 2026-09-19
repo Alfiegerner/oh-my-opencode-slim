@@ -379,6 +379,10 @@ export function isRefreshCurrent(
   return startedDirectory === currentDirectory;
 }
 
+function visibleConversationRoot(snapshot: TuiSnapshot, id?: string) {
+  return id === undefined ? undefined : resolveTuiSnapshotRoot(snapshot, id);
+}
+
 export function getActiveSidebarAgentNames(
   snapshot: TuiSnapshot,
   visibleRootID?: string,
@@ -391,10 +395,7 @@ export function getActiveSidebarAgentNames(
   // every window's subagents from one process, so only the session tree
   // can separate them — and a late-learned link re-roots both sides
   // consistently. Without a visible session (home route) keep the union.
-  const root =
-    visibleRootID === undefined
-      ? undefined
-      : resolveTuiSnapshotRoot(snapshot, visibleRootID);
+  const root = visibleConversationRoot(snapshot, visibleRootID);
   for (const [sessionID, agentName] of Object.entries(
     snapshot.activeSessions,
   )) {
@@ -438,8 +439,8 @@ export function getSidebarAgentTargets(
   snapshot: TuiSnapshot,
   visibleRootID?: string,
 ): SidebarAgentTargets[] {
-  if (visibleRootID === undefined) return [];
-  const root = resolveTuiSnapshotRoot(snapshot, visibleRootID);
+  const root = visibleConversationRoot(snapshot, visibleRootID);
+  if (root === undefined) return [];
   const byAgent = new Map<string, SidebarSessionTarget[]>();
   for (const [sessionID, agentName] of Object.entries(
     snapshot.activeSessions,
@@ -506,8 +507,8 @@ export function getSidebarReusableTargets(
   visibleRootID?: string,
 ): Map<string, SidebarReusableTarget> {
   const targets = new Map<string, SidebarReusableTarget>();
-  if (visibleRootID === undefined) return targets;
-  const root = resolveTuiSnapshotRoot(snapshot, visibleRootID);
+  const root = visibleConversationRoot(snapshot, visibleRootID);
+  if (root === undefined) return targets;
   for (const [parentSessionID, byAgent] of Object.entries(
     snapshot.reusableByAgent,
   )) {
@@ -844,47 +845,21 @@ function activityIndicator(
   );
 }
 
-/**
- * Static green dot: the latest reconciled session of this agent is still
- * accessible. A SEPARATE mouse target from the row name — clicking it
- * navigates to that session instead of the row's active-session behavior.
- *
- * OpenTUI bubbles mouseup from the leaf, so the dot handler calls
- * `stopPropagation()` (supported since @opentui/core 0.4.x — verified
- * against Renderable.processMouseEvent in the installed 0.5.11) to keep
- * the parent row handler from also firing. Hover highlights only the
- * glyph (success→accent fg toggle) without touching the row hover; the
- * row's own `out` handler ignores leave events while the pointer is
- * still inside the row, so moving onto the dot keeps the row lit.
- *
- * Static by design: no `animationNow` reads, nothing re-renders per tick.
- */
-function reusableDot(
-  target: SidebarReusableTarget,
-  theme: AgentRowTheme,
-  onNavigate: (taskID: string) => void,
-  hasSelectedText?: () => boolean,
-): JSX.Element {
-  const dot = text({ fg: theme.success ?? STATUS_ACTIVE_COLOR, width: 2 }, [
-    '●',
-  ]) as unknown as {
-    fg?: unknown;
-  };
-  const idleFg = theme.success ?? STATUS_ACTIVE_COLOR;
-  setProp(dot as never, 'onMouseOver', () => {
-    dot.fg = theme.accent ?? idleFg;
-  });
-  setProp(dot as never, 'onMouseOut', () => {
-    dot.fg = idleFg;
-  });
-  setProp(dot as never, 'onMouseUp', (event?: { button?: number }) => {
-    if (!shouldActivateRow(event, hasSelectedText)) return;
-    // The dot is a nested child of the clickable row; without this the
-    // bubbled event would ALSO fire the row's activate handler.
-    (event as { stopPropagation?: () => void })?.stopPropagation?.();
-    onNavigate(target.taskID);
-  });
-  return dot as unknown as JSX.Element;
+/** Visual-only history glyph. Click/hover belong to the row. */
+function historyDot(): JSX.Element {
+  return text(
+    {
+      // Emerald: softer than theme.success, distinct from running-state green.
+      fg: '#34d399',
+      width: 2,
+      selectable: false,
+    },
+    // ✦ over ●/◈: its ink sits in the mid-cell band, so the glyph optically
+    // centers against the agent label, and its narrow waist reads as spaced
+    // from the name without inserting a cell of whitespace (margins are
+    // whole-cell in this layout: no sub-cell nudging exists).
+    ['✦'],
+  );
 }
 
 function agentRow(
@@ -899,8 +874,7 @@ function agentRow(
   onClick?: () => void,
   hoverBackground?: unknown,
   hasSelectedText?: () => boolean,
-  reusable?: SidebarReusableTarget,
-  onReusableNavigate?: (taskID: string) => void,
+  showHistoryDot?: boolean,
 ): JSX.Element {
   const modelParts = splitSidebarModelId(model);
   const detailRows: JSX.Element[] = [];
@@ -935,11 +909,17 @@ function agentRow(
       shouldFill: true,
     },
     [
-      text({ fg: theme.textMuted, width: 14 }, [label]),
+      text(
+        {
+          fg: theme.textMuted,
+          wrapMode: 'none',
+          truncate: true,
+          flexShrink: 1,
+        },
+        [label],
+      ),
+      ...(showHistoryDot ? [historyDot()] : []),
       activityIndicator(active, now, theme),
-      ...(reusable && onReusableNavigate
-        ? [reusableDot(reusable, theme, onReusableNavigate, hasSelectedText)]
-        : []),
       ...(sessionCount !== undefined && sessionCount > 1
         ? [
             text({ fg: theme.textMuted, width: 4 }, [expanded ? ' ▴' : ' ▾']),
@@ -977,8 +957,7 @@ function compactAgentRow(
   onClick?: () => void,
   hoverBackground?: unknown,
   hasSelectedText?: () => boolean,
-  reusable?: SidebarReusableTarget,
-  onReusableNavigate?: (taskID: string) => void,
+  showHistoryDot?: boolean,
 ): JSX.Element {
   const modelName = splitSidebarModelId(model).model;
   const row = box(
@@ -997,18 +976,21 @@ function compactAgentRow(
           shouldFill: false,
         },
         [
-          text({ fg: theme.textMuted, width: 14 }, [label]),
+          text(
+            {
+              fg: theme.textMuted,
+              wrapMode: 'none',
+              truncate: true,
+              flexShrink: 1,
+            },
+            [label],
+          ),
+          ...(showHistoryDot ? [historyDot()] : []),
+          box({ flexGrow: 1, shouldFill: false }),
           activityIndicator(active, now, theme),
         ],
       ),
-      // Flexible space between the fixed name box and the model; the
-      // dot rides as its first child, hugging the name without
-      // widening the name box or shifting the model.
-      box({ flexDirection: 'row', flexGrow: 1, shouldFill: false }, [
-        ...(reusable && onReusableNavigate
-          ? [reusableDot(reusable, theme, onReusableNavigate, hasSelectedText)]
-          : []),
-      ]),
+      box({ flexDirection: 'row', flexGrow: 1, shouldFill: false }),
       text(
         {
           fg: theme.textMuted,
@@ -1233,26 +1215,30 @@ function renderSidebar(
         const variant = snapshot.agentVariants[agentName];
         const active = activeAgents.has(agentName);
         const sessions = targetsByAgent.get(agentName) ?? [];
-        // Rows only become interactive when this window can navigate AND
-        // the agent has live subagent sessions in this conversation.
+        const reusable = reusableByAgent.get(agentName);
+        // History is idle-only: while this agent has live sessions, #1197
+        // owns the row (navigate the live one / expand N). The dot and
+        // idle-row click appear only when nothing is running.
+        const history =
+          sessions.length === 0 && reusable !== undefined
+            ? reusable
+            : undefined;
         const clickable =
-          interaction?.navigate !== undefined && sessions.length > 0;
+          interaction?.navigate !== undefined &&
+          (sessions.length > 0 || history !== undefined);
         const expanded =
-          clickable && sessions.length > 1 && expandedAgents.has(agentName);
+          sessions.length > 1 && clickable && expandedAgents.has(agentName);
         const onAgentClick = clickable
           ? () => {
               if (sessions.length === 1) {
                 interaction?.navigate?.(sessions[0].sessionID);
-              } else {
+              } else if (sessions.length > 1) {
                 interaction?.toggleAgent(agentName);
+              } else if (history !== undefined) {
+                interaction?.navigate?.(history.taskID);
               }
             }
           : undefined;
-        const reusable = reusableByAgent.get(agentName);
-        const onReusableNavigate =
-          reusable !== undefined && navigate !== undefined
-            ? (taskID: string) => navigate(taskID)
-            : undefined;
         const agentRowEl = compactSidebar
           ? compactAgentRow(
               agentName,
@@ -1266,8 +1252,7 @@ function renderSidebar(
               onAgentClick,
               hoverBackground,
               interaction?.hasSelectedText,
-              reusable,
-              onReusableNavigate,
+              history !== undefined,
             )
           : agentRow(
               agentName,
@@ -1281,8 +1266,7 @@ function renderSidebar(
               onAgentClick,
               hoverBackground,
               interaction?.hasSelectedText,
-              reusable,
-              onReusableNavigate,
+              history !== undefined,
             );
         if (!expanded) return [agentRowEl];
         return [

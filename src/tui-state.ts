@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { TaskOutputState } from './utils/task';
+import type { ReusableSessionSelection } from './utils/background-job-board';
 
 /**
  * Per-session metadata projection for the clickable sidebar. Entries only
@@ -20,13 +20,7 @@ export interface TuiSessionDetails {
 /** Latest accessible reconciled session per agent of a parent session
  * (sidebar green dot). Written only by the host-side board projection;
  * the TUI never writes this section. Empty on hosts without a board. */
-export interface TuiReusableSession {
-  taskID: string;
-  alias: string;
-  terminalState: TaskOutputState;
-  completedAt?: number;
-  lastUsedAt: number;
-}
+export type TuiReusableSession = ReusableSessionSelection;
 
 export interface TuiSnapshot {
   version: 1;

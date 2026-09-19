@@ -51,12 +51,41 @@ describe('tui-reusable-projection', () => {
     board.markReconciled(taskID, opts.reconciledAt ?? launchAt + 100);
   }
 
+  test('a finished session is projected before the parent acknowledges it', () => {
+    const board = new BackgroundJobBoard();
+    const projection = createTuiReusableProjection({ board, projectDir });
+
+    try {
+      board.registerLaunch({
+        taskID: 'ses_1',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        description: 'ses_1 job',
+        now: 100,
+      });
+      board.updateStatus({
+        taskID: 'ses_1',
+        state: 'completed' as never,
+        resultSummary: 'done',
+        now: 150,
+      });
+
+      expect(
+        readTuiSnapshot(projectDir).reusableByAgent['parent-1']?.oracle,
+      ).toMatchObject({
+        taskID: 'ses_1',
+        terminalState: 'completed',
+      });
+    } finally {
+      projection.dispose();
+    }
+  });
+
   test('board mutation projects the latest reconciled session into the snapshot', () => {
     const board = new BackgroundJobBoard();
     const projection = createTuiReusableProjection({ board, projectDir });
 
     try {
-      projection.trackParent('parent-1');
       seedReconciled(board, 'ses_1');
 
       const snapshot = readTuiSnapshot(projectDir);
@@ -75,7 +104,6 @@ describe('tui-reusable-projection', () => {
     const board = new BackgroundJobBoard();
     const first = createTuiReusableProjection({ board, projectDir });
     try {
-      first.trackParent('parent-1');
       seedReconciled(board, 'ses_1');
       expect(
         readTuiSnapshot(projectDir).reusableByAgent['parent-1']?.oracle,
@@ -105,12 +133,11 @@ describe('tui-reusable-projection', () => {
     const projection = createTuiReusableProjection({ board, projectDir });
 
     try {
-      projection.trackParent('parent-1');
       seedReconciled(board, 'ses_1');
       const statePath = getTuiStatePath(projectDir);
 
       // A mutation that does not change the derived section (a new
-      // running job for an untracked parent) must not rewrite the file.
+      // running job, not yet reconciled) must not rewrite the file.
       let writes = 0;
       const writeSpy = spyOn(fsModule, 'writeFileSync').mockImplementation(
         (...args: Parameters<typeof fs.writeFileSync>) => {
@@ -139,7 +166,6 @@ describe('tui-reusable-projection', () => {
     const projection = createTuiReusableProjection({ board, projectDir });
 
     try {
-      projection.trackParent('parent-1');
       seedReconciled(board, 'ses_1');
       expect(readTuiSnapshot(projectDir).reusableByAgent['parent-1']).toEqual(
         expect.objectContaining({ oracle: expect.anything() }),
@@ -162,8 +188,6 @@ describe('tui-reusable-projection', () => {
       // Another writer persists a parent link; the projection must not
       // clobber sibling sections when it rewrites reusableByAgent.
       recordTuiSessionParent('ses_1', 'parent-1', projectDir);
-      projection.trackParent('parent-1');
-      projection.trackParent('parent-2');
       seedReconciled(board, 'ses_1', { agent: 'oracle' });
       board.registerLaunch({
         taskID: 'ses_fix',
