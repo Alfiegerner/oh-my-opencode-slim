@@ -603,6 +603,8 @@ export function createTaskSessionManagerHook(
         backgroundJobBoard,
         terminalGate,
         backgroundJobSupervisor: options.backgroundJobSupervisor,
+        backgroundTaskConcurrency: options.backgroundTaskConcurrency,
+        getModelForAgent: options.getModelForAgent,
         bindConcurrencyTicket: (taskID, pending) =>
           pending.concurrencyTicket?.bind(taskID),
         recordLifecycleSuppression: (taskID) =>
