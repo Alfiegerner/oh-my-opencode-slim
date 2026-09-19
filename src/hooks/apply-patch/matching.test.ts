@@ -2,7 +2,6 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   autoRescueComparators,
-  permissiveComparators,
   prefix,
   rescueByLcs,
   rescueByPrefixSuffix,
@@ -18,9 +17,9 @@ describe('apply-patch/matching', () => {
     );
   });
 
-  test('seek does not rescue trim-only matches with different indentation', () => {
+  test('seek matches trim-only differences with different indentation (native-compatible)', () => {
     expect(seek(['  console.log("hola");'], ['console.log("hola");'], 0)).toBe(
-      -1,
+      0,
     );
   });
 
@@ -208,8 +207,7 @@ describe('apply-patch/matching', () => {
     });
   });
 
-  test('comparator separation distinguishes safe rescue from permissive comparators', () => {
-    expect(autoRescueComparators).toHaveLength(4);
-    expect(permissiveComparators).toHaveLength(6);
+  test('comparator chain mirrors native matching passes', () => {
+    expect(autoRescueComparators).toHaveLength(6);
   });
 });
