@@ -271,6 +271,13 @@ export interface SessionReadinessOptions {
    * in-flight probes are aborted through this signal.
    */
   signal?: AbortSignal;
+  /**
+   * Project directory of the child session. Required in shared
+   * `opencode serve` topologies: without it the server routes
+   * `/session/status` to its own process.cwd() and never reports
+   * sessions spawned in other project directories as ready.
+   */
+  directory?: string;
 }
 
 const SESSION_READINESS_DEADLINE_MS = 2_000;
@@ -306,6 +313,9 @@ export async function waitForSessionReady(
   const signal = options.signal;
   const deadlineAt = now() + deadlineMs;
   const url = new URL('/session/status', serverUrl);
+  if (options.directory) {
+    url.searchParams.set('directory', options.directory);
+  }
 
   const abortedPromise = signal
     ? new Promise<false>((resolve) => {

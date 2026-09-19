@@ -294,6 +294,37 @@ describe('waitForSessionReady', () => {
     expect(delays).toEqual([50, 100]);
   });
 
+  test('probes /session/status with the child project directory when provided', async () => {
+    const { waitForSessionReady } = await importShared();
+    const seen: Array<string | null> = [];
+    const check = mock(async (checkUrl: URL) => {
+      seen.push(checkUrl.searchParams.get('directory'));
+      return true;
+    });
+    const ready = await waitForSessionReady(url, 'session-1', {
+      checkSessionReady: check,
+      delay: async () => {},
+      directory: '/home/user/project-b',
+    });
+    expect(ready).toBe(true);
+    expect(seen).toEqual(['/home/user/project-b']);
+  });
+
+  test('omits the directory query param when none is provided', async () => {
+    const { waitForSessionReady } = await importShared();
+    const seen: string[] = [];
+    const check = mock(async (checkUrl: URL) => {
+      seen.push(checkUrl.search);
+      return true;
+    });
+    const ready = await waitForSessionReady(url, 'session-1', {
+      checkSessionReady: check,
+      delay: async () => {},
+    });
+    expect(ready).toBe(true);
+    expect(seen).toEqual(['']);
+  });
+
   test('readiness timeout: returns false without ever succeeding', async () => {
     const { waitForSessionReady } = await importShared();
     const check = mock(async () => false);
