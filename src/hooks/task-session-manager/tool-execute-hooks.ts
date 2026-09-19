@@ -608,7 +608,32 @@ export async function handleToolExecuteAfter(
       return;
     }
 
-    deps.taskContextTracker.pendingManagedTaskIds.delete(taskId);
+    // An ID-only output still identifies this call's own child: a
+    // placeholder is promoted with the owning pending's launch metadata
+    // (identity-unresolved pendings paint nothing, per the identity rule),
+    // and once promoted the child is supervised and context-tracked like
+    // any parsed launch.
+    const promoted = deps.backgroundJobBoard.promoteProvisional(
+      taskId,
+      pending.parentSessionId,
+      pending.identityUnresolved
+        ? undefined
+        : {
+            agent: pending.agentType,
+            description: pending.label,
+            objective: pending.fullObjective,
+            background: pending.background,
+          },
+    );
+    if (promoted && !promoted.provisional) {
+      deps.bindConcurrencyTicket?.(promoted.taskID, pending);
+      if (exactCallConfirmed) {
+        deps.backgroundJobSupervisor?.onLaunch(promoted);
+      }
+      deps.taskContextTracker.pendingManagedTaskIds.add(taskId);
+    } else {
+      deps.taskContextTracker.pendingManagedTaskIds.delete(taskId);
+    }
     deps.backgroundJobBoard.addContext(
       taskId,
       deps.taskContextTracker.contextFilesForPrompt(taskId),

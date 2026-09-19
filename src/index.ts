@@ -783,6 +783,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       coordinator: sessionLifecycle,
     });
     backgroundJobCoordinator.addTerminalOutcomeListener((record) => {
+      // A placeholder is not delegated work; its stop is not recoverable
+      // by the parent until a task launch has attributed the session.
+      if (record.provisional === true) return;
       if (record.state !== 'stopped' || !record.terminalUnreconciled) return;
       orchestratorWakeScheduler.triggerStoppedJobRecovery(
         record.parentSessionID,

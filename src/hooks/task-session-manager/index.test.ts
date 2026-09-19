@@ -348,6 +348,50 @@ describe('task-session-manager hook', () => {
     expect(concurrency.snapshot()).toEqual({ active: 1, queued: 0 });
   });
 
+  test('an ID-only task output promotes its own placeholder with launch metadata', async () => {
+    const board = new BackgroundJobBoard();
+    const onLaunch = mock(() => {});
+    const { hook } = createHook({
+      backgroundJobBoard: board,
+      backgroundJobSupervisor: { onLaunch } as never,
+    });
+    board.registerLaunch({
+      taskID: 'ses_child',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      provisional: true,
+      now: 100,
+    });
+
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
+      {
+        args: {
+          background: true,
+          subagent_type: 'oracle',
+          description: 'owned call',
+        },
+      },
+    );
+    await hook['tool.execute.after'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'call-1' },
+      {
+        output:
+          'task_id: ses_child (for resuming to continue this task if needed)\n\n<task_result>done</task_result>',
+      },
+    );
+
+    const record = board.get('ses_child');
+    expect(record?.provisional).toBe(false);
+    expect(record?.state).toBe('running');
+    expect(record?.background).toBe(true);
+    expect(record?.description).toBe('owned call');
+    expect(record?.objective).toBe('owned call');
+    expect(onLaunch).toHaveBeenCalledWith(
+      expect.objectContaining({ taskID: 'ses_child' }),
+    );
+  });
+
   test('finishes a queued call after its manager generation is replaced', async () => {
     const concurrency = new BackgroundTaskConcurrency({
       defaultConcurrency: 1,

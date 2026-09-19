@@ -100,6 +100,11 @@ const TRANSPORT_MESSAGE_PATTERNS = [
   /^request timeout$/i,
   /^connect ECONNREFUSED\b/i,
   /^getaddrinfo ENOTFOUND\b/i,
+  // Bun's fetch aborts connections whose response headers never arrive
+  // (e.g. an upstream holding the request instead of answering) with this
+  // client-side phrasing. Classify it as failover so a hanging upstream
+  // triggers the model chain instead of dying as an opaque error.
+  /response headers timed out/i,
   // Provider SDKs also report connection failures with natural-language
   // messages (e.g. "stream error: Cannot connect to API") that carry no
   // transport code. Match the narrow phrase only.

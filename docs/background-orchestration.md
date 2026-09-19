@@ -69,6 +69,20 @@ Its job is to:
 
 Specialists do the work. The orchestrator manages the work.
 
+### Unattributed sessions and restart scope
+
+A child observed before it can be attributed to a task launch is retained as a
+provisional placeholder. It remains resolvable by task ID or alias for
+`task_status`, but is omitted from the operational Background Job Board listing.
+A stopped placeholder does not trigger a stopped-job recovery wake for its parent:
+it is not yet known to be delegated work. Attribution through the existing task
+launch path promotes it to an ordinary listed task, including recovery wakes.
+This distinction uses explicit provenance, not agent names or description text.
+
+Aliases and reusable-session history are process-local and do not survive process
+restarts as a reusable board. Post-restart recovery is partial and best-effort;
+it does not guarantee restoration of those aliases or the complete history.
+
 ---
 
 ## Execution Loop

@@ -126,6 +126,14 @@ describe('isFailoverError', () => {
     ).toBe(true);
   });
 
+  test('returns true for client-side response header timeouts (held upstreams)', () => {
+    expect(
+      isFailoverError({
+        message: 'Provider response headers timed out after 300000ms',
+      }),
+    ).toBe(true);
+  });
+
   test('returns true for codex quota-threshold errors', () => {
     expect(
       isFailoverError({

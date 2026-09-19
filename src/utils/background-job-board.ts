@@ -73,6 +73,8 @@ export interface BackgroundJobRecord {
   description: string;
   objective?: string;
   state: BackgroundJobState;
+  /** Unattributed lifecycle placeholder, not yet delegated work. */
+  provisional?: boolean;
   /** True only when the native task call explicitly supplied background:true. */
   background: boolean;
   timedOut: boolean;
@@ -128,6 +130,8 @@ export interface BackgroundJobLaunchInput {
   description?: string;
   objective?: string;
   background?: boolean;
+  /** Only unattributed session.created placeholders opt in. */
+  provisional?: true;
   /** Preserve the current run when this is a duplicate lifecycle observation. */
   preserveRun?: boolean;
   /** Lease proving that this is an authorized same-ID relaunch observation. */
@@ -320,9 +324,21 @@ export class BackgroundJobBoard implements BackgroundJobStore {
 
     if (existing) {
       if (input.preserveRun) {
-        if (existing.state !== 'running') return existing;
+        if (existing.state !== 'running') {
+          // Attribution via the owning call promotes a placeholder even when
+          // its run already reached a terminal state; state, generation, and
+          // terminal evidence stay untouched.
+          if (!existing.provisional) return existing;
+          const promoted = { ...existing, provisional: false };
+          this.jobs.set(input.taskID, promoted);
+          // The stop-time notification skipped this record while it was
+          // still provisional; the attributed record owes the wake.
+          this.notifyTerminalStateListeners(input.taskID);
+          return promoted;
+        }
         const observed = {
           ...existing,
+          provisional: false,
           agent: input.agent || existing.agent,
           description: input.description || existing.description,
           objective: input.objective ?? existing.objective,
@@ -334,6 +350,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
 
       const updated = {
         ...existing,
+        provisional: false,
         generation,
         terminalRevision: 0,
         activityRevision: 0,
@@ -368,6 +385,8 @@ export class BackgroundJobBoard implements BackgroundJobStore {
 
     const record: BackgroundJobRecord = {
       taskID: input.taskID,
+      // Keep the property absent for ordinary launches and legacy records.
+      ...(input.provisional === true ? { provisional: true } : {}),
       generation,
       terminalRevision: 0,
       activityRevision: 0,
@@ -1171,11 +1190,58 @@ export class BackgroundJobBoard implements BackgroundJobStore {
   }
 
   hasRunning(parentSessionID: string): boolean {
-    return this.list(parentSessionID).some((job) => job.state === 'running');
+    // A placeholder is not delegated work: it must neither gate a human
+    // wait nor justify a recovery wake on its own.
+    return this.list(parentSessionID).some(
+      (job) => !job.provisional && job.state === 'running',
+    );
   }
 
   hasTerminalUnreconciled(parentSessionID: string): boolean {
-    return this.list(parentSessionID).some((job) => job.terminalUnreconciled);
+    return this.list(parentSessionID).some(
+      (job) => !job.provisional && job.terminalUnreconciled,
+    );
+  }
+
+  /** Attributing evidence — the owning call's output or a cross-board
+   * adoption — promotes a placeholder into a tracked task without
+   * touching its run state. When the caller knows the owning parent, a
+   * mismatched record is left untouched. */
+  promoteProvisional(
+    taskID: string,
+    expectedParentSessionID?: string,
+    metadata?: {
+      agent?: string;
+      description?: string;
+      objective?: string;
+      background?: boolean;
+    },
+  ): BackgroundJobRecord | undefined {
+    const record = this.jobs.get(taskID);
+    if (!record?.provisional) return record;
+    if (
+      expectedParentSessionID !== undefined &&
+      record.parentSessionID !== expectedParentSessionID
+    ) {
+      return record;
+    }
+    const promoted = metadata
+      ? {
+          ...record,
+          provisional: false,
+          agent: metadata.agent || record.agent,
+          description: metadata.description || record.description,
+          objective: metadata.objective ?? record.objective,
+          background: record.background || metadata.background === true,
+        }
+      : { ...record, provisional: false };
+    this.jobs.set(taskID, promoted);
+    if (promoted.state !== 'running') {
+      // The stop-time notification skipped this record while it was
+      // still provisional; the attributed record owes the wake.
+      this.notifyTerminalStateListeners(taskID);
+    }
+    return promoted;
   }
 
   hasConvergenceSignals(taskID: string, threshold = 3): boolean {
@@ -1263,7 +1329,11 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     parentSessionID: string,
     _now?: number,
   ): BackgroundJobPromptMetadata | undefined {
-    const jobs = this.list(parentSessionID);
+    // Keep placeholders resolvable, but out of every operational section
+    // and the corresponding terminal-consumption metadata.
+    const jobs = this.list(parentSessionID).filter(
+      (job) => job.provisional !== true,
+    );
     const active = jobs.filter(
       (job) => job.state === 'running' || job.terminalUnreconciled,
     );
