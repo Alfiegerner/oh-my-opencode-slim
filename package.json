@@ -51,6 +51,7 @@
     "README.zh-CN.md",
     "README.ja-JP.md",
     "README.ko-KR.md",
+    "README.fa-IR.md",
     "LICENSE"
   ],
   "// build:plugin": "Keeps bundling src/tui.ts -> dist/tui.js: required by scripts/verify-release-artifact.ts (packagedRequiredFiles) and loaded by v1 TUI hosts. The v2 TUI entry is dist/tui2.js (see build:tui / the ./tui export).",
