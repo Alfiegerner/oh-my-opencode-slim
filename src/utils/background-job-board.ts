@@ -1208,41 +1208,53 @@ export class BackgroundJobBoard implements BackgroundJobStore {
    * both move the selection. Excludes running, status-uncertain, and
    * stopped-retained. Never mutates lastUsedAt.
    */
+  /** Shared comparator for the sidebar projection: recency, then taskID
+   *  tiebreak. Single implementation backing both projections below. */
+  private upsertSidebarSelection(
+    latest: Map<string, ReusableSessionSelection>,
+    job: BackgroundJobRecord,
+  ): void {
+    const selection: ReusableSessionSelection = {
+      taskID: job.taskID,
+      alias: job.alias,
+      terminalState:
+        job.terminalState ?? terminalStateOf(job.state) ?? 'completed',
+      completedAt: job.completedAt,
+      lastUsedAt: job.lastUsedAt,
+    };
+    const current = latest.get(job.agent);
+    if (
+      current === undefined ||
+      sidebarRecency(selection) > sidebarRecency(current) ||
+      (sidebarRecency(selection) === sidebarRecency(current) &&
+        selection.taskID > current.taskID)
+    ) {
+      latest.set(job.agent, selection);
+    }
+  }
+
   latestReconciledByAgent(
     parentSessionID: string,
   ): Map<string, ReusableSessionSelection> {
     const latest = new Map<string, ReusableSessionSelection>();
     for (const job of this.listSidebarHistory(parentSessionID)) {
-      const selection: ReusableSessionSelection = {
-        taskID: job.taskID,
-        alias: job.alias,
-        terminalState:
-          job.terminalState ?? terminalStateOf(job.state) ?? 'completed',
-        completedAt: job.completedAt,
-        lastUsedAt: job.lastUsedAt,
-      };
-      const current = latest.get(job.agent);
-      if (
-        current === undefined ||
-        sidebarRecency(selection) > sidebarRecency(current) ||
-        (sidebarRecency(selection) === sidebarRecency(current) &&
-          selection.taskID > current.taskID)
-      ) {
-        latest.set(job.agent, selection);
-      }
+      this.upsertSidebarSelection(latest, job);
     }
     return latest;
   }
 
-  /** Same selection as latestReconciledByAgent, for every parent at once. */
+  /** Same selection as latestReconciledByAgent, for every parent at once.
+   *  Single pass over the board: every mutation runs this synchronously,
+   *  so per-parent rescans (O(parents x jobs)) are not acceptable here. */
   latestReconciledByParentAgent() {
     const byParent = new Map<string, Map<string, ReusableSessionSelection>>();
-    for (const { parentSessionID } of this.listSidebarHistory()) {
-      if (byParent.has(parentSessionID)) continue;
-      byParent.set(
-        parentSessionID,
-        this.latestReconciledByAgent(parentSessionID),
-      );
+    for (const job of this.listSidebarHistory()) {
+      let latest = byParent.get(job.parentSessionID);
+      if (!latest) {
+        latest = new Map<string, ReusableSessionSelection>();
+        byParent.set(job.parentSessionID, latest);
+      }
+      this.upsertSidebarSelection(latest, job);
     }
     return byParent;
   }
