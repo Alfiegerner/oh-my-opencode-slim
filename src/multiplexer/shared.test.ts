@@ -325,6 +325,50 @@ describe('waitForSessionReady', () => {
     expect(seen).toEqual(['']);
   });
 
+  test('skips the directory param for percent-bearing paths', async () => {
+    const { waitForSessionReady } = await importShared();
+    const seen: string[] = [];
+    const check = mock(async (checkUrl: URL) => {
+      seen.push(checkUrl.search);
+      return true;
+    });
+    const ready = await waitForSessionReady(url, 'session-1', {
+      checkSessionReady: check,
+      delay: async () => {},
+      directory: '/tmp/a%20b',
+    });
+    expect(ready).toBe(true);
+    expect(seen).toEqual(['']);
+  });
+
+  test('default readiness falls back to a directory-less probe on 400', async () => {
+    const { defaultSessionReady } = await importShared();
+    const calls: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown) => {
+      const target = String(input);
+      calls.push(target);
+      if (target.includes('directory=')) {
+        return new Response('bad request', { status: 400 });
+      }
+      return Response.json({ 'session-1': { type: 'busy' } });
+    }) as typeof fetch;
+    try {
+      const ready = await defaultSessionReady(
+        new URL('http://127.0.0.1:7777/session/status?directory=%2Frepo'),
+        'session-1',
+        new AbortController().signal,
+      );
+      expect(ready).toBe(true);
+      expect(calls).toEqual([
+        'http://127.0.0.1:7777/session/status?directory=%2Frepo',
+        'http://127.0.0.1:7777/session/status',
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test('readiness timeout: returns false without ever succeeding', async () => {
     const { waitForSessionReady } = await importShared();
     const check = mock(async () => false);

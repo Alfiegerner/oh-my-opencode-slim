@@ -179,6 +179,27 @@ describe('CmuxMultiplexer', () => {
     ]);
   });
 
+  test('default readiness skips the directory param for percent-bearing paths', async () => {
+    const api = client();
+    const requested: string[] = [];
+    globalThis.fetch = mock(async (input) => {
+      requested.push(String(input));
+      return Response.json({ target: { type: 'busy' } });
+    }) as typeof fetch;
+    expect(
+      await new CmuxMultiplexer(api, {
+        opencodeBinary: '/opt/opencode',
+        pathExists: () => true,
+      }).spawnPane(
+        'target',
+        'agent',
+        'http://127.0.0.1:7777/base',
+        '/tmp/a%20b',
+      ),
+    ).toEqual(expect.objectContaining({ success: true }));
+    expect(requested).toEqual(['http://127.0.0.1:7777/session/status']);
+  });
+
   test('uses stable create IDs for right/down anchors and close', async () => {
     const api = client();
     const instance = mux(api);

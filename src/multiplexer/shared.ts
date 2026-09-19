@@ -275,7 +275,9 @@ export interface SessionReadinessOptions {
    * Project directory of the child session. Required in shared
    * `opencode serve` topologies: without it the server routes
    * `/session/status` to its own process.cwd() and never reports
-   * sessions spawned in other project directories as ready.
+   * sessions spawned in other project directories as ready. Paths with a
+   * literal '%' are skipped (the core decodes the query twice), and
+   * servers rejecting the query fall back to a directory-less probe.
    */
   directory?: string;
 }
@@ -313,9 +315,7 @@ export async function waitForSessionReady(
   const signal = options.signal;
   const deadlineAt = now() + deadlineMs;
   const url = new URL('/session/status', serverUrl);
-  if (options.directory) {
-    url.searchParams.set('directory', options.directory);
-  }
+  applyDirectoryParam(url, options.directory ?? '');
 
   const abortedPromise = signal
     ? new Promise<false>((resolve) => {
@@ -375,12 +375,29 @@ export async function waitForSessionReady(
   }
 }
 
-async function defaultSessionReady(
+/**
+ * Attach the child directory to a status URL. Paths containing a literal
+ * '%' are skipped: the core decodes the value twice, so percent-bearing
+ * paths would route to the wrong instance.
+ */
+export function applyDirectoryParam(url: URL, directory: string): void {
+  if (!directory || directory.includes('%')) return;
+  url.searchParams.set('directory', directory);
+}
+
+export async function defaultSessionReady(
   url: URL,
   sessionId: string,
   signal: AbortSignal,
 ): Promise<boolean> {
-  const response = await fetch(url, { signal });
+  let response = await fetch(url, { signal });
+  if (response.status === 400 && url.searchParams.has('directory')) {
+    // Servers older than 2026-05-09 reject the query: fall back to the
+    // directory-less probe instead of timing out a live session. The URL
+    // keeps the param off for the remaining attempts.
+    url.searchParams.delete('directory');
+    response = await fetch(url, { signal });
+  }
   if (!response.ok) return false;
   const statuses = (await response.json()) as Record<
     string,

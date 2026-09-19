@@ -2,7 +2,9 @@ import type { MultiplexerLayout } from '../../config/schema';
 import { crossSpawn } from '../../utils/compat';
 import { log } from '../../utils/logger';
 import {
+  applyDirectoryParam,
   buildOpencodeAttachCommand,
+  defaultSessionReady,
   findBinary,
   resolveHostOpencodeBinary,
 } from '../shared';
@@ -149,7 +151,7 @@ export class CmuxMultiplexer implements Multiplexer {
     if (!this.opencodeBinary) return { success: false, error: 'hard' };
     const opencodeBinary = this.opencodeBinary;
     const statusUrl = new URL('/session/status', serverUrl);
-    statusUrl.searchParams.set('directory', directory);
+    applyDirectoryParam(statusUrl, directory);
     if (!(await this.waitForSession(statusUrl, sessionId))) {
       log('[cmux] spawnPane failed', {
         stage: 'readinessTimeout',
@@ -723,22 +725,6 @@ function classifyCreateError(
 
 function errorName(error: unknown): string {
   return error instanceof Error ? error.name : typeof error;
-}
-
-async function defaultSessionReady(
-  url: URL,
-  sessionId: string,
-  signal: AbortSignal,
-): Promise<boolean> {
-  const response = await fetch(url, { signal });
-  if (!response.ok) return false;
-  const statuses = (await response.json()) as Record<
-    string,
-    { type?: string } | undefined
-  >;
-  return ['idle', 'running', 'busy', 'retry'].includes(
-    statuses[sessionId]?.type ?? '',
-  );
 }
 
 function defaultDelay(milliseconds: number): Promise<void> {
