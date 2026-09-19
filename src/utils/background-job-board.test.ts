@@ -1933,4 +1933,250 @@ describe('BackgroundJobBoard', () => {
       expect(prompt).toContain('Context read by');
     });
   });
+
+  describe('latestReconciledByAgent (sidebar dot)', () => {
+    /** Seed one oracle job and walk it to reconciled with controlled clocks. */
+    function seedReconciled(
+      board: BackgroundJobBoard,
+      taskID: string,
+      opts: {
+        parent?: string;
+        agent?: string;
+        launchAt?: number;
+        completedAt?: number;
+        reconciledAt?: number;
+        state?: 'completed' | 'error' | 'cancelled';
+      } = {},
+    ) {
+      const parent = opts.parent ?? 'parent-1';
+      const agent = opts.agent ?? 'oracle';
+      const launchAt = opts.launchAt ?? 100;
+      board.registerLaunch({
+        taskID,
+        parentSessionID: parent,
+        agent,
+        description: `${taskID} job`,
+        now: launchAt,
+      });
+      board.updateStatus({
+        taskID,
+        state: opts.state ?? 'completed',
+        resultSummary: 'done',
+        now: opts.completedAt ?? launchAt + 100,
+      });
+      board.markReconciled(taskID, opts.reconciledAt ?? launchAt + 200);
+    }
+
+    test('selects max lastUsedAt per agent across four reconciled sessions', () => {
+      // Cap 4: every seeded session stays accessible, so the assertion
+      // exercises selection, not LRU eviction (covered separately).
+      const board = new BackgroundJobBoard({ maxReusablePerAgent: 4 });
+      seedReconciled(board, 'ses_a', { launchAt: 100, reconciledAt: 300 });
+      seedReconciled(board, 'ses_b', { launchAt: 400, reconciledAt: 600 });
+      seedReconciled(board, 'ses_c', { launchAt: 700, reconciledAt: 900 });
+      seedReconciled(board, 'ses_d', { launchAt: 1000, reconciledAt: 1200 });
+      expect(
+        board.latestReconciledByAgent('parent-1').get('oracle')?.taskID,
+      ).toBe('ses_d');
+
+      // ses_a becomes the most recently used despite being oldest-launched.
+      board.markUsed('parent-1', 'ses_a', 5000);
+
+      const latest = board.latestReconciledByAgent('parent-1');
+      expect(latest.get('oracle')).toMatchObject({
+        taskID: 'ses_a',
+        terminalState: 'completed',
+      });
+    });
+
+    test('excludes running, terminal-unreconciled, statusUncertain, stopped-retained, and provisional jobs', () => {
+      const board = new BackgroundJobBoard();
+      // Reconciled baseline that must remain selected.
+      seedReconciled(board, 'ses_ok');
+
+      // Running (also the "provisional" case: idle not yet confirmed).
+      board.registerLaunch({
+        taskID: 'ses_running',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        now: 100,
+      });
+
+      // Terminal but never reconciled.
+      board.registerLaunch({
+        taskID: 'ses_unreconciled',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        now: 100,
+      });
+      board.updateStatus({
+        taskID: 'ses_unreconciled',
+        state: 'completed',
+        now: 200,
+      });
+
+      // Reconciled but wall-clock uncertain (not reusable per isReusable).
+      board.registerLaunch({
+        taskID: 'ses_uncertain',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        now: 100,
+      });
+      board.claimWallClockDeadline({
+        taskID: 'ses_uncertain',
+        generation: board.get('ses_uncertain')?.generation ?? -1,
+        now: 150,
+      });
+      board.finalizeWallClockTimeout({
+        taskID: 'ses_uncertain',
+        generation: board.get('ses_uncertain')?.generation ?? -1,
+        statusUncertain: true,
+        resultSummary: 'status unavailable',
+        now: 200,
+      });
+      board.markReconciled('ses_uncertain', 300);
+
+      // Stopped then reconciled = stopped-retained: recoverable only via
+      // revive, never a dot target.
+      board.registerLaunch({
+        taskID: 'ses_stopped',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        now: 100,
+      });
+      board.markStopped('ses_stopped', 'no native result', 110, undefined, 110);
+      board.markReconciled('ses_stopped', 300);
+
+      const latest = board.latestReconciledByAgent('parent-1');
+      expect(latest.get('oracle')?.taskID).toBe('ses_ok');
+      expect(new Set(latest.keys())).toEqual(new Set(['oracle']));
+    });
+
+    test('covers every reconciled terminal state: completed, error, cancelled', () => {
+      const board = new BackgroundJobBoard();
+      seedReconciled(board, 'ses_done', {
+        agent: 'explorer',
+        state: 'completed',
+      });
+      seedReconciled(board, 'ses_err', { agent: 'fixer', state: 'error' });
+      seedReconciled(board, 'ses_cancel', {
+        agent: 'designer',
+        state: 'cancelled',
+      });
+
+      const latest = board.latestReconciledByAgent('parent-1');
+      expect(latest.get('explorer')?.terminalState).toBe('completed');
+      expect(latest.get('fixer')?.terminalState).toBe('error');
+      expect(latest.get('designer')?.terminalState).toBe('cancelled');
+    });
+
+    test('markUsed on an older session moves the selection (user override)', () => {
+      const board = new BackgroundJobBoard();
+      seedReconciled(board, 'ses_old', { launchAt: 100, reconciledAt: 300 });
+      seedReconciled(board, 'ses_new', { launchAt: 400, reconciledAt: 600 });
+
+      expect(
+        board.latestReconciledByAgent('parent-1').get('oracle')?.taskID,
+      ).toBe('ses_new');
+
+      // Explicit reuse of the old session must win the dot.
+      board.markUsed('parent-1', 'ses_old', 5000);
+      expect(
+        board.latestReconciledByAgent('parent-1').get('oracle')?.taskID,
+      ).toBe('ses_old');
+    });
+
+    test('LRU trim beyond maxReusablePerAgent evicts the oldest and keeps the selection correct', () => {
+      const board = new BackgroundJobBoard({ maxReusablePerAgent: 2 });
+      seedReconciled(board, 'ses_1', { launchAt: 100, reconciledAt: 300 });
+      seedReconciled(board, 'ses_2', { launchAt: 400, reconciledAt: 600 });
+      seedReconciled(board, 'ses_3', { launchAt: 700, reconciledAt: 900 });
+
+      // The oldest was evicted by the count cap; selection falls to the
+      // newest survivor.
+      expect(board.get('ses_1')).toBeUndefined();
+      const latest = board.latestReconciledByAgent('parent-1');
+      expect(latest.get('oracle')?.taskID).toBe('ses_3');
+    });
+
+    test('relaunch of the selected session (no preserveRun) falls back to the previous reconciled', () => {
+      const board = new BackgroundJobBoard();
+      seedReconciled(board, 'ses_first', { launchAt: 100, reconciledAt: 300 });
+      seedReconciled(board, 'ses_second', { launchAt: 400, reconciledAt: 600 });
+      expect(
+        board.latestReconciledByAgent('parent-1').get('oracle')?.taskID,
+      ).toBe('ses_second');
+
+      const lease = board.acquireRelaunchLease(
+        'ses_second',
+        board.get('ses_second')?.generation ?? -1,
+      );
+      expect(lease).toBeDefined();
+      board.registerLaunch({
+        taskID: 'ses_second',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        relaunchLease: lease,
+        now: 1000,
+      });
+
+      // The relaunched job is running again — only the older reconciled
+      // session remains a dot target.
+      const latest = board.latestReconciledByAgent('parent-1');
+      expect(latest.get('oracle')?.taskID).toBe('ses_first');
+    });
+
+    test('scopes by parentSessionID; drop and clearParent empty the projection', () => {
+      const board = new BackgroundJobBoard();
+      seedReconciled(board, 'ses_mine', { parent: 'parent-1' });
+      seedReconciled(board, 'ses_other', { parent: 'parent-2' });
+
+      expect(
+        board.latestReconciledByAgent('parent-1').get('oracle')?.taskID,
+      ).toBe('ses_mine');
+      expect(
+        board.latestReconciledByAgent('parent-2').get('oracle')?.taskID,
+      ).toBe('ses_other');
+      expect(board.latestReconciledByAgent('parent-3').size).toBe(0);
+
+      board.drop('ses_mine');
+      expect(board.latestReconciledByAgent('parent-1').size).toBe(0);
+
+      board.clearParent('parent-2');
+      expect(board.latestReconciledByAgent('parent-2').size).toBe(0);
+    });
+
+    test('mutation listener fires on launch, trim, and drop', () => {
+      const board = new BackgroundJobBoard({ maxReusablePerAgent: 1 });
+      let calls = 0;
+      board.addMutationListener(() => {
+        calls += 1;
+      });
+
+      seedReconciled(board, 'ses_1', { launchAt: 100, reconciledAt: 300 });
+      const afterFirst = calls;
+      expect(afterFirst).toBeGreaterThan(0);
+
+      // Second reconciled session trims the first (count cap 1).
+      seedReconciled(board, 'ses_2', { launchAt: 400, reconciledAt: 600 });
+      const afterTrim = calls;
+      expect(afterTrim).toBeGreaterThan(afterFirst);
+
+      board.drop('ses_2');
+      expect(calls).toBeGreaterThan(afterTrim);
+
+      board.removeMutationListener(() => {});
+      expect(calls).toBeGreaterThan(0);
+    });
+
+    test('latestReconciledByAgent never mutates lastUsedAt (read-only)', () => {
+      const board = new BackgroundJobBoard();
+      seedReconciled(board, 'ses_1', { launchAt: 100, reconciledAt: 300 });
+      const before = board.get('ses_1')?.lastUsedAt;
+
+      board.latestReconciledByAgent('parent-1');
+
+      expect(board.get('ses_1')?.lastUsedAt).toBe(before);
+    });
+  });
 });

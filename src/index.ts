@@ -114,6 +114,7 @@ import {
   collapseSystemInPlace,
   looksLikeMainChatRequest,
 } from './utils/system-collapse';
+import { createTuiReusableProjection } from './utils/tui-reusable-projection';
 import { createV2Setup } from './v2';
 import {
   isInternalAdmission,
@@ -547,8 +548,21 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     // Project launch identity (alias↔session) into TUI state so the
     // clickable sidebar can label active subagent sessions. Best-effort:
     // a failed tui-state write must never fail a launch.
+    //
+    // Generation-scoped by construction: the projector listens on THIS
+    // generation's board, which dies with the generation, so its listener
+    // is never notified after dispose and no explicit unhook is wired
+    // into the instance-disposed path. Revisit only if a board ever
+    // outlives its generation.
+    const tuiReusableProjection = createTuiReusableProjection({
+      board: backgroundJobBoard,
+      projectDir: ctx.directory,
+    });
     backgroundJobCoordinator.addLaunchIdentityListener((event) => {
       const directory = tuiActivityDirectory(event.taskID);
+      // Sidebar reusable dot (#1197 follow-up): track every parent that
+      // launches children so the board projection covers its section.
+      tuiReusableProjection.trackParent(event.parentSessionID);
       if (event.kind === 'registered') {
         if (event.parentSessionID && event.parentSessionID !== event.taskID) {
           recordTuiSessionParent(

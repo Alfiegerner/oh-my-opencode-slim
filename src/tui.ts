@@ -485,6 +485,50 @@ function disambiguateDuplicateAliases(
   });
 }
 
+/** One clickable reusable destination: the latest reconciled session of
+ * an agent in the visible conversation (sidebar green dot). */
+export interface SidebarReusableTarget {
+  taskID: string;
+  alias: string;
+  lastUsedAt: number;
+}
+
+/**
+ * Latest reconciled reusable session per agent for the visible
+ * conversation's sidebar dot. Mirrors the parent-scoping of
+ * getSidebarAgentTargets (#1147): only entries whose parent session
+ * resolves to the same conversation root as the visible session are
+ * offered; without a visible session there is no conversation to scope
+ * to and no dots are rendered.
+ */
+export function getSidebarReusableTargets(
+  snapshot: TuiSnapshot,
+  visibleRootID?: string,
+): Map<string, SidebarReusableTarget> {
+  const targets = new Map<string, SidebarReusableTarget>();
+  if (visibleRootID === undefined) return targets;
+  const root = resolveTuiSnapshotRoot(snapshot, visibleRootID);
+  for (const [parentSessionID, byAgent] of Object.entries(
+    snapshot.reusableByAgent,
+  )) {
+    if (resolveTuiSnapshotRoot(snapshot, parentSessionID) !== root) continue;
+    for (const [agentName, entry] of Object.entries(byAgent)) {
+      const current = targets.get(agentName);
+      // Multiple parents of the same visible tree can hold the same
+      // agent (nested dispatch): the dot must open the most recently
+      // used entry, not whichever parent happened to be iterated last.
+      if (current === undefined || entry.lastUsedAt >= current.lastUsedAt) {
+        targets.set(agentName, {
+          taskID: entry.taskID,
+          alias: entry.alias,
+          lastUsedAt: entry.lastUsedAt,
+        });
+      }
+    }
+  }
+  return targets;
+}
+
 function compareSidebarTargets(
   a: SidebarSessionTarget,
   b: SidebarSessionTarget,
@@ -800,6 +844,49 @@ function activityIndicator(
   );
 }
 
+/**
+ * Static green dot: the latest reconciled session of this agent is still
+ * accessible. A SEPARATE mouse target from the row name — clicking it
+ * navigates to that session instead of the row's active-session behavior.
+ *
+ * OpenTUI bubbles mouseup from the leaf, so the dot handler calls
+ * `stopPropagation()` (supported since @opentui/core 0.4.x — verified
+ * against Renderable.processMouseEvent in the installed 0.5.11) to keep
+ * the parent row handler from also firing. Hover highlights only the
+ * glyph (success→accent fg toggle) without touching the row hover; the
+ * row's own `out` handler ignores leave events while the pointer is
+ * still inside the row, so moving onto the dot keeps the row lit.
+ *
+ * Static by design: no `animationNow` reads, nothing re-renders per tick.
+ */
+function reusableDot(
+  target: SidebarReusableTarget,
+  theme: AgentRowTheme,
+  onNavigate: (taskID: string) => void,
+  hasSelectedText?: () => boolean,
+): JSX.Element {
+  const dot = text({ fg: theme.success ?? STATUS_ACTIVE_COLOR, width: 2 }, [
+    '●',
+  ]) as unknown as {
+    fg?: unknown;
+  };
+  const idleFg = theme.success ?? STATUS_ACTIVE_COLOR;
+  setProp(dot as never, 'onMouseOver', () => {
+    dot.fg = theme.accent ?? idleFg;
+  });
+  setProp(dot as never, 'onMouseOut', () => {
+    dot.fg = idleFg;
+  });
+  setProp(dot as never, 'onMouseUp', (event?: { button?: number }) => {
+    if (!shouldActivateRow(event, hasSelectedText)) return;
+    // The dot is a nested child of the clickable row; without this the
+    // bubbled event would ALSO fire the row's activate handler.
+    (event as { stopPropagation?: () => void })?.stopPropagation?.();
+    onNavigate(target.taskID);
+  });
+  return dot as unknown as JSX.Element;
+}
+
 function agentRow(
   label: string,
   model: string,
@@ -812,6 +899,8 @@ function agentRow(
   onClick?: () => void,
   hoverBackground?: unknown,
   hasSelectedText?: () => boolean,
+  reusable?: SidebarReusableTarget,
+  onReusableNavigate?: (taskID: string) => void,
 ): JSX.Element {
   const modelParts = splitSidebarModelId(model);
   const detailRows: JSX.Element[] = [];
@@ -848,6 +937,9 @@ function agentRow(
     [
       text({ fg: theme.textMuted, width: 14 }, [label]),
       activityIndicator(active, now, theme),
+      ...(reusable && onReusableNavigate
+        ? [reusableDot(reusable, theme, onReusableNavigate, hasSelectedText)]
+        : []),
       ...(sessionCount !== undefined && sessionCount > 1
         ? [
             text({ fg: theme.textMuted, width: 4 }, [expanded ? ' ▴' : ' ▾']),
@@ -885,6 +977,8 @@ function compactAgentRow(
   onClick?: () => void,
   hoverBackground?: unknown,
   hasSelectedText?: () => boolean,
+  reusable?: SidebarReusableTarget,
+  onReusableNavigate?: (taskID: string) => void,
 ): JSX.Element {
   const modelName = splitSidebarModelId(model).model;
   const row = box(
@@ -907,6 +1001,14 @@ function compactAgentRow(
           activityIndicator(active, now, theme),
         ],
       ),
+      // Flexible space between the fixed name box and the model; the
+      // dot rides as its first child, hugging the name without
+      // widening the name box or shifting the model.
+      box({ flexDirection: 'row', flexGrow: 1, shouldFill: false }, [
+        ...(reusable && onReusableNavigate
+          ? [reusableDot(reusable, theme, onReusableNavigate, hasSelectedText)]
+          : []),
+      ]),
       text(
         {
           fg: theme.textMuted,
@@ -1074,6 +1176,14 @@ function renderSidebar(
       group.sessions,
     ]),
   );
+  // Green dot (#1197 follow-up): only rendered when clickable — a dot
+  // without navigation would be dead pixels (decision: no navigate, no
+  // dot, no handler).
+  const navigate = interaction?.navigate;
+  const reusableByAgent =
+    navigate === undefined
+      ? new Map<string, SidebarReusableTarget>()
+      : getSidebarReusableTargets(snapshot, visibleRootID);
   const expandedAgents = interaction?.expandedAgents() ?? new Set<string>();
   const hoverBackground = resolveHoverBackground(theme);
   return box(
@@ -1138,6 +1248,11 @@ function renderSidebar(
               }
             }
           : undefined;
+        const reusable = reusableByAgent.get(agentName);
+        const onReusableNavigate =
+          reusable !== undefined && navigate !== undefined
+            ? (taskID: string) => navigate(taskID)
+            : undefined;
         const agentRowEl = compactSidebar
           ? compactAgentRow(
               agentName,
@@ -1151,6 +1266,8 @@ function renderSidebar(
               onAgentClick,
               hoverBackground,
               interaction?.hasSelectedText,
+              reusable,
+              onReusableNavigate,
             )
           : agentRow(
               agentName,
@@ -1164,6 +1281,8 @@ function renderSidebar(
               onAgentClick,
               hoverBackground,
               interaction?.hasSelectedText,
+              reusable,
+              onReusableNavigate,
             );
         if (!expanded) return [agentRowEl];
         return [
