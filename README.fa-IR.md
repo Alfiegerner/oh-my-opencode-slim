@@ -783,6 +783,8 @@ bunx oh-my-opencode-slim@latest install --companion=yes
 
 ---
 
+<a id="contributors-"></a>
+
 ## 🏛️ مشارکت‌کنندگان
 
 <div align="center">
