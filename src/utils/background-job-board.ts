@@ -55,6 +55,15 @@ export interface BackgroundJobPromptMetadata {
   terminalUnreconciledTaskIDs: BackgroundJobExecution[];
 }
 
+/** Latest accessible reconciled session of an agent (sidebar dot target). */
+export interface ReusableSessionSelection {
+  taskID: string;
+  alias: string;
+  terminalState: TaskOutputState;
+  completedAt?: number;
+  lastUsedAt: number;
+}
+
 export type BackgroundJobState = TaskOutputState | 'stopped' | 'reconciled';
 
 export interface BackgroundJobRecord {
@@ -164,6 +173,7 @@ export interface WallClockTimeoutFinalizeInput {
 }
 
 type TerminalStateListener = (taskID: string) => void;
+type MutationListener = () => void;
 
 export class BackgroundJobLaunchConflictError extends Error {
   constructor(taskID: string, message: string) {
@@ -197,6 +207,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
   private executionSequence = 0;
   private leaseSequence = 0;
   private terminalStateListeners: TerminalStateListener[] = [];
+  private mutationListeners: MutationListener[] = [];
 
   private readonly maxReusablePerAgent: number;
   private readonly maxContextLines: number;
@@ -231,6 +242,31 @@ export class BackgroundJobBoard implements BackgroundJobStore {
 
   setTerminalStateListener(listener?: TerminalStateListener): void {
     this.terminalStateListeners = listener ? [listener] : [];
+  }
+
+  /** Subscribe to ANY board mutation (set/delete/trim/drop). The listener
+   * receives no payload: re-derive from the board's read-only queries.
+   * Same style as addTerminalStateListener; fires after the mutation. */
+  addMutationListener(listener: MutationListener): void {
+    this.mutationListeners.push(listener);
+  }
+
+  removeMutationListener(listener: MutationListener): void {
+    this.mutationListeners = this.mutationListeners.filter(
+      (entry) => entry !== listener,
+    );
+  }
+
+  private notifyMutationListeners(): void {
+    for (const listener of this.mutationListeners) {
+      try {
+        listener();
+      } catch (error) {
+        log('Board mutation listener threw', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
   }
 
   private notifyTerminalStateListeners(taskID: string): void {
@@ -292,7 +328,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
           objective: input.objective ?? existing.objective,
           background: existing.background || input.background === true,
         } satisfies BackgroundJobRecord;
-        this.jobs.set(input.taskID, observed);
+        this.setJob(observed);
         return observed;
       }
 
@@ -326,7 +362,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
         totalErrors: existing.totalErrors ?? 0,
         timeoutCount: existing.timeoutCount ?? 0,
       } satisfies BackgroundJobRecord;
-      this.jobs.set(input.taskID, updated);
+      this.setJob(updated);
       return updated;
     }
 
@@ -359,7 +395,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       timeoutCount: 0,
     };
 
-    this.jobs.set(input.taskID, record);
+    this.setJob(record);
     return record;
   }
 
@@ -505,7 +541,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       updated.timeoutCount = (existing.timeoutCount ?? 0) + 1;
     }
 
-    this.jobs.set(input.taskID, updated);
+    this.setJob(updated);
     this.trimReusable(input.taskID);
     if (notifyTerminal) this.notifyTerminalStateListeners(input.taskID);
     return updated;
@@ -536,7 +572,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
         ...existing,
         lastLiveBusyAt: now,
       };
-      this.jobs.set(taskID, updated);
+      this.setJob(updated);
       return updated;
     }
 
@@ -560,7 +596,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       terminalState: undefined,
     };
 
-    this.jobs.set(taskID, updated);
+    this.setJob(updated);
     return updated;
   }
 
@@ -607,7 +643,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       lastStatusError: undefined,
       stopConfirmationStartedAt: undefined,
     };
-    this.jobs.set(taskID, updated);
+    this.setJob(updated);
     this.notifyTerminalStateListeners(taskID);
     return updated;
   }
@@ -631,7 +667,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       ...existing,
       stopConfirmationStartedAt: startedAt,
     };
-    this.jobs.set(taskID, updated);
+    this.setJob(updated);
     return updated;
   }
 
@@ -655,7 +691,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       lastStatusError,
       updatedAt: now,
     };
-    this.jobs.set(taskID, updated);
+    this.setJob(updated);
     return updated;
   }
 
@@ -689,7 +725,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
         updatedAt: now,
         lastUsedAt: now,
       };
-      this.jobs.set(taskID, updated);
+      this.setJob(updated);
       this.trimRetained(taskID);
       return updated;
     }
@@ -707,7 +743,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       terminalState: existing.terminalState ?? terminalStateOf(existing.state),
     };
 
-    this.jobs.set(taskID, updated);
+    this.setJob(updated);
     this.trimReusable(taskID);
     return updated;
   }
@@ -782,7 +818,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       stopConfirmationStartedAt: undefined,
     };
 
-    this.jobs.set(taskID, updated);
+    this.setJob(updated);
     if (notifyTerminal) this.notifyTerminalStateListeners(taskID);
     return updated;
   }
@@ -965,7 +1001,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
         input.resultSummary ??
         'Background task exceeded its wall-clock deadline; abort requested.',
     };
-    this.jobs.set(input.taskID, updated);
+    this.setJob(updated);
     return updated;
   }
 
@@ -1004,7 +1040,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       totalErrors: (existing.totalErrors ?? 0) + 1,
       stopConfirmationStartedAt: undefined,
     };
-    this.jobs.set(input.taskID, updated);
+    this.setJob(updated);
     this.notifyTerminalStateListeners(input.taskID);
     return updated;
   }
@@ -1064,11 +1100,25 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     // the terminal transition share a millisecond.
     const usedAt =
       job.completedAt === undefined ? now : Math.max(now, job.completedAt + 1);
-    this.jobs.set(job.taskID, {
+    this.setJob({
       ...job,
       lastUsedAt: usedAt,
       updatedAt: now,
     });
+  }
+
+  // ── Mutation notification (sidebar projection) ───────────────────
+
+  /** Every record mutation funnels through here: wake mutation
+   * listeners so projections can re-derive cheaply. */
+  private setJob(record: BackgroundJobRecord): void {
+    this.jobs.set(record.taskID, record);
+    this.notifyMutationListeners();
+  }
+
+  private deleteJob(taskID: string): void {
+    this.jobs.delete(taskID);
+    this.notifyMutationListeners();
   }
 
   taskIDs(): Set<string> {
@@ -1101,7 +1151,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
           a.path.localeCompare(b.path),
       )
       .slice(0, this.readContextMaxFiles + 1);
-    this.jobs.set(taskID, { ...job, contextFiles });
+    this.setJob({ ...job, contextFiles });
   }
 
   list(parentSessionID?: string): BackgroundJobRecord[] {
@@ -1136,6 +1186,79 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     return errors >= threshold || timeouts >= threshold;
   }
 
+  private listReusable(parent?: string): BackgroundJobRecord[] {
+    return this.list(parent).filter((j) => isReusable(j, this.maxContextLines));
+  }
+
+  /** Finished sessions the sidebar may surface (dot + idle-row click).
+   *  Independent of parent acknowledgment: a child that has reached a
+   *  canonical terminal state is history even while still unreconciled. */
+  private listSidebarHistory(parent?: string): BackgroundJobRecord[] {
+    return this.list(parent).filter(isSidebarHistory);
+  }
+
+  /**
+   * Read-only projection for the sidebar's history dot: per agent of a
+   * parent, the latest finished session (completed/error/cancelled).
+   * Appears as soon as the child reaches a canonical terminal state —
+   * parent acknowledgment (`markReconciled`) is NOT required, otherwise
+   * the dot lags until the parent reads the result.
+   *
+   * Recency is max(lastUsedAt, completedAt): finishing and markUsed
+   * both move the selection. Excludes running, status-uncertain, and
+   * stopped-retained. Never mutates lastUsedAt.
+   */
+  /** Shared comparator for the sidebar projection: recency, then taskID
+   *  tiebreak. Single implementation backing both projections below. */
+  private upsertSidebarSelection(
+    latest: Map<string, ReusableSessionSelection>,
+    job: BackgroundJobRecord,
+  ): void {
+    const selection: ReusableSessionSelection = {
+      taskID: job.taskID,
+      alias: job.alias,
+      terminalState:
+        job.terminalState ?? terminalStateOf(job.state) ?? 'completed',
+      completedAt: job.completedAt,
+      lastUsedAt: job.lastUsedAt,
+    };
+    const current = latest.get(job.agent);
+    if (
+      current === undefined ||
+      sidebarRecency(selection) > sidebarRecency(current) ||
+      (sidebarRecency(selection) === sidebarRecency(current) &&
+        selection.taskID > current.taskID)
+    ) {
+      latest.set(job.agent, selection);
+    }
+  }
+
+  latestReconciledByAgent(
+    parentSessionID: string,
+  ): Map<string, ReusableSessionSelection> {
+    const latest = new Map<string, ReusableSessionSelection>();
+    for (const job of this.listSidebarHistory(parentSessionID)) {
+      this.upsertSidebarSelection(latest, job);
+    }
+    return latest;
+  }
+
+  /** Same selection as latestReconciledByAgent, for every parent at once.
+   *  Single pass over the board: every mutation runs this synchronously,
+   *  so per-parent rescans (O(parents x jobs)) are not acceptable here. */
+  latestReconciledByParentAgent() {
+    const byParent = new Map<string, Map<string, ReusableSessionSelection>>();
+    for (const job of this.listSidebarHistory()) {
+      let latest = byParent.get(job.parentSessionID);
+      if (!latest) {
+        latest = new Map<string, ReusableSessionSelection>();
+        byParent.set(job.parentSessionID, latest);
+      }
+      this.upsertSidebarSelection(latest, job);
+    }
+    return byParent;
+  }
+
   formatForPromptWithMetadata(
     parentSessionID: string,
     _now?: number,
@@ -1144,7 +1267,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
     const active = jobs.filter(
       (job) => job.state === 'running' || job.terminalUnreconciled,
     );
-    const reusable = jobs.filter((j) => isReusable(j, this.maxContextLines));
+    const reusable = this.listReusable(parentSessionID);
     const retained = jobs.filter(isRetainedStopped);
     const acknowledgedFailedSession = reusable.some((job) => {
       const terminal = job.terminalState ?? terminalStateOf(job.state);
@@ -1213,13 +1336,13 @@ export class BackgroundJobBoard implements BackgroundJobStore {
   clearParent(parentSessionID: string): void {
     for (const job of this.list(parentSessionID)) {
       recordBackgroundJobSuppression(this, job.taskID);
-      this.jobs.delete(job.taskID);
+      this.deleteJob(job.taskID);
     }
   }
 
   drop(taskID: string): void {
     recordBackgroundJobSuppression(this, taskID);
-    this.jobs.delete(taskID);
+    this.deleteJob(taskID);
   }
 
   // ── Lifecycle policy (board = no policy, always close) ───────────
@@ -1252,7 +1375,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
         sumContextLines(entry) > this.maxContextLines
       ) {
         recordBackgroundJobSuppression(this, entry.taskID);
-        this.jobs.delete(entry.taskID);
+        this.deleteJob(entry.taskID);
       }
     }
 
@@ -1268,7 +1391,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       .sort((a, b) => b.lastUsedAt - a.lastUsedAt);
     for (const stale of reusable.slice(this.maxReusablePerAgent)) {
       recordBackgroundJobSuppression(this, stale.taskID);
-      this.jobs.delete(stale.taskID);
+      this.deleteJob(stale.taskID);
     }
   }
 
@@ -1284,7 +1407,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
         sumContextLines(entry) > this.maxContextLines
       ) {
         recordBackgroundJobSuppression(this, entry.taskID);
-        this.jobs.delete(entry.taskID);
+        this.deleteJob(entry.taskID);
       }
     }
 
@@ -1298,7 +1421,7 @@ export class BackgroundJobBoard implements BackgroundJobStore {
       .sort((a, b) => b.lastUsedAt - a.lastUsedAt);
     for (const stale of retained.slice(this.maxReusablePerAgent)) {
       recordBackgroundJobSuppression(this, stale.taskID);
-      this.jobs.delete(stale.taskID);
+      this.deleteJob(stale.taskID);
     }
   }
 
@@ -1408,6 +1531,25 @@ function isReusable(
   }
 
   return sumContextLines(job) <= maxContextLines;
+}
+
+/** Sidebar history: canonical terminal (completed/error/cancelled), not
+ *  running, not status-uncertain, not stopped-retained. Parent
+ *  acknowledgment is NOT required — the transcript exists as soon as
+ *  the child finishes. */
+function isSidebarHistory(job: BackgroundJobRecord): boolean {
+  if (job.statusUncertain) return false;
+  const terminal = job.terminalState ?? terminalStateOf(job.state);
+  return (
+    terminal === 'completed' || terminal === 'error' || terminal === 'cancelled'
+  );
+}
+
+function sidebarRecency(selection: {
+  lastUsedAt: number;
+  completedAt?: number;
+}): number {
+  return Math.max(selection.lastUsedAt, selection.completedAt ?? 0);
 }
 
 function isRetainedStopped(job: BackgroundJobRecord): boolean {
