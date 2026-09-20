@@ -182,6 +182,8 @@ export function createTaskSessionManagerHook(
     hostOutcomeClock?: 'shared-unix-ms';
     backgroundJobSupervisor?: BackgroundJobSupervisor;
     backgroundTaskConcurrency?: BackgroundTaskConcurrency;
+    /** Host-truth probe: refuse unknown-alias drops when a child may still be running. */
+    hasUntrackedRunningChild?: (parentSessionID?: string) => Promise<boolean>;
     /** Shared by plugin generations for one admission runtime. */
     pendingCallTracker?: PendingCallTracker;
     getModelForAgent?: (
@@ -592,6 +594,7 @@ export function createTaskSessionManagerHook(
         pendingCallTracker,
         taskContextTracker,
         getLifecycleEpoch: () => rehydrateState.nextEpoch,
+        hasUntrackedRunningChild: options.hasUntrackedRunningChild,
       }),
 
     'tool.execute.after': async (
