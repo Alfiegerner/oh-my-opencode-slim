@@ -640,11 +640,22 @@ describe('tui-state persistence', () => {
 
     // Pin mtime to a whole-millisecond date (utimes cannot restore
     // sub-millisecond precision), then re-prime the memo so it holds a
-    // stat snapshot of this exact state.
+    // stat snapshot of this exact state. The rewrite below must land in
+    // a later ctime quantum than the priming stat: ext4 reports ctime
+    // at timer-tick granularity, so back-to-back syscalls can share a
+    // stamp and the memo would (correctly per its key) hit. Spinning
+    // until the clock advances keeps the test deterministic without
+    // weakening the assertion or touching production thresholds.
     const pinned = new Date('2000-01-01T00:00:00Z');
     fs.utimesSync(filePath, pinned, pinned);
     recordTuiAgentModel({ agentName: 'explorer', model: 'model-x' }, tempDir);
     const statBefore = fs.statSync(filePath);
+    const ctimeBefore = statBefore.ctimeMs;
+    while (fs.statSync(filePath).ctimeMs === ctimeBefore) {
+      fs.utimesSync(filePath, pinned, pinned);
+    }
+    const statPrimed = fs.statSync(filePath);
+    expect(statPrimed.mtimeMs).toBe(pinned.getTime());
 
     // In-place rewrite (same inode, same length): mtime restored via
     // utimes. ctime cannot be restored by userspace, so the memo must
@@ -654,10 +665,10 @@ describe('tui-state persistence', () => {
     const fd = fs.openSync(filePath, 'w');
     fs.writeSync(fd, `${JSON.stringify(external)}\n`);
     fs.closeSync(fd);
-    fs.utimesSync(filePath, statBefore.atime, statBefore.mtime);
+    fs.utimesSync(filePath, statPrimed.atime, statPrimed.mtime);
     const statAfter = fs.statSync(filePath);
-    expect(statAfter.ino).toBe(statBefore.ino);
-    expect(statAfter.mtimeMs).toBe(statBefore.mtimeMs);
+    expect(statAfter.ino).toBe(statPrimed.ino);
+    expect(statAfter.mtimeMs).toBe(statPrimed.mtimeMs);
 
     recordTuiAgentModel({ agentName: 'explorer', model: 'model-x' }, tempDir);
     expect(readTuiSnapshot(tempDir).agentModels.explorer).toBe('model-x');

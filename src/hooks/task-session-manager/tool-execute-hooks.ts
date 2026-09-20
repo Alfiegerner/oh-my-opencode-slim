@@ -740,7 +740,7 @@ export async function handleToolExecuteAfter(
     if (promoted && !promoted.provisional) {
       deps.bindConcurrencyTicket?.(promoted.taskID, pending);
       if (exactCallConfirmed) {
-        deps.backgroundJobSupervisor?.onLaunch(promoted);
+        deps.backgroundJobSupervisor?.onLaunch(promoted, pending.supervision);
       }
       deps.taskContextTracker.pendingManagedTaskIds.add(taskId);
     } else {

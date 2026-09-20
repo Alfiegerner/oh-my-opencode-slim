@@ -277,6 +277,105 @@ describe('BackgroundJobSupervisor', () => {
     ).toBeUndefined();
   });
 
+  test('finite-deadline-fires: per-job opt-in deadline arms supervision while the global default stays disabled', async () => {
+    const board = new BackgroundJobBoard();
+    const coordinator = new BackgroundJobCoordinator(board);
+    const timers = createTimerHarness();
+    const abort = mock(async () => undefined) as unknown as (
+      taskID: string,
+    ) => Promise<unknown>;
+    const supervisor = new BackgroundJobSupervisor({
+      backgroundJobStore: coordinator,
+      terminalGate: createBackgroundJobTerminalGate({
+        backgroundJobBoard: coordinator,
+        now: timers.now,
+      }),
+      wallClockTimeoutMs: 0,
+      abortGraceMs: 20,
+      abort,
+      now: timers.now,
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout,
+    });
+    coordinator.addTerminalOutcomeListener((record) =>
+      supervisor.onTerminal(record),
+    );
+
+    // Global default 0: no per-job opt-in means no timers, no abort.
+    const plain = launch(board, true, 0, 'plain');
+    supervisor.onLaunch(plain);
+    expect(timers.pending()).toBe(0);
+
+    // Per-job opt-in for an oracle long run: deadline → abort → grace →
+    // terminal, using the same board/coordinator seams as the global path.
+    const job = launch(board, true, 0, 'ora-1');
+    supervisor.onLaunch(job, {
+      wallClockTimeoutMs: 60_000,
+      abortGraceMs: 1_000,
+    });
+    expect(timers.pending()).toBe(1);
+    await timers.advanceTo(60_000);
+    expect(abort).toHaveBeenCalledTimes(1);
+    expect(abort).toHaveBeenCalledWith('ora-1');
+    // Deadline claimed: job marked timed out while still running; abort
+    // requested but unconfirmed (grace pending). The deadline summary is
+    // the claim text; the grace-expiry text lands after the grace below.
+    expect(board.get('ora-1')).toMatchObject({
+      state: 'running',
+      timedOut: true,
+      cancellationRequested: true,
+    });
+    expect(board.getResultSummary('ora-1')).toContain('abort requested');
+    await timers.advanceTo(61_000);
+    // Grace expiry marks the run status-uncertain and hands the terminal
+    // decision to the terminal-gate reconcile path (which needs runtime
+    // evidence to commit, so with no runtime it stays deferred by design).
+    // The per-job contract ends here: deadline → abort → grace →
+    // protections engaged. Final-state assertions below observe the
+    // protections-owned state, not a bare supervisor write.
+    expect(board.get('ora-1')).toMatchObject({
+      timedOut: true,
+      statusUncertain: true,
+      cancellationRequested: true,
+    });
+    expect(board.getResultSummary('ora-1')).toContain('wall-clock deadline');
+    // The non-opted-in job is untouched by the per-job run.
+    expect(board.get('plain')?.state).toBe('running');
+    expect(board.get('plain')?.deadlineExceededAt).toBeUndefined();
+  });
+
+  test('zero-stays-disabled: per-job 0/undefined never arms supervision when the global default is 0', async () => {
+    const board = new BackgroundJobBoard();
+    const coordinator = new BackgroundJobCoordinator(board);
+    const timers = createTimerHarness();
+    const abort = mock(async () => undefined) as unknown as (
+      taskID: string,
+    ) => Promise<unknown>;
+    const supervisor = new BackgroundJobSupervisor({
+      backgroundJobStore: coordinator,
+      terminalGate: createBackgroundJobTerminalGate({
+        backgroundJobBoard: coordinator,
+        now: timers.now,
+      }),
+      wallClockTimeoutMs: 0,
+      abortGraceMs: 20,
+      abort,
+      now: timers.now,
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout,
+    });
+
+    const zero = launch(board, true, 0, 'zero');
+    supervisor.onLaunch(zero, { wallClockTimeoutMs: 0 });
+    const undef = launch(board, true, 0, 'undef');
+    supervisor.onLaunch(undef);
+    expect(timers.pending()).toBe(0);
+    await timers.advanceTo(10_000_000);
+    expect(abort).not.toHaveBeenCalled();
+    expect(board.get('zero')?.state).toBe('running');
+    expect(board.get('undef')?.state).toBe('running');
+  });
+
   test('drop, parent cleanup, dispose, and relaunch clear or replace timers', async () => {
     const { board, supervisor, timers, abort } = createSupervisor();
     const job = launch(board, true);

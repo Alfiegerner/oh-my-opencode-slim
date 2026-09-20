@@ -3811,6 +3811,16 @@ describe('ForegroundFallbackManager dispose', () => {
 
   test('dispose during retry backoff abandons the attempt with zero further client calls', async () => {
     const { mocks } = createMockClient();
+    // Cross-test isolation: the getClient module mock is process-global,
+    // so a still-settling hook from another test file can route its
+    // transcript reads through this test's mock session. Count only
+    // reads for this test's own session (unique id): a second read for
+    // sess-backoff-dispose can only come from the abandoned attempt.
+    const ownMessages = mocks.messages;
+    const ownMessagesCalls = () =>
+      (ownMessages.mock.calls as Array<[{ path?: { id?: string } }]>)?.filter(
+        ([call]) => call?.path?.id === 'sess-backoff-dispose',
+      ).length ?? 0;
     const realNow = Date.now;
     let fakeNow = realNow();
     Date.now = () => fakeNow;
@@ -3852,7 +3862,7 @@ describe('ForegroundFallbackManager dispose', () => {
       mgr.dispose();
       await pending;
 
-      expect(mocks.messages).toHaveBeenCalledTimes(1); // no second read
+      expect(ownMessagesCalls()).toBe(1); // no second read
       expect(mocks.promptAsync).toHaveBeenCalledTimes(1); // no second replay
       expect(mocks.abort).not.toHaveBeenCalled();
       expect(mgr.isFallbackInProgress('sess-backoff-dispose')).toBe(false);

@@ -387,8 +387,12 @@ describe('task-session-manager hook', () => {
     expect(record?.background).toBe(true);
     expect(record?.description).toBe('owned call');
     expect(record?.objective).toBe('owned call');
+    // Per-job supervision rides the second onLaunch arg (undefined when
+    // the call carries no opt-in): assert the full call shape so a
+    // dropped second arg fails here instead of silently losing deadlines.
     expect(onLaunch).toHaveBeenCalledWith(
       expect.objectContaining({ taskID: 'ses_child' }),
+      undefined,
     );
   });
 
@@ -430,8 +434,12 @@ describe('task-session-manager hook', () => {
     expect(record?.provisional).toBe(false);
     expect(record?.state).toBe('running');
     expect(record?.background).toBe(true);
+    // Per-job supervision rides the second onLaunch arg (undefined when
+    // the call carries no opt-in): assert the full call shape so a
+    // dropped second arg fails here instead of silently losing deadlines.
     expect(onLaunch).toHaveBeenCalledWith(
       expect.objectContaining({ taskID: 'ses_promoted' }),
+      undefined,
     );
   });
 

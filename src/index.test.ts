@@ -1883,6 +1883,12 @@ describe('system.transform orchestrator injection', () => {
     process.env = {
       ...originalEnv,
       OPENCODE_CONFIG_DIR: configDir,
+      // Isolate from operator-local user config: getConfigSearchDirs()
+      // reads XDG_CONFIG_HOME/opencode for prompt files
+      // (orchestrator_append.md), which would otherwise leak a local
+      // append prompt into the resolved agent prompt and break the
+      // dedup assertions below.
+      XDG_CONFIG_HOME: configDir,
       XDG_DATA_HOME: `${configDir}/data`,
       XDG_CACHE_HOME: `${configDir}/cache`,
       OPENCODE_LOG_DIR: `${configDir}/logs`,
