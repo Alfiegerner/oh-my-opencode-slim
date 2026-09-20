@@ -183,6 +183,65 @@ export type PresetMap = Record<string, PresetInput>;
 export type ResolvedPresetMap = Record<string, Preset>;
 
 /**
+ * Merge preset declarations from layered config files.
+ *
+ * Presets need agent-aware merging rather than a generic object merge:
+ * `inheritModelFrom` is an explicit instruction to remove a lower-layer
+ * model. Preserve legacy flat output when both inputs use that syntax, while
+ * using the canonical wrapper whenever either layer uses it.
+ */
+export function mergePresetMaps(
+  base?: PresetMap,
+  override?: PresetMap,
+): PresetMap | undefined {
+  if (!base) return override;
+  if (!override) return base;
+
+  const result: PresetMap = { ...base };
+  for (const [name, overrideInput] of Object.entries(override)) {
+    const baseInput = base[name];
+    if (!baseInput) {
+      result[name] = overrideInput;
+      continue;
+    }
+
+    const normalizedBase = normalizePreset(baseInput);
+    const normalizedOverride = normalizePreset(overrideInput);
+    const mergedDefinition: PresetDefinition = {
+      agents: mergeAgentOverrides(
+        normalizedBase.agents,
+        normalizedOverride.agents,
+      ),
+    };
+    const parent = normalizedOverride.extends ?? normalizedBase.extends;
+    if (parent !== undefined) {
+      mergedDefinition.extends = parent;
+    }
+
+    if (
+      usesStructuredPresetSyntax(baseInput) ||
+      usesStructuredPresetSyntax(overrideInput)
+    ) {
+      result[name] = mergedDefinition;
+    } else {
+      const legacy = { ...mergedDefinition.agents } as Record<string, unknown>;
+      if (mergedDefinition.extends !== undefined) {
+        legacy.extends = mergedDefinition.extends;
+      }
+      result[name] = legacy as PresetInput;
+    }
+  }
+  return result;
+}
+
+function usesStructuredPresetSyntax(input: PresetInput): boolean {
+  if (!isRecord(input) || !isRecord(input.agents)) {
+    return false;
+  }
+  return PresetAgentsSchema.safeParse(input.agents).success;
+}
+
+/**
  * Resolve one named preset with depth-first traversal.
  *
  * The cache is populated only after a complete ancestor chain is resolved, so

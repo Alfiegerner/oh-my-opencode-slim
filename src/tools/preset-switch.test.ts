@@ -532,6 +532,99 @@ describe('switchPresetOnDisk', () => {
     expect(result.ok).toBe(true);
   });
 
+  test('allows switching when project preset resolves from an environment variable', () => {
+    const projectPresetEnv = 'OMOS_PROJECT_PRESET';
+    const previousProjectPreset = process.env[projectPresetEnv];
+    process.env[projectPresetEnv] = 'shared-preset';
+    try {
+      const projectDir = path.join(tempDir, '.opencode');
+      fs.mkdirSync(projectDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(projectDir, 'oh-my-opencode-slim.jsonc'),
+        JSON.stringify({ preset: `{env:${projectPresetEnv}}` }),
+      );
+
+      const result = switchPresetOnDisk(tempDir, 'shared-preset', {
+        presets: {
+          'shared-preset': {
+            orchestrator: { model: 'anthropic/claude-3.5-haiku' },
+          },
+        },
+      });
+
+      expect(result.ok).toBe(true);
+    } finally {
+      if (previousProjectPreset === undefined) {
+        delete process.env[projectPresetEnv];
+      } else {
+        process.env[projectPresetEnv] = previousProjectPreset;
+      }
+    }
+  });
+
+  test('blocks switching when the expanded project preset differs', () => {
+    const projectPresetEnv = 'OMOS_PROJECT_PRESET';
+    const previousProjectPreset = process.env[projectPresetEnv];
+    process.env[projectPresetEnv] = 'project-preset';
+    try {
+      const projectDir = path.join(tempDir, '.opencode');
+      fs.mkdirSync(projectDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(projectDir, 'oh-my-opencode-slim.jsonc'),
+        JSON.stringify({ preset: `{env:${projectPresetEnv}}` }),
+      );
+
+      const result = switchPresetOnDisk(tempDir, 'user-choice', {
+        presets: {
+          'user-choice': {
+            orchestrator: { model: 'anthropic/claude-3.5-haiku' },
+          },
+        },
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain(
+        'project config (.opencode) explicitly sets preset "project-preset"',
+      );
+    } finally {
+      if (previousProjectPreset === undefined) {
+        delete process.env[projectPresetEnv];
+      } else {
+        process.env[projectPresetEnv] = previousProjectPreset;
+      }
+    }
+  });
+
+  test('allows switching when the project preset environment variable is missing', () => {
+    const projectPresetEnv = 'OMOS_MISSING_PROJECT_PRESET';
+    const previousProjectPreset = process.env[projectPresetEnv];
+    delete process.env[projectPresetEnv];
+    try {
+      const projectDir = path.join(tempDir, '.opencode');
+      fs.mkdirSync(projectDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(projectDir, 'oh-my-opencode-slim.jsonc'),
+        JSON.stringify({ preset: `{env:${projectPresetEnv}}` }),
+      );
+
+      const result = switchPresetOnDisk(tempDir, 'user-choice', {
+        presets: {
+          'user-choice': {
+            orchestrator: { model: 'anthropic/claude-3.5-haiku' },
+          },
+        },
+      });
+
+      expect(result.ok).toBe(true);
+    } finally {
+      if (previousProjectPreset === undefined) {
+        delete process.env[projectPresetEnv];
+      } else {
+        process.env[projectPresetEnv] = previousProjectPreset;
+      }
+    }
+  });
+
   test('rejects switching when the environment selects a different preset', () => {
     const configDir = path.join(tempDir, 'opencode-config');
     fs.mkdirSync(configDir, { recursive: true });

@@ -7,6 +7,7 @@ import type { ResolvedPresetMap } from './presets';
 import {
   deepMerge,
   mergeAgentOverrides,
+  mergePresetMaps,
   normalizePreset,
   PresetResolutionError,
   resolvePreset,
@@ -24,6 +25,7 @@ import {
 export {
   deepMerge,
   mergeAgentOverrides,
+  mergePresetMaps,
   normalizePreset,
   PresetResolutionError,
   resolvePreset,
@@ -632,7 +634,7 @@ export function mergePluginConfigs(
       base.agents || override.agents
         ? mergeAgentOverrides(base.agents ?? {}, override.agents ?? {})
         : undefined,
-    presets: deepMerge(base.presets, override.presets),
+    presets: mergePresetMaps(base.presets, override.presets),
     multiplexer: deepMerge(base.multiplexer, override.multiplexer),
     interview: deepMerge(base.interview, override.interview),
     backgroundJobs: deepMerge(base.backgroundJobs, override.backgroundJobs),

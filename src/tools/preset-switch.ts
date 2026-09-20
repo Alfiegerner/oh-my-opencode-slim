@@ -18,6 +18,13 @@ import { findPluginConfigPaths } from '../config/loader';
 
 export type PresetMap = Record<string, PresetInput>;
 
+function interpolateConfigEnvironment(raw: string): string {
+  return raw.replace(
+    /\{env:([^}]+)\}/g,
+    (_, variableName) => process.env[variableName] ?? '',
+  );
+}
+
 /**
  * Result of a preset switch attempt. `message` is user-facing and intended for
  * a TUI toast/dialog (it is never injected into the LLM context).
@@ -440,7 +447,9 @@ export function readProjectConfig(
     const raw = fs
       .readFileSync(projectConfigPath, 'utf-8')
       .replace(/^\uFEFF/, '');
-    return JSON.parse(stripJsonComments(raw)) as Record<string, unknown>;
+    return JSON.parse(
+      interpolateConfigEnvironment(stripJsonComments(raw)),
+    ) as Record<string, unknown>;
   } catch {
     return null;
   }
