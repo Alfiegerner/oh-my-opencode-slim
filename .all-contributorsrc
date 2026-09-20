@@ -947,6 +947,105 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "Alfiegerner",
+      "name": "Alfiegerner",
+      "avatar_url": "https://avatars.githubusercontent.com/u/596188?v=4",
+      "profile": "https://github.com/Alfiegerner",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "leducmaxime",
+      "name": "Maxime Leduc",
+      "avatar_url": "https://avatars.githubusercontent.com/u/37900355?v=4",
+      "profile": "https://github.com/leducmaxime",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "vmvarela",
+      "name": "Victor M. Varela",
+      "avatar_url": "https://avatars.githubusercontent.com/u/11040851?v=4",
+      "profile": "https://github.com/vmvarela",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "gitslim",
+      "name": "gitslim",
+      "avatar_url": "https://avatars.githubusercontent.com/u/24612825?v=4",
+      "profile": "https://github.com/gitslim",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "xiaolf0813",
+      "name": "xiaolf0813",
+      "avatar_url": "https://avatars.githubusercontent.com/u/314566924?v=4",
+      "profile": "https://github.com/xiaolf0813",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "BaconDroid",
+      "name": "BaconDroid",
+      "avatar_url": "https://avatars.githubusercontent.com/u/11067111?v=4",
+      "profile": "https://github.com/BaconDroid",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "bferanmi806-sketch",
+      "name": "Enoch",
+      "avatar_url": "https://avatars.githubusercontent.com/u/277080233?v=4",
+      "profile": "https://sprightly-strudel-e1f939.netlify.app/",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "mxalbert1996",
+      "name": "Albert Chang",
+      "avatar_url": "https://avatars.githubusercontent.com/u/9391933?v=4",
+      "profile": "https://github.com/mxalbert1996",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "Aveer",
+      "name": "Aveer",
+      "avatar_url": "https://avatars.githubusercontent.com/u/84144527?v=4",
+      "profile": "https://github.com/Aveer",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "Amm1rr",
+      "name": "Mohammad",
+      "avatar_url": "https://avatars.githubusercontent.com/u/480468?v=4",
+      "profile": "https://github.com/Amm1rr",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "kumar-shivang",
+      "name": "Shivang Kumar",
+      "avatar_url": "https://avatars.githubusercontent.com/u/89011717?v=4",
+      "profile": "https://github.com/kumar-shivang",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "commitConvention": "angular"

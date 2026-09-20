@@ -1,145 +1,85 @@
 import type { PluginInput } from '@opencode-ai/plugin';
-import type { BackgroundJobStore, ContextFile } from '../../utils';
+import type { BackgroundJobStore } from '../../utils/background-job-store';
 import {
-  getRuntimeSessionStatusSnapshot,
-  runtimeSessionStatus,
-} from '../../utils';
+  type BackgroundJobTerminalGate,
+  runtimeObservationFromSnapshot,
+} from '../../utils/background-job-terminal-gate';
 import { log } from '../../utils/logger';
-import {
-  observeNonBusyRuntime,
-  STOP_CONFIRMATION_GRACE_MS,
-} from './stop-confirmation';
+import { getRuntimeSessionStatusSnapshot } from '../../utils/session-runtime-status';
 
 export const RUNTIME_STATUS_RECONCILE_DELAY_MS = 5_000;
 
+/** Batching, cadence and capability detection only; no terminal policy. */
 export function createRuntimeStatusReconciler(options: {
   input: PluginInput;
   backgroundJobBoard: BackgroundJobStore;
+  terminalGate: BackgroundJobTerminalGate;
   delayMs?: number;
   statusTimeoutMs?: number;
-  stopConfirmationGraceMs?: number;
-  taskContextTracker: {
-    pendingManagedTaskIds: Set<string>;
-    contextFilesForPrompt(taskId: string): ContextFile[];
-    prune(board: { taskIDs(): Set<string> }): void;
-  };
 }) {
   const delayMs = options.delayMs ?? RUNTIME_STATUS_RECONCILE_DELAY_MS;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let disposed = false;
   let activeReconcile: Promise<void> | undefined;
   let rerunRequested = false;
-
+  let capability: boolean | undefined;
+  function supported(): boolean {
+    if (capability === undefined) {
+      capability = typeof options.input?.client?.session?.status === 'function';
+      if (!capability)
+        log(
+          '[task-session-manager] runtime status reconciliation disabled on this host (client.session.status unavailable)',
+        );
+    }
+    return capability;
+  }
   function schedule(): void {
-    if (disposed) return;
-    if (activeReconcile) {
-      rerunRequested = true;
-      return;
-    }
-    if (timer) return;
     if (
-      !options.backgroundJobBoard.list().some((job) => job.state === 'running')
-    ) {
+      disposed ||
+      !supported() ||
+      activeReconcile ||
+      timer ||
+      !options.backgroundJobBoard.hasRunningJobs()
+    )
       return;
-    }
     timer = setTimeout(() => {
       timer = undefined;
-      void reconcile();
+      // Background reconciliation is fail-soft: a failure must be logged
+      // and swallowed, never escape as an unhandled rejection.
+      void reconcile().catch((err) => {
+        log(
+          '[runtime-status-reconciliation] background reconcile failed',
+          String(err),
+        );
+      });
     }, delayMs);
     timer.unref?.();
   }
-
-  async function reconcilePass(): Promise<void> {
-    if (disposed) return;
-    const running = options.backgroundJobBoard
-      .list()
-      .filter((job) => job.state === 'running');
-    if (running.length === 0) return;
-
-    const requestStartedAt = Date.now();
+  async function pass(): Promise<void> {
+    if (disposed || !supported()) return;
+    // Requested/rehydration passes include retained terminals. Routine
+    // scheduling stops when no jobs run, so inactive history is not polled.
+    const tokens = options.backgroundJobBoard.list().flatMap((run) => {
+      const token = options.terminalGate.capture(run);
+      return token ? [token] : [];
+    });
+    if (!tokens.length) return;
+    const startedAt = Date.now();
     const snapshot = await getRuntimeSessionStatusSnapshot(options.input, {
       timeoutMs: options.statusTimeoutMs,
     });
     if (disposed) return;
-    const observedAt = Date.now();
-    const graceMs =
-      options.stopConfirmationGraceMs ?? STOP_CONFIRMATION_GRACE_MS;
-    if (snapshot.error) {
-      for (const job of running) {
-        options.backgroundJobBoard.markStatusUncertain(
-          job.taskID,
-          `Runtime status lookup failed: ${snapshot.error}`,
-          job.generation,
-        );
-      }
-      log('[task-session-manager] runtime status reconciliation uncertain', {
-        activeJobs: running.length,
-        error: snapshot.error,
-      });
-      return;
-    }
-
-    for (const job of running) {
-      if (disposed) return;
-      const current = options.backgroundJobBoard.get(job.taskID);
-      if (
-        current?.state !== 'running' ||
-        current.generation !== job.generation
-      ) {
-        continue;
-      }
-      const status = runtimeSessionStatus(snapshot, job.taskID);
-      if (status === 'busy' || status === 'retry') {
-        options.backgroundJobBoard.markRunningFromLiveSession(
-          job.taskID,
-          observedAt,
-          job.generation,
-        );
-        continue;
-      }
-      if (
-        status === undefined &&
-        snapshot.malformedSessionIDs.has(job.taskID)
-      ) {
-        options.backgroundJobBoard.markStatusUncertain(
-          job.taskID,
-          'Runtime status response did not contain a recognized session state.',
-          job.generation,
-        );
-        continue;
-      }
-
-      const lastStatusError =
-        status === undefined
-          ? 'Runtime status response did not contain a live session state; task termination is unconfirmed.'
-          : 'Runtime session is idle; task termination is unconfirmed.';
-      const updated = observeNonBusyRuntime({
-        backgroundJobBoard: options.backgroundJobBoard,
-        taskID: job.taskID,
-        observedAt: requestStartedAt,
-        generation: job.generation,
-        graceMs,
-        lastStatusError,
-        taskContextTracker: options.taskContextTracker,
-      });
-      if (updated?.state === 'stopped') {
-        log('[task-session-manager] confirmed runtime-stopped job', {
-          taskID: updated.taskID,
-          alias: updated.alias,
-          parentSessionID: updated.parentSessionID,
-        });
-        continue;
-      }
-      log(
-        '[task-session-manager] runtime session quiescent; terminal result pending',
-        {
-          taskID: job.taskID,
-          generation: job.generation,
-        },
+    const pending: Promise<unknown>[] = [];
+    for (const token of tokens) {
+      const result = options.terminalGate.observe(
+        token,
+        runtimeObservationFromSnapshot(snapshot, token.taskID, startedAt),
       );
+      if (result.kind !== 'stale')
+        pending.push(options.terminalGate.reconcile(token));
     }
+    await Promise.all(pending);
   }
-
   async function reconcile(): Promise<void> {
     if (disposed) return;
     if (activeReconcile) {
@@ -147,27 +87,26 @@ export function createRuntimeStatusReconciler(options: {
       await activeReconcile;
       return;
     }
-
-    const run = (async () => {
+    activeReconcile = (async () => {
       try {
         do {
           rerunRequested = false;
-          await reconcilePass();
+          await pass();
         } while (!disposed && rerunRequested);
       } finally {
         activeReconcile = undefined;
         schedule();
       }
     })();
-    activeReconcile = run;
-    await run;
+    await activeReconcile;
   }
-
-  function dispose(): void {
-    disposed = true;
-    if (timer) clearTimeout(timer);
-    timer = undefined;
-  }
-
-  return { schedule, reconcile, dispose };
+  return {
+    schedule,
+    reconcile,
+    dispose() {
+      disposed = true;
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+    },
+  };
 }

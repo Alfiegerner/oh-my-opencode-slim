@@ -1,5 +1,6 @@
 import { describe, expect, mock, test } from 'bun:test';
-import { BackgroundJobBoard } from './background-job-board';
+import { BackgroundJobBoard as ProductionBoard } from './background-job-board';
+import { BackgroundJobBoard } from './background-job-fixture';
 
 describe('BackgroundJobBoard', () => {
   test('registers background launches as running jobs with aliases', () => {
@@ -23,6 +24,125 @@ describe('BackgroundJobBoard', () => {
       terminalUnreconciled: false,
     });
     expect(board.hasRunning('parent-1')).toBe(true);
+    expect(board.hasRunningJobs()).toBe(true);
+    expect(job).not.toHaveProperty('provisional');
+    expect(board.formatForPrompt('parent-1')).toContain(job.taskID);
+  });
+
+  test.each([false, true])(
+    'promotes a resolvable hidden placeholder (preserveRun=%s)',
+    (preserveRun) => {
+      const board = new BackgroundJobBoard();
+      const launch = {
+        taskID: 'child-1',
+        parentSessionID: 'parent-1',
+        agent: 'unknown',
+        description: 'unattributed unknown task',
+        now: 100,
+      };
+      const provisional = board.registerLaunch({
+        ...launch,
+        provisional: true,
+      });
+      expect(board.get(launch.taskID)).toEqual(provisional);
+      expect(board.resolve('parent-1', launch.taskID)).toEqual(provisional);
+      expect(board.resolve('parent-1', provisional.alias)).toEqual(provisional);
+      expect(board.formatForPromptWithMetadata('parent-1')).toBeUndefined();
+
+      const promoted = board.registerLaunch({ ...launch, preserveRun });
+      expect(promoted.provisional).toBe(false);
+      expect(promoted.generation).toBe(
+        provisional.generation + (preserveRun ? 0 : 1),
+      );
+      expect(board.formatForPrompt('parent-1')).toContain(launch.taskID);
+      board.markStopped(launch.taskID, 'no outcome', 200);
+      expect(
+        board.formatForPromptWithMetadata('parent-1')
+          ?.terminalUnreconciledTaskIDs,
+      ).toEqual([expect.objectContaining({ taskID: launch.taskID })]);
+    },
+  );
+
+  test.each(['stopped', 'completed'])(
+    'keeps a %s placeholder hidden before and after acknowledgement',
+    (state) => {
+      const board = new BackgroundJobBoard();
+      const job = board.registerLaunch({
+        taskID: 'child-1',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        provisional: true,
+        now: 100,
+      });
+      if (state === 'stopped') board.markStopped(job.taskID, 'no outcome', 200);
+      else board.updateStatus({ taskID: job.taskID, state: 'completed' });
+      expect(board.formatForPromptWithMetadata('parent-1')).toBeUndefined();
+      board.markReconciled(job.taskID);
+      expect(board.formatForPromptWithMetadata('parent-1')).toBeUndefined();
+      expect(board.resolve('parent-1', job.alias)?.provisional).toBe(true);
+    },
+  );
+
+  test.each(['stopped', 'completed'])(
+    'attribution promotes a %s placeholder via preserveRun without resurrecting it',
+    (state) => {
+      const board = new BackgroundJobBoard();
+      const job = board.registerLaunch({
+        taskID: 'child-1',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        provisional: true,
+        now: 100,
+      });
+      if (state === 'stopped') board.markStopped(job.taskID, 'no outcome', 200);
+      else board.updateStatus({ taskID: job.taskID, state: 'completed' });
+
+      const promoted = board.registerLaunch({
+        taskID: 'child-1',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        preserveRun: true,
+        now: 300,
+      });
+      expect(promoted.provisional).toBe(false);
+      expect(promoted.state).toBe(state);
+      expect(promoted.generation).toBe(job.generation);
+      expect(board.formatForPrompt('parent-1')).toContain('child-1');
+    },
+  );
+
+  test('provisionals are not delegated work for wake and wait predicates', () => {
+    const board = new BackgroundJobBoard();
+    const job = board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      provisional: true,
+      now: 100,
+    });
+    expect(board.hasRunning('parent-1')).toBe(false);
+    expect(board.hasTerminalUnreconciled('parent-1')).toBe(false);
+    board.markStopped(job.taskID, 'no outcome', 200);
+    expect(board.hasTerminalUnreconciled('parent-1')).toBe(false);
+    board.promoteProvisional(job.taskID);
+    expect(board.hasTerminalUnreconciled('parent-1')).toBe(true);
+  });
+
+  test('hasRunningJobs is false once no job is running', () => {
+    const board = new BackgroundJobBoard();
+    expect(board.hasRunningJobs()).toBe(false);
+    board.registerLaunch({
+      taskID: 'ses_idle',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'map config',
+    });
+    board.updateStatus({
+      taskID: 'ses_idle',
+      state: 'completed',
+      resultSummary: 'done',
+    });
+    expect(board.hasRunningJobs()).toBe(false);
   });
   test('markUsed lands strictly after completion even with equal timestamps', () => {
     const board = new BackgroundJobBoard();
@@ -49,36 +169,79 @@ describe('BackgroundJobBoard', () => {
     expect(job?.lastUsedAt).toBe(201);
   });
 
-  test('cancellation lease fences a same-ID relaunch', () => {
-    const board = new BackgroundJobBoard();
-    const first = board.registerLaunch({
-      taskID: 'ses_lease',
-      parentSessionID: 'parent-1',
-      agent: 'fixer',
-    });
-
-    const cancellationLease = board.acquireCancellationLease(
-      first.taskID,
-      first.generation,
-    );
-
-    expect(cancellationLease).toMatchObject({
-      taskID: first.taskID,
-      generation: first.generation,
-      kind: 'cancellation',
-    });
-    expect(
-      board.acquireRelaunchLease(first.taskID, first.generation),
-    ).toBeUndefined();
-    expect(() =>
-      board.registerLaunch({
-        taskID: first.taskID,
+  const leaseKinds = [
+    'message',
+    'relaunch',
+    'cancellation',
+    'terminal-notification',
+  ] as const;
+  test.each(
+    leaseKinds.flatMap((owner) =>
+      leaseKinds.map((contender) => ({ owner, contender })),
+    ),
+  )(
+    '$owner excludes $contender until its own token is released',
+    ({ owner, contender }) => {
+      const board = new BackgroundJobBoard();
+      const run = board.registerLaunch({
+        taskID: 'ses_lease',
         parentSessionID: 'parent-1',
         agent: 'fixer',
-      }),
-    ).toThrow('cancellation lease');
-    expect(board.get(first.taskID)?.generation).toBe(first.generation);
-  });
+      });
+      const acquire = {
+        message: () => board.acquireMessageLease(run.taskID, run.generation),
+        relaunch: () => board.acquireRelaunchLease(run.taskID, run.generation),
+        cancellation: () =>
+          board.acquireCancellationLease(run.taskID, run.generation),
+        'terminal-notification': () =>
+          board.acquireTerminalNotificationLease(
+            run.taskID,
+            run.generation,
+            board.get(run.taskID)?.terminalRevision,
+          ),
+      };
+      const complete = () =>
+        board.updateStatus({
+          taskID: run.taskID,
+          state: 'completed',
+          resultSummary: 'done',
+        });
+      if (owner === 'terminal-notification') complete();
+      const lease = acquire[owner]();
+      if (!lease) throw new Error('missing owner lease');
+      expect(lease.kind).toBe(owner);
+      expect(board.validateLease(lease)).toBe(true);
+      if (owner !== 'relaunch') {
+        expect(() => board.registerLaunch({ ...run })).toThrow(
+          `${owner} lease`,
+        );
+      }
+      // Change eligibility without releasing ownership. Withdrawing a terminal
+      // revision revokes send permission, but must not prevent token retirement.
+      const current = board.get(run.taskID);
+      if (!current) throw new Error('missing current record');
+      board.markRunningFromLiveSession(
+        run.taskID,
+        current.updatedAt + 1,
+        run.generation,
+        current.terminalRevision,
+      );
+      if (contender === 'terminal-notification') complete();
+      expect(board.validateLease(lease)).toBe(
+        owner !== 'terminal-notification',
+      );
+      expect(acquire[contender]()).toBeUndefined();
+      expect(board.releaseLease(lease)).toBe(true);
+      expect(board.releaseLease(lease)).toBe(false);
+      const next = acquire[contender]();
+      if (!next) throw new Error('missing next lease');
+      expect(next.token).not.toBe(lease.token);
+      expect(board.releaseLease(lease)).toBe(false);
+      expect(board.validateLease(next)).toBe(true);
+      expect(acquire[contender]()).toBeUndefined();
+      expect(board.releaseLease(next)).toBe(true);
+    },
+  );
 
   test('relaunch lease fences cancellation and validates token/generation', () => {
     const board = new BackgroundJobBoard();
@@ -119,45 +282,6 @@ describe('BackgroundJobBoard', () => {
     });
     expect(second.generation).not.toBe(first.generation);
     expect(board.releaseLease(relaunchLease)).toBe(true);
-  });
-
-  test('message lease is mutually exclusive with cancellation and relaunch', () => {
-    const board = new BackgroundJobBoard();
-    const first = board.registerLaunch({
-      taskID: 'ses_message_lease',
-      parentSessionID: 'parent-1',
-      agent: 'fixer',
-    });
-    const messageLease = board.acquireMessageLease(
-      first.taskID,
-      first.generation,
-    );
-
-    expect(messageLease).toMatchObject({
-      taskID: first.taskID,
-      generation: first.generation,
-      kind: 'message',
-    });
-    expect(board.acquireCancellationLease(first.taskID, first.generation)).toBe(
-      undefined,
-    );
-    expect(board.acquireRelaunchLease(first.taskID, first.generation)).toBe(
-      undefined,
-    );
-    expect(() =>
-      board.registerLaunch({
-        taskID: first.taskID,
-        parentSessionID: first.parentSessionID,
-        agent: first.agent,
-      }),
-    ).toThrow('message lease');
-
-    if (!messageLease) throw new Error('message lease was not acquired');
-    expect(board.validateLease(messageLease)).toBe(true);
-    expect(board.releaseLease(messageLease)).toBe(true);
-    expect(
-      board.acquireCancellationLease(first.taskID, first.generation),
-    ).toBeDefined();
   });
 
   test('expected generation and cancellation token fence markCancelled', () => {
@@ -393,8 +517,8 @@ describe('BackgroundJobBoard', () => {
 
     expect(metadata?.text).toBe(board.formatForPrompt('parent-1'));
     expect(metadata?.terminalUnreconciledTaskIDs).toEqual([
-      { taskID: 'ses_1', generation: 1 },
-      { taskID: 'ses_2', generation: 2 },
+      { taskID: 'ses_1', generation: 1, terminalRevision: 1 },
+      { taskID: 'ses_2', generation: 2, terminalRevision: 1 },
     ]);
     expect(
       metadata?.terminalUnreconciledTaskIDs.some(
@@ -446,6 +570,117 @@ describe('BackgroundJobBoard', () => {
       updatedAt: 300,
     });
     expect(board.formatForPrompt('parent-1')).toContain('Reusable Sessions');
+  });
+
+  test('lists acknowledged stopped sessions as retained recovery, not reusable', () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'ses_stopped',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'idle review',
+      now: 100,
+    });
+    board.markStopped('ses_stopped', 'no native result', 110, undefined, 110);
+
+    const unreconciled = board.formatForPrompt('parent-1');
+    expect(unreconciled).toContain(
+      'ora-1 / ses_stopped / oracle / stopped, unreconciled',
+    );
+    expect(unreconciled).not.toContain('#### Retained / Recovery');
+    expect(
+      board.resolveReusable('parent-1', 'ses_stopped', 'oracle'),
+    ).toBeUndefined();
+
+    board.markReconciled('ses_stopped');
+
+    const prompt = board.formatForPrompt('parent-1');
+    expect(prompt).toContain('#### Retained / Recovery');
+    expect(prompt).toContain(
+      'ora-1 / ses_stopped / oracle / stopped, retained',
+    );
+    expect(prompt).toContain(
+      'Recovery: no terminal result; recoverable with task_revive, not task()',
+    );
+    expect(prompt).toContain(
+      'Stopped sessions without a terminal result are retained for task_revive, not task().',
+    );
+    expect(prompt).toContain('#### Reusable Sessions\n- none');
+    expect(prompt).not.toContain('stopped, unreconciled');
+    expect(
+      board.resolveReusable('parent-1', 'ses_stopped', 'oracle'),
+    ).toBeUndefined();
+    expect(
+      board.formatForPromptWithMetadata('parent-1')
+        ?.terminalUnreconciledTaskIDs,
+    ).toEqual([]);
+  });
+
+  test('trimRetained evicts acknowledged stopped sessions beyond the per-agent cap', () => {
+    const board = new BackgroundJobBoard({ maxReusablePerAgent: 1 });
+    board.registerLaunch({
+      taskID: 'ses_old',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      now: 100,
+    });
+    board.markStopped('ses_old', 'no native result', 110, undefined, 110);
+    board.markReconciled('ses_old', 120);
+
+    board.registerLaunch({
+      taskID: 'ses_new',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      now: 200,
+    });
+    board.markStopped('ses_new', 'no native result', 210, undefined, 210);
+    board.markReconciled('ses_new', 220);
+
+    expect(board.get('ses_old')).toBeUndefined();
+    expect(board.get('ses_new')).toMatchObject({
+      state: 'stopped',
+      terminalUnreconciled: false,
+    });
+  });
+
+  test('releaseLease re-applies retention caps shielded by an in-flight lease', () => {
+    // P2 regression: an ACK landing while a revive holds the relaunch
+    // lease shields retained-stopped entries from trimRetained. When the
+    // revive fails and releases the lease, the per-agent cap must be
+    // re-applied — evicting the oldest acknowledged stopped entry that
+    // was shielded while the lease was live.
+    const board = new BackgroundJobBoard({ maxReusablePerAgent: 1 });
+    board.registerLaunch({
+      taskID: 'ses_a',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      now: 100,
+    });
+    board.markStopped('ses_a', 'no native result', 110, undefined, 110);
+    board.markReconciled('ses_a', 120);
+
+    // ses_a holds a relaunch lease (revive in flight).
+    const lease = board.acquireRelaunchLease('ses_a', 1);
+    expect(lease).toBeDefined();
+
+    board.registerLaunch({
+      taskID: 'ses_b',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      now: 200,
+    });
+    board.markStopped('ses_b', 'no native result', 210, undefined, 210);
+    // ACK of ses_b while ses_a is leased: the shielded ses_a survives the
+    // per-agent cap of 1 because leased entries are excluded.
+    board.markReconciled('ses_b', 220);
+    expect(board.get('ses_a')).toBeDefined();
+    expect(board.get('ses_b')).toBeDefined();
+
+    // Releasing the lease re-applies the cap without the shield: the
+    // oldest retained entry (ses_a) is evicted.
+    if (lease) expect(board.releaseLease(lease)).toBe(true);
+    expect(board.get('ses_a')).toBeUndefined();
+    expect(board.get('ses_b')).toMatchObject({ state: 'stopped' });
   });
 
   test('does not expose unreconciled terminal jobs as reusable', () => {
@@ -651,8 +886,8 @@ describe('BackgroundJobBoard', () => {
     });
   });
 
-  test('updates status from native task output', () => {
-    const board = new BackgroundJobBoard();
+  test('updateStatus refuses terminal state without a gate commit', () => {
+    const board = new ProductionBoard();
     board.registerLaunch({
       taskID: 'ses_1',
       parentSessionID: 'parent-1',
@@ -660,25 +895,21 @@ describe('BackgroundJobBoard', () => {
       description: 'map files',
     });
 
-    board.updateFromStatusOutput(
-      [
-        'task_id: ses_1',
-        'state: error',
-        '<task_result>',
-        'failed',
-        '</task_result>',
-      ].join('\n'),
-    );
-
-    expect(board.get('ses_1')).toMatchObject({
+    board.updateStatus({
+      taskID: 'ses_1',
       state: 'error',
-      terminalUnreconciled: true,
       resultSummary: 'failed',
     });
+
+    expect(board.get('ses_1')).toMatchObject({
+      state: 'running',
+      terminalUnreconciled: false,
+    });
+    expect(board.get('ses_1')?.resultSummary).toBeUndefined();
   });
 
-  test('updates error summary from task_error output', () => {
-    const board = new BackgroundJobBoard();
+  test('an empty completed label cannot publish an error either', () => {
+    const board = new ProductionBoard();
     board.registerLaunch({
       taskID: 'ses_1',
       parentSessionID: 'parent-1',
@@ -686,22 +917,38 @@ describe('BackgroundJobBoard', () => {
       description: 'map files',
     });
 
-    board.updateFromStatusOutput(
-      [
-        'task_id: ses_1',
-        'state: cancelled',
-        '',
-        '<task_error>',
-        'cancelled by user',
-        '</task_error>',
-      ].join('\n'),
-    );
+    board.updateStatus({
+      taskID: 'ses_1',
+      state: 'completed',
+      resultSummary: '',
+    });
 
     expect(board.get('ses_1')).toMatchObject({
+      state: 'running',
+    });
+    expect(board.get('ses_1')?.resultSummary).toBeUndefined();
+  });
+
+  test('cancellation text cannot bypass the gate', () => {
+    const board = new ProductionBoard();
+    board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      description: 'map files',
+    });
+
+    board.updateStatus({
+      taskID: 'ses_1',
       state: 'cancelled',
-      terminalUnreconciled: true,
       resultSummary: 'cancelled by user',
     });
+
+    expect(board.get('ses_1')).toMatchObject({
+      state: 'running',
+      terminalUnreconciled: false,
+    });
+    expect(board.get('ses_1')?.resultSummary).toBeUndefined();
   });
 
   test('resolves task IDs and aliases within parent scope', () => {
@@ -788,6 +1035,88 @@ describe('BackgroundJobBoard', () => {
       terminalUnreconciled: true,
       timedOut: false,
     });
+  });
+
+  test('preserveRun terminal promotion re-fires the suppressed recovery wake', () => {
+    const board = new BackgroundJobBoard();
+    const listener = mock(() => {});
+    board.setTerminalStateListener(listener);
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'unattributed oracle task',
+      provisional: true,
+      now: 100,
+    });
+    board.markStopped('child-1', 'no outcome', 200);
+    const stops = listener.mock.calls.length;
+    expect(stops).toBeGreaterThan(0);
+
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      description: 'unattributed oracle task',
+      preserveRun: true,
+      now: 300,
+    });
+
+    expect(listener).toHaveBeenLastCalledWith('child-1');
+    expect(listener.mock.calls.length).toBe(stops + 1);
+  });
+
+  test('promoteProvisional re-fires the wake for a terminal placeholder and stays silent for a running one', () => {
+    const board = new BackgroundJobBoard();
+    const listener = mock(() => {});
+    board.setTerminalStateListener(listener);
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      provisional: true,
+      now: 100,
+    });
+    board.registerLaunch({
+      taskID: 'child-2',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      provisional: true,
+      now: 100,
+    });
+    board.markStopped('child-1', 'no outcome', 200);
+    const stops = listener.mock.calls.length;
+
+    board.promoteProvisional('child-1', 'parent-1');
+    expect(listener.mock.calls.length).toBe(stops + 1);
+    expect(listener).toHaveBeenLastCalledWith('child-1');
+
+    board.promoteProvisional('child-2', 'parent-1');
+    expect(listener.mock.calls.length).toBe(stops + 1);
+  });
+
+  test('promoteProvisional paints the owning call metadata', () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'child-1',
+      parentSessionID: 'parent-1',
+      agent: 'oracle',
+      provisional: true,
+      now: 100,
+    });
+
+    const promoted = board.promoteProvisional('child-1', 'parent-1', {
+      agent: 'explorer',
+      description: 'owned call',
+      objective: 'full objective text',
+      background: true,
+    });
+
+    expect(promoted?.provisional).toBe(false);
+    expect(promoted?.agent).toBe('explorer');
+    expect(promoted?.description).toBe('owned call');
+    expect(promoted?.objective).toBe('full objective text');
+    expect(promoted?.background).toBe(true);
   });
 
   test('notifies terminal listener on updateStatus terminal transition', () => {
@@ -965,7 +1294,7 @@ describe('BackgroundJobBoard', () => {
     });
   });
 
-  test('live busy session does not reopen stale cancelled jobs', () => {
+  test('confirmed live busy retracts a cancelled publication', () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({
       taskID: 'ses_1',
@@ -982,16 +1311,17 @@ describe('BackgroundJobBoard', () => {
     const updated = board.markRunningFromLiveSession('ses_1', 200);
 
     expect(updated).toMatchObject({
-      state: 'cancelled',
-      terminalUnreconciled: true,
+      state: 'running',
+      terminalUnreconciled: false,
       lastLiveBusyAt: 200,
+      terminalRevision: 2,
     });
-    expect(updated?.completedAt).toBeDefined();
-    expect(updated?.terminalState).toBe('cancelled');
-    expect(updated?.resultSummary).toBe('upstream cancelled during compaction');
+    expect(updated?.completedAt).toBeUndefined();
+    expect(updated?.terminalState).toBeUndefined();
+    expect(updated?.resultSummary).toBeUndefined();
   });
 
-  test('live busy session does not reopen explicit cancel requests', () => {
+  test('live busy reopens cancellation while preserving its intent', () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({
       taskID: 'ses_1',
@@ -1003,13 +1333,13 @@ describe('BackgroundJobBoard', () => {
     const updated = board.markRunningFromLiveSession('ses_1', 200);
 
     expect(updated).toMatchObject({
-      state: 'cancelled',
+      state: 'running',
       cancellationRequested: true,
-      terminalUnreconciled: true,
+      terminalUnreconciled: false,
     });
   });
 
-  test('live busy session does not reopen reconciled stale cancellations', () => {
+  test('live busy retracts even reconciled cancellation publications', () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({
       taskID: 'ses_1',
@@ -1022,9 +1352,9 @@ describe('BackgroundJobBoard', () => {
     const updated = board.markRunningFromLiveSession('ses_1', 200);
 
     expect(updated).toMatchObject({
-      state: 'reconciled',
+      state: 'running',
       terminalUnreconciled: false,
-      terminalState: 'cancelled',
+      terminalState: undefined,
       lastLiveBusyAt: 200,
     });
   });
@@ -1065,7 +1395,27 @@ describe('BackgroundJobBoard', () => {
     });
   });
 
-  test('stale busy does not revive a confirmed stopped job after terminal wake', () => {
+  test('old busy leaves an acknowledged stopped publication unchanged', () => {
+    const board = new BackgroundJobBoard();
+    const run = board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      now: 100,
+    });
+    board.markStopped(run.taskID, 'no result', 150, run.generation, 150);
+    board.markReconciled(run.taskID, 160);
+    const acknowledged = board.get(run.taskID);
+    expect(
+      board.markRunningFromLiveSession(run.taskID, 150, run.generation),
+    ).toEqual({ ...acknowledged, lastLiveBusyAt: 150 });
+    expect(board.get(run.taskID)).toMatchObject({
+      state: 'stopped',
+      terminalUnreconciled: false,
+    });
+  });
+
+  test('new busy reopens an acknowledged stopped publication', () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({
       taskID: 'ses_1',
@@ -1080,7 +1430,7 @@ describe('BackgroundJobBoard', () => {
     const updated = board.markRunningFromLiveSession('ses_1', 200, generation);
 
     expect(updated).toMatchObject({
-      state: 'stopped',
+      state: 'running',
       terminalUnreconciled: false,
       lastLiveBusyAt: 200,
     });
@@ -1111,7 +1461,43 @@ describe('BackgroundJobBoard', () => {
     });
   });
 
-  test('live busy session does not reopen non-cancelled terminal jobs', () => {
+  test('relaunch lease retains exclusion but cannot hide live activity', () => {
+    // The lease excludes competing operations, not observed host activity.
+    // Revive must notice the activity and refuse while the board shows running.
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'ses_1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      now: 100,
+    });
+    const generation = board.get('ses_1')?.generation;
+    board.markStopped('ses_1', 'no result', 150, generation, 150);
+
+    const lease = board.acquireRelaunchLease('ses_1', generation ?? 1);
+    expect(lease).toBeDefined();
+
+    const leased = board.markRunningFromLiveSession('ses_1', 200, generation);
+    expect(leased).toMatchObject({
+      state: 'running',
+      terminalUnreconciled: false,
+      lastLiveBusyAt: 200,
+    });
+    expect(
+      board.acquireRelaunchLease('ses_1', generation ?? 1),
+    ).toBeUndefined();
+    if (lease) expect(board.validateLease(lease)).toBe(true);
+
+    if (lease) board.releaseLease(lease);
+
+    const revived = board.markRunningFromLiveSession('ses_1', 201, generation);
+    expect(revived).toMatchObject({
+      state: 'running',
+      terminalUnreconciled: false,
+    });
+  });
+
+  test('live busy retracts a completed publication', () => {
     const board = new BackgroundJobBoard();
     board.registerLaunch({
       taskID: 'ses_1',
@@ -1123,12 +1509,12 @@ describe('BackgroundJobBoard', () => {
     const updated = board.markRunningFromLiveSession('ses_1', 200);
 
     expect(updated).toMatchObject({
-      state: 'completed',
-      terminalUnreconciled: true,
-      terminalState: 'completed',
+      state: 'running',
+      terminalUnreconciled: false,
+      terminalState: undefined,
       lastLiveBusyAt: 200,
     });
-    expect(updated?.completedAt).toBeDefined();
+    expect(updated?.completedAt).toBeUndefined();
   });
 
   test('live busy recovery clears timeout state on running jobs', () => {
@@ -1729,6 +2115,282 @@ describe('BackgroundJobBoard', () => {
       expect(prompt).toContain('500 lines');
       expect(prompt).toContain('200 lines');
       expect(prompt).toContain('Context read by');
+    });
+  });
+
+  describe('latestReconciledByAgent (sidebar dot)', () => {
+    /** Seed one oracle job and walk it to reconciled with controlled clocks. */
+    function seedReconciled(
+      board: BackgroundJobBoard,
+      taskID: string,
+      opts: {
+        parent?: string;
+        agent?: string;
+        launchAt?: number;
+        completedAt?: number;
+        reconciledAt?: number;
+        state?: 'completed' | 'error' | 'cancelled';
+      } = {},
+    ) {
+      const parent = opts.parent ?? 'parent-1';
+      const agent = opts.agent ?? 'oracle';
+      const launchAt = opts.launchAt ?? 100;
+      board.registerLaunch({
+        taskID,
+        parentSessionID: parent,
+        agent,
+        description: `${taskID} job`,
+        now: launchAt,
+      });
+      board.updateStatus({
+        taskID,
+        state: opts.state ?? 'completed',
+        resultSummary: 'done',
+        now: opts.completedAt ?? launchAt + 100,
+      });
+      board.markReconciled(taskID, opts.reconciledAt ?? launchAt + 200);
+    }
+
+    test('selects max lastUsedAt per agent across four reconciled sessions', () => {
+      // Cap 4: every seeded session stays accessible, so the assertion
+      // exercises selection, not LRU eviction (covered separately).
+      const board = new BackgroundJobBoard({ maxReusablePerAgent: 4 });
+      seedReconciled(board, 'ses_a', { launchAt: 100, reconciledAt: 300 });
+      seedReconciled(board, 'ses_b', { launchAt: 400, reconciledAt: 600 });
+      seedReconciled(board, 'ses_c', { launchAt: 700, reconciledAt: 900 });
+      seedReconciled(board, 'ses_d', { launchAt: 1000, reconciledAt: 1200 });
+      expect(
+        board.latestReconciledByAgent('parent-1').get('oracle')?.taskID,
+      ).toBe('ses_d');
+
+      // ses_a becomes the most recently used despite being oldest-launched.
+      board.markUsed('parent-1', 'ses_a', 5000);
+
+      const latest = board.latestReconciledByAgent('parent-1');
+      expect(latest.get('oracle')).toMatchObject({
+        taskID: 'ses_a',
+        terminalState: 'completed',
+      });
+    });
+
+    test('excludes unattributed placeholders even after acknowledgement', () => {
+      const board = new BackgroundJobBoard({ maxReusablePerAgent: 4 });
+      board.registerLaunch({
+        taskID: 'ses_placeholder',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        provisional: true,
+        now: 100,
+      });
+      board.updateStatus({
+        taskID: 'ses_placeholder',
+        state: 'completed',
+        now: 200,
+      });
+      board.markReconciled('ses_placeholder', 300);
+
+      // Same exclusion as the prompt's reusable section: the sidebar dot
+      // must not advertise a placeholder nobody attributed.
+      expect(board.latestReconciledByAgent('parent-1').has('oracle')).toBe(
+        false,
+      );
+
+      // An attributed sibling still selects normally.
+      seedReconciled(board, 'ses_attributed', { launchAt: 400 });
+      expect(
+        board.latestReconciledByAgent('parent-1').get('oracle')?.taskID,
+      ).toBe('ses_attributed');
+    });
+
+    test('includes a finished session before the parent acknowledges it', () => {
+      const board = new BackgroundJobBoard();
+      board.registerLaunch({
+        taskID: 'ses_done',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        now: 100,
+      });
+      board.updateStatus({
+        taskID: 'ses_done',
+        state: 'completed',
+        now: 200,
+      });
+
+      expect(
+        board.latestReconciledByAgent('parent-1').get('oracle')?.taskID,
+      ).toBe('ses_done');
+    });
+
+    test('excludes running, statusUncertain, and stopped-retained jobs', () => {
+      const board = new BackgroundJobBoard();
+      seedReconciled(board, 'ses_ok');
+
+      board.registerLaunch({
+        taskID: 'ses_running',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        now: 100,
+      });
+
+      board.registerLaunch({
+        taskID: 'ses_uncertain',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        now: 100,
+      });
+      board.claimWallClockDeadline({
+        taskID: 'ses_uncertain',
+        generation: board.get('ses_uncertain')?.generation ?? -1,
+        now: 150,
+      });
+      board.finalizeWallClockTimeout({
+        taskID: 'ses_uncertain',
+        generation: board.get('ses_uncertain')?.generation ?? -1,
+        statusUncertain: true,
+        resultSummary: 'status unavailable',
+        now: 200,
+      });
+      board.markReconciled('ses_uncertain', 300);
+
+      board.registerLaunch({
+        taskID: 'ses_stopped',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        now: 100,
+      });
+      board.markStopped('ses_stopped', 'no native result', 110, undefined, 110);
+      board.markReconciled('ses_stopped', 300);
+
+      const latest = board.latestReconciledByAgent('parent-1');
+      expect(latest.get('oracle')?.taskID).toBe('ses_ok');
+      expect(new Set(latest.keys())).toEqual(new Set(['oracle']));
+    });
+
+    test('covers every reconciled terminal state: completed, error, cancelled', () => {
+      const board = new BackgroundJobBoard();
+      seedReconciled(board, 'ses_done', {
+        agent: 'explorer',
+        state: 'completed',
+      });
+      seedReconciled(board, 'ses_err', { agent: 'fixer', state: 'error' });
+      seedReconciled(board, 'ses_cancel', {
+        agent: 'designer',
+        state: 'cancelled',
+      });
+
+      const latest = board.latestReconciledByAgent('parent-1');
+      expect(latest.get('explorer')?.terminalState).toBe('completed');
+      expect(latest.get('fixer')?.terminalState).toBe('error');
+      expect(latest.get('designer')?.terminalState).toBe('cancelled');
+    });
+
+    test('markUsed on an older session moves the selection (user override)', () => {
+      const board = new BackgroundJobBoard();
+      seedReconciled(board, 'ses_old', { launchAt: 100, reconciledAt: 300 });
+      seedReconciled(board, 'ses_new', { launchAt: 400, reconciledAt: 600 });
+
+      expect(
+        board.latestReconciledByAgent('parent-1').get('oracle')?.taskID,
+      ).toBe('ses_new');
+
+      // Explicit reuse of the old session must win the dot.
+      board.markUsed('parent-1', 'ses_old', 5000);
+      expect(
+        board.latestReconciledByAgent('parent-1').get('oracle')?.taskID,
+      ).toBe('ses_old');
+    });
+
+    test('LRU trim beyond maxReusablePerAgent evicts the oldest and keeps the selection correct', () => {
+      const board = new BackgroundJobBoard({ maxReusablePerAgent: 2 });
+      seedReconciled(board, 'ses_1', { launchAt: 100, reconciledAt: 300 });
+      seedReconciled(board, 'ses_2', { launchAt: 400, reconciledAt: 600 });
+      seedReconciled(board, 'ses_3', { launchAt: 700, reconciledAt: 900 });
+
+      // The oldest was evicted by the count cap; selection falls to the
+      // newest survivor.
+      expect(board.get('ses_1')).toBeUndefined();
+      const latest = board.latestReconciledByAgent('parent-1');
+      expect(latest.get('oracle')?.taskID).toBe('ses_3');
+    });
+
+    test('relaunch of the selected session (no preserveRun) falls back to the previous reconciled', () => {
+      const board = new BackgroundJobBoard();
+      seedReconciled(board, 'ses_first', { launchAt: 100, reconciledAt: 300 });
+      seedReconciled(board, 'ses_second', { launchAt: 400, reconciledAt: 600 });
+      expect(
+        board.latestReconciledByAgent('parent-1').get('oracle')?.taskID,
+      ).toBe('ses_second');
+
+      const lease = board.acquireRelaunchLease(
+        'ses_second',
+        board.get('ses_second')?.generation ?? -1,
+      );
+      expect(lease).toBeDefined();
+      board.registerLaunch({
+        taskID: 'ses_second',
+        parentSessionID: 'parent-1',
+        agent: 'oracle',
+        relaunchLease: lease,
+        now: 1000,
+      });
+
+      // The relaunched job is running again — only the older reconciled
+      // session remains a dot target.
+      const latest = board.latestReconciledByAgent('parent-1');
+      expect(latest.get('oracle')?.taskID).toBe('ses_first');
+    });
+
+    test('scopes by parentSessionID; drop and clearParent empty the projection', () => {
+      const board = new BackgroundJobBoard();
+      seedReconciled(board, 'ses_mine', { parent: 'parent-1' });
+      seedReconciled(board, 'ses_other', { parent: 'parent-2' });
+
+      expect(
+        board.latestReconciledByAgent('parent-1').get('oracle')?.taskID,
+      ).toBe('ses_mine');
+      expect(
+        board.latestReconciledByAgent('parent-2').get('oracle')?.taskID,
+      ).toBe('ses_other');
+      expect(board.latestReconciledByAgent('parent-3').size).toBe(0);
+
+      board.drop('ses_mine');
+      expect(board.latestReconciledByAgent('parent-1').size).toBe(0);
+
+      board.clearParent('parent-2');
+      expect(board.latestReconciledByAgent('parent-2').size).toBe(0);
+    });
+
+    test('mutation listener fires on launch, trim, and drop', () => {
+      const board = new BackgroundJobBoard({ maxReusablePerAgent: 1 });
+      let calls = 0;
+      board.addMutationListener(() => {
+        calls += 1;
+      });
+
+      seedReconciled(board, 'ses_1', { launchAt: 100, reconciledAt: 300 });
+      const afterFirst = calls;
+      expect(afterFirst).toBeGreaterThan(0);
+
+      // Second reconciled session trims the first (count cap 1).
+      seedReconciled(board, 'ses_2', { launchAt: 400, reconciledAt: 600 });
+      const afterTrim = calls;
+      expect(afterTrim).toBeGreaterThan(afterFirst);
+
+      board.drop('ses_2');
+      expect(calls).toBeGreaterThan(afterTrim);
+
+      board.removeMutationListener(() => {});
+      expect(calls).toBeGreaterThan(0);
+    });
+
+    test('latestReconciledByAgent never mutates lastUsedAt (read-only)', () => {
+      const board = new BackgroundJobBoard();
+      seedReconciled(board, 'ses_1', { launchAt: 100, reconciledAt: 300 });
+      const before = board.get('ses_1')?.lastUsedAt;
+
+      board.latestReconciledByAgent('parent-1');
+
+      expect(board.get('ses_1')?.lastUsedAt).toBe(before);
     });
   });
 });

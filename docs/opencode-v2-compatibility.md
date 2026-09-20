@@ -1,9 +1,16 @@
 # OpenCode v2 (`opencode2`) Compatibility
 
-oh-my-opencode-slim installs and runs on **both** OpenCode v1 (`opencode`) and
-OpenCode v2 (`opencode2`) from a single published package. This document
-explains how the dual-compatibility works, what is supported on each host, the
-minimum v2 build each feature needs, and how it degrades on older builds.
+oh-my-opencode-slim installs and runs on **both** OpenCode v1 (`opencode`)
+and OpenCode v2 (`opencode2`) from a single published package. This document
+describes how each host loads the plugin, what is supported where, and how to
+register it.
+
+The verified compatibility baseline is **OpenCode v2.0.7**. The plugin
+requires OpenCode v2.0.7+ on v2 hosts; older v2 hosts are unsupported.
+The adapter targets the v2 plugin API surface (see
+[The v2 plugin API surface](#the-v2-plugin-api-surface-this-adapter-uses)),
+and the compile-time mirror guard below is pinned to `@opencode/plugin`
+2.0.7.
 
 ## How it works
 
@@ -12,194 +19,524 @@ The package's default export is an object:
 ```ts
 export default {
   id: 'oh-my-opencode-slim',
-  tui: true,             // marker: this package ships a `./tui` entry for v2 TUI hosts
   server: OhMyOpenCodeLite, // v1 plugin function (PluginInput) => Promise<Hooks>
   setup: createV2Setup(),   // v2 promise-plugin setup (ctx) => Promise<cleanup>
 };
 ```
 
+There is deliberately **no `tui` key** on this export: hosts validate a
+server plugin module's `tui` field (it must be a function and must not
+coexist with `server`), so a boolean `tui: true` marker gets the whole
+plugin rejected with "invalid tui export".
+
 - **v1 loader** (`readV1Plugin` in `packages/opencode/src/plugin/shared.ts`)
-  detects an object with a `server` field and calls `plugin.server(input)`.
-  This is the original, unchanged v1 code path — v1 behavior is identical to
-  previous releases.
+  detects an object with a `server` field and calls `plugin.server(input)`
+  with the full v1 `PluginInput`. Extra keys (such as `setup`) are ignored on
+  this path.
+- **Embedded v2 pass on v1 hosts.** Every v1 host (≥ v1.17.10) also boots
+  the v2 core, which reads the same config (migrating `plugin:` entries to
+  `plugins:`) and calls `setup(ctx)` with a registration-only context
+  (agent/aisdk/catalog/command/integration/plugin/reference/skill — no
+  tool/session/event/mcp/generate). A dual-export plugin registered via the
+  v1 `plugin:` key therefore gets **both** invocations: full v1
+  functionality flows through `server()`, while the parallel pass produces
+  the expected `[v2] … failed` / `bridges: 4` log noise (see
+  [Environment caveats](#environment-caveats)). A v2 `plugins:` entry yields
+  the setup pass alone — v1 does not convert v2 plugin declarations into v1
+  hooks.
 - **v2 loader** (`PluginModule` schema in
   `packages/core/src/plugin/supervisor.ts`) decodes `default` as
   `{ id, setup }` (Effect Schema 4 rejects function defaults) and calls
   `setup(ctx)` via the promise-plugin bridge.
-- **v2 TUI** additionally loads the `./tui` entry (below) when the server-side
-  export declares `tui: true`.
+- **v2 TUI** loads the `./tui` entry unconditionally: the TUI runtime runs
+  its own `kind: "tui"` loader pass over the same plugin list and resolves
+  the entry through the package's `exports["./tui"]` map — the server-side
+  export plays no role in that discovery.
 
 Three builds are produced:
 
 | Export | File | Build | Externals |
 |---|---|---|---|
 | `.` (main) | `dist/index.js` | `build:plugin` | zod, jsdom, @opencode-ai/*, @opentui/* (shared with v1 host) |
-| `./server` | `dist/server.js` | `build:v2` | jsdom only (self-contained for v2) |
+| `./server` | `dist/server/index.js` | `build:v2` | jsdom only (self-contained for v2) |
 | `./tui` | `dist/tui2.js` | `build:tui` | same external set as `build:plugin` (composes the v1 TUI entry; inlines zod) |
 
-v2's plugin resolver tries the `server` subpath first
-(`subpaths: ["server", ""]`), so a v2 package install loads the self-contained
-`dist/server.js`. v1 uses the main entry.
+The optional `@opentui/*` peers track `@opencode/plugin`'s peer floor
+(`>=0.5.10`; pinned exactly at `0.5.11`) so the v2 TUI entry satisfies
+the stable host's peer range.
 
-**Supported v2 builds:** verified on `beta-18269` and `beta-18286` (add-only
-command drafts; flat session `prompt`/`synthetic`/`rename`/`switchAgent`).
-Newer builds add the capabilities listed under
-[Capability floors](#capability-floors-and-version-policy).
+v2's plugin resolver tries the `server` subpath first
+(`subpaths: ["server", ""]`), which the exports map resolves directly to
+`dist/server/index.js` — the self-contained v2 server bundle, and also the
+entrypoint v2 loads when the `dist/server` directory is registered directly
+(see [Installing on v2](#installing-on-v2)); the release artifact check
+requires it. v1 uses the main entry.
+
+Upstream npm naming split with the stable line: v2 ships as
+`@opencode/plugin` / `@opencode/client` / `@opencode/sdk` / `@opencode/cli`
+(at `2.0.x`), while `@opencode-ai/plugin` and `@opencode-ai/sdk` are V1-only
+packages that will never carry the v2 surface. The plugin
+intentionally keeps its v1 runtime pins and hand-mirrors the subset of the v2
+plugin context it consumes in `src/v2/types.ts` — the v1 host must be able to
+load the main build with no v2 package installed. This is a known tradeoff,
+not an oversight: the mirror is refreshed by hand and can drift from
+upstream, so every v2 release bump needs a deliberate diff of
+`src/v2/types.ts` against the new `@opencode/plugin`. That diff is
+backed by a compile-time tripwire: `src/v2/mirror-conformance.ts` — typechecked
+against the `@opencode/plugin` devDependency, pinned to the audited
+version — fails `bun run typecheck` when either the mirror or the
+pinned official surface drifts (hook-name sets, key payload fields).
+The guard file must stay non-test-suffixed: tsconfig excludes
+test-suffixed files from tsc, so a `.test.ts` guard silently checks
+nothing.
+
+Verified live on OpenCode v2 (all bridges green — health check
+`bridges:11`, +1 on hosts that accept the `session.model.request` hook
+name for the chat.headers bridge; the event stream, bridges, and
+orchestrator-wake children-driven degraded mode are exercised end-to-end
+on the stable host — live mock-driven re-verification on 2026-09-09
+included a queued wake firing after 60 s of parent idle with a stalled
+background child). v2 conformance is compile-time-pinned by the
+mirror-conformance guard against the `@opencode/plugin` 2.0.7
+devDependency and exercised by the mock-driven bridge tests. Every v2
+API the adapter touches is
+capability-probed at runtime (`typeof ctx.mcp?.transform === 'function'`,
+`s.switchModel`, `ctx.generate`, …), so a host lacking one capability
+degrades that single feature with a log line instead of breaking the load.
+The session hooks are the deliberate exception: on full contexts they
+register unconditionally and a
+registration failure fails setup (see
+[The v2 adapter](#the-v2-adapter-srcv2setupts)).
+`ctx.mcp.transform` in particular is present in **all** v2.0.x stable hosts;
+its probe only ever matters on non-stable host builds.
 
 ## The v2 adapter (`src/v2/setup.ts`)
 
 `setup(ctx)` wraps the existing v1 factory rather than reimplementing it:
 
 1. Builds a v1-shaped `PluginInput` from the v2 context
-   (`src/v2/client-shim.ts`): the project directory from `ctx.location`
-   (v2 ≥ #45403; `process.cwd()` on older builds), and a shim `client` that
-   **really delegates** the v1 SDK call shapes to v2 flat session calls —
-   `session.get`, `session.abort`→`interrupt`, `session.messages`→`context`,
-   `session.prompt` (as `delivery: "steer"`), and `session.update`→`rename`.
+   (`src/v2/client-shim.ts`): the project directory from `ctx.location`,
+   and a shim `client` that **really delegates** the v1 SDK call shapes to
+   v2 flat session calls — `session.get`, `session.abort`→`interrupt`
+   (`resume: false` aborts the active run), `session.messages`→`context`,
+   `session.prompt` (default `delivery: "steer"`; `noReply: true` maps to
+   `delivery: "queue", resume: false`), `session.update`→
+   `session.update` (`{sessionID, title}`), `session.delete`→`remove` (same
+   `DELETE /api/session/:id`; stops the smartfetch secondary-model temp
+   sessions leaking), and `session.list` (v2 `Session.Info` page → the v1
+   `{data}` envelope with `directory` derived from `location` and `outcome`
+   mapped, used by the interview dashboard's session scan and the
+   orchestrator-wake children enumeration). Note that `remove` and `list`
+   are **not part of the stock v2 plugin session domain** — the
+   capability probes only succeed on hosts that extend it, and all v2.0.x
+   stable hosts take the degraded paths (see
+   [Not exposed to plugins: `session.list` / `session.remove`](#not-exposed-to-plugins-sessionlist-sessionremove)).
    The shim marks the input `hostFlavor: 'v2'` and never fakes success
-   shapes: methods the host lacks degrade with an honest log (or are omitted
-   entirely, as with `session.get`, so capability probes see the truth).
+   shapes: methods the host lacks degrade with an honest log (or are
+   omitted entirely, as with `session.get`, so capability probes see the
+   truth).
 2. Invokes `OhMyOpenCodeLite(pluginInput)` to reuse **all** existing build
    logic (config, agents, tools, hooks, job board, multiplexer, companion).
 3. Runs the v1 `config()` hook against a synthesized config to resolve agent
    models and the slash commands.
 4. Bridges the returned v1 `Hooks` into v2 registrations:
    - `agent` → `ctx.agent.transform` (model/prompt/permission adaptation +
-     `subagent`/`execute` permission mapping + prompt rewrite `task`→`subagent`
-     + `draft.default("orchestrator")`)
-   - `tool` → `ctx.tool.transform` (zod shape → JSON schema; execute shimmed)
+     `subagent`/`execute` permission mapping + `draft.default("orchestrator")`).
+     On v2 hosts the generated orchestrator/council prompts already use
+     native wording (`subagent` tool, `agent` param); the `task`→`subagent`
+     prompt rewrite remains only as a fallback for user-custom presets
+    - `tool` → `ctx.tool.transform` (zod shape → JSON schema; execute
+      shimmed; every registration carries `options: {codemode: false}` —
+      see the feature matrix note below)
    - `mcp` → `ctx.mcp.transform` (`draft.set(name, adaptMcpServer(cfg))` for
-     the built-in MCPs; v2 ≥ #45408, see below)
+     the built-in MCPs)
    - `command` → `ctx.command.transform` — v2 command drafts are add-only:
      `draft.add({name, description, execute})`. `execute` submits a
-     `<omos-cmd-command data-name="...">` marker as a user prompt; the session
-     context hook recovers it and dispatches to the v1
+     `<omos-cmd-command data-name="...">` marker as a user prompt; the
+     session context hook recovers it and dispatches to the v1
      `command.execute.before` hook (deepwork/reflect/loop)
-   - a single `ctx.session.hook("context")` handles the system/messages
-     transforms (SystemPart[]/Message.content shape conversion),
-     `chat.message` agent tracking, and interview + generic command marker
-     dispatch — mutating only the trailing message so earlier content stays
-     byte-identical (provider prompt-cache prefix reuse)
-   - `tool.execute.before/after` → `ctx.tool.hook` via
-     `createToolExecuteBridges` (`src/v2/setup.ts`): the host `subagent` tool
-     is normalized to v1 `task` semantics (name mapping, `agent`→
-     `subagent_type`, `sessionID`→`task_id`, and back after the hook so v2
-     executes the repaired input). A throwing `execute.before` **rethrows** —
-     v2 rejects the tool call, which is how the v1 anti-duplicate /
-     relaunch-lease guards enforce on v2
-   - `event` → `ctx.event.subscribe()` loop feeding `mapV2EventToV1`
-     (`src/v2/event-adapter.ts`): additive synthesis only — the raw v2 event
-     is always dispatched first (the interview bridge depends on it), then
-     synthesized v1 shapes: idle `session.status` → `session.idle`, flat
-     child `session.created` → v1 early-registration
-     `{info: {id, parentID, agent?}}`, and usage telemetry
-     (`session.usage.updated`/`session.step.ended`) → a deduplicated
-     completed-assistant `message.updated` for the cache monitor
+    - a single `ctx.session.hook("context")` handles the system/messages
+      transforms (SystemPart[]/Message.content shape conversion),
+      `chat.message` agent tracking, and interview + generic command marker
+      dispatch — mutating only the trailing message so earlier content stays
+      byte-identical (provider prompt-cache prefix reuse). While the
+      bridged messages transform runs, parts injected through
+      `cache-safe-injection` carry a v2 `ContentPart.cache`
+      `{type: "ephemeral"}` hint (CacheHint tagging) so providers that
+      honor manual breakpoints cap the injected zone's cache contribution;
+      the hint is scoped per request (an `AsyncLocalStorage` scope around
+      the bridged transform) so concurrent sessions' transforms cannot
+      interleave their set/restore, and the v1 pipeline never enters the
+      scope, so v1 payload bytes never change.
+    - a native `ctx.session.hook("prompt")` registration (capability-
+      guarded): the v2 prompt hook fires **once per admitted input** with
+      the eventual inbox User `messageID`, giving the v1 `chat.message`
+      consumers (task-session-manager / orchestrator-wake
+      `observeChatMessage`, `toolLoopGuard.observeNewUserMessage`) true
+      once-per-admission fidelity with prompt parts. The FIRST admitted
+      prompt per session is deferred until the first agent-bearing
+      context event arrives, then delivered once with parts + agent
+      together — the v1 `chat.message` handler only registers the session
+      agent when a delivery carries one, and its consumers gate on that
+      registration, so an agent-less first forward would be dropped (lost
+      input-wait latch clearing / wake-progress rearm). Bounded fallbacks
+      (next admission, or a context event whose trailing user message has
+      moved past the pending one) flush a still-pending prompt best-known
+      when no agent is ever learned. When the prompt hook registers, the
+      context hook's per-request `chat.message` emulation narrows to
+      agent/model discovery; hosts that reject the hook name keep the
+      full emulation as fallback.
+    - a native `ctx.session.hook("model.request")` registration
+      (capability-guarded): the v2 equivalent of the v1 `chat.headers` hook.
+      Fires once per provider request with a mutable `headers` record the
+      host merges into the outgoing HTTP request. The bridge replays the v1
+      Copilot initiator-header semantics: for `github-copilot` /
+      `github-copilot-enterprise` primary requests whose trailing user
+      message is an internal-initiator admission (orchestrator-wake queue
+      prompts, foreground-fallback replays), it sets `x-initiator: agent`
+      so Copilot's backend does not account plugin-driven turns as user
+      activity. The internal marker is learned in-band — prompt `metadata`
+      persisted onto the transcript user message (visible on the
+      context-event envelope) plus an admission tracker for
+      `session.synthetic` wakes (synthetic admissions skip the prompt hook
+      and the host drops their metadata from the LLM envelope, so the shim
+      records a client-chosen `msg_`-prefixed admission id the host
+      honors). Auxiliary kinds (compaction/title/generate) are skipped —
+      v2's built-in Copilot provider hook already marks those, and the
+      native fetch layer only escalates a pre-set `x-initiator: agent`
+      (never resets it to `user`), so the bridge composes with the
+      built-in. Known deviation: v1 also treats compaction-continuation
+      turns (`compaction_continue` part metadata) as internal; v2 core has
+      no such key and the bridge checks only the plugin metadata key, so a
+      primary continuation turn following compaction of an
+      internal-initiated session goes unmarked (false-negative only — a
+      narrow window that can only under-mark, never over-mark). Headers
+      are transport-level; no payload content is read or mutated. Hosts
+      that reject the hook name keep the pre-bridge behavior (header
+      simply unset) with a one-time log.
+    - `tool.execute.before/after` → `ctx.tool.hook` via
+      `createToolExecuteBridges` (`src/v2/setup.ts`): the host `subagent`
+      tool is normalized to v1 `task` semantics (name mapping, `agent`→
+      `subagent_type`, `sessionID`→`task_id`, and back after the hook so
+      v2 executes the repaired input). A throwing `execute.before`
+      **rethrows** — v2 rejects the tool call, which is how the v1
+      anti-duplicate / relaunch-lease guards enforce on v2. The after
+      bridge honors v2's status discrimination: `error` events synthesize
+      the v1 after-hook output from the error text (so json-error-recovery
+      still appends its reminder to a failed call's output), and an
+      errored call never presents its result content as a success.
+    - `event` → `ctx.event.subscribe()` loop feeding `mapV2EventToV1`
+      (`src/v2/event-adapter.ts`): additive synthesis only — the raw v2 event
+      is always dispatched first (the interview bridge depends on it), then
+      synthesized v1 shapes: flat child `session.created` → v1
+      early-registration `{info: {id, parentID, agent?}}`, flat
+      `session.deleted` → the v1 deletion-cleanup shape carrying **both**
+      id spellings the v1 consumers read (`properties.info.id` for the
+      cache monitor's session eviction, `properties.sessionID` for the
+      task-session-manager's tombstone/board teardown; no `generation` is
+      fabricated, so the event-router's unproven-relaunch deletion fence
+      keeps its strength), usage telemetry
+      (`session.usage.updated`/`session.step.ended`) → a deduplicated
+      completed-assistant `message.updated` for the cache monitor, the Form
+      flow (`form.created`/`form.replied`/`form.cancelled`) → v1
+      `question.asked`/`question.replied`/`question.rejected`
+      (`form.id` → the question request id; forms owned by the `"global"`
+      sentinel are skipped), and `permission.asked` field mapping to the v1
+      names (`permission` ← `action`, `patterns` ← `resources`;
+      `permission.replied` passes through raw — v2's shape already matches
+      the v1 event). V2 hosts publish durable `session.execution.started/
+      succeeded/failed/interrupted` and emit no busy/idle `session.status`
+      and no `session.idle` on the event stream — the observed payloads
+      always ride under `data` (verified live, 80-event capture). The
+      adapter synthesizes the v1 lifecycle shapes from those execution
+      events (`started` → busy `session.status`; terminal subtypes → idle
+      `session.status` + `session.idle`; `failed` → a v1 `session.error`
+      with the host error payload before the idle pair), and no
+      `session.status`-based fallback remains. The execution-event
+      synthesis keeps orchestrator-wake suppression/arm scheduling and the
+      foreground fallback working on v2 hosts, while the Form and
+      permission bridges above feed the companion's waiting-input
+      indicator and the task-session-manager input-wait gate.
    - `generate.text` → one-shot generation channel probed on `ctx.generate`
      and threaded as `experimental_v2.generateText`, powering the webfetch
      secondary-model summaries without a temp session
    - `dispose` → returned cleanup
 
-Each bridge is independently try/catch-guarded so one failure cannot disable
-the rest, and a zero-registration load logs a loud health-check warning.
+Each domain-transform bridge (agent/tool/mcp/command) is independently
+try/catch-guarded so one failure cannot disable the rest, and a
+zero-registration load logs a loud health-check warning. The session hooks
+(`prompt`, `context`, `model.request`, `compaction`) register
+**unconditionally** on full v2 contexts: a registration failure fails
+setup loudly instead of degrading — hook-name rejection is treated as a
+host contract violation, not a degrade path.
+
+### Task-control prompt and idle-wait contracts
+
+The v1-facing `session.prompt` shim preserves text and file attachments. A
+`noReply: true` write is a real, non-synthetic prompt with `queue` + `resume: false`;
+queue alone would not preserve the no-resume intent. Unsupported per-call
+agent/model/variant overrides are rejected before writing, never silently dropped
+or implemented by non-atomic `switchAgent`/`switchModel` calls. `task_message`
+explicitly inherits persisted selection on v2; other noReply callers, including
+interview notifications, retain the same no-resume semantics.
+
+`experimental_v2.waitForSessionIdle(sessionID)` exists only when the host provides
+`session.wait({sessionID})`. It delegates that method alongside the unchanged
+`generateText` channel; it fabricates neither a status map nor board state.
+`session.status` remains absent. Historical `session.get` outcomes cannot authorize
+revive. The official 2.0.5 prompt intent fields and wait signature are pinned in
+`mirror-conformance.ts`, and tool→shim→host contracts have dedicated tests.
+The 2.0.5 promise adapter does not forward AbortSignal to these methods, so the
+bounded idle wait does not pretend to cancel the host operation: late settlement
+is observed without authorizing a prompt. It waits for idle within its budget,
+not for an atomic reservation; queued delivery can still follow an external resume.
+
+The terminal gate alone attributes `session.get` outcomes, in both v1 and v2.
+Only integrations explicitly declaring `hostOutcomeClock: 'shared-unix-ms'`
+(the local in-process wiring) may use them. Other factories default to distrust.
+Finite nonnegative timestamps must satisfy `max(generation start, attempt start,
+latest live activity) < time.idle <= read completion`; equality is ambiguous.
+Attempt boundaries survive handoff promotion and late ACKs. An unattributable
+outcome cannot establish or preserve host-outcome quiescence; it leaves the run
+uncertain, not stopped. Fresh `succeeded` still requires valid post-baseline result
+evidence. Independent runtime maps, native returns and cancellation keep their fences.
 
 ## Feature matrix
 
-| Capability | v1 (`opencode`) | v2 (`opencode2`) | Minimum v2 capability / degradation |
+| Capability | v1 (`opencode`) | v2 (`opencode2`) | Notes |
 |---|---|---|---|
 | Orchestrator + specialist agents, prompts & permission mapping | ✅ | ✅ `ctx.agent.transform` | — |
 | Delegation + background job board + `task_*` tools | ✅ `task` tool | ✅ host `subagent` (auto-bridged: name/args normalization in `src/v2/delegation.ts`, output parsing in the execute bridges) | — |
-| Tools (ast-grep, webfetch, task_message/task_cancel/task_revive, wait_for_user, acp_run) | ✅ | ✅ `ctx.tool.transform` | ast-grep needs its CLI binary (package, system, or lazy download); webfetch needs `jsdom` resolvable |
-| Slash commands `/deepwork` `/reflect` `/loop` | ✅ | ✅ marker round-trip | command `execute` callbacks ≥ `beta-18269`; older builds register no commands |
+| Tools (ast-grep, webfetch, task_message/task_cancel/task_revive, wait_for_user, acp_run) | ✅ | ✅ `ctx.tool.transform` | v2 requires `options: {codemode: false}` on each registration (CodeMode split): without it a tool registers cleanly but is confined to the `execute` tool's JS runtime and session catalogs yield `Unknown tool: <name>`. The plugin stamps it on every adapted tool (`adaptTool` in `src/v2/adapters.ts`; additive field, older hosts ignore it). ast-grep needs its CLI binary (package, system, or lazy download); webfetch needs `jsdom` resolvable |
+| Slash commands `/deepwork` `/reflect` `/loop` | ✅ | ✅ marker round-trip | — |
 | `/interview` | ✅ | ✅ marker command + trailing-message context bridge | — |
 | Message transforms (phase reminder, skills filter, image routing, display-name rewrite) | ✅ | ✅ via the single context hook | — |
 | Event handling (session tracking, lifecycle, cache telemetry) | ✅ | ✅ event pump + additive v2→v1 synthesis | — |
 | Tool execute hooks (apply-patch recovery, task-session, json-recovery) | ✅ | ✅ `createToolExecuteBridges` with subagent→task normalization | — |
-| Built-in MCPs (context7, gh_grep) auto-registered | ✅ | ✅ `ctx.mcp.transform` | `mcp.transform` ≥ #45408; older builds degrade to config-only — see [the snippet](#restoring-built-in-mcps-on-older-v2-builds) |
-| webfetch secondary-model summaries | ✅ | ✅ via `ctx.generate.text` | absent → secondary-model summaries are unavailable (logged) |
-| Foreground model fallback (rate-limit failover) | ✅ | ✅ shim translates re-prompt into `session.switchModel` + `delivery:"steer"` prompt | `switchModel` ≥ #43718; older builds steer on the current model with an honest log (fallback inactive) |
-| `/preset` (interactive switcher) | ✅ | ✅ TUI plugin entry (`./tui` → `dist/tui2.js`): sidebar + `/preset` dialog or `/preset <name>` fast path | TUI host needs `keymap.layer` + `ui.dialog.select`; config-file `preset` still applies at load |
-| Project directory | ✅ | ✅ `ctx.location.directory` | ≥ #45403; older builds use `process.cwd()` |
-| TUI default agent | ✅ orchestrator | ✅ orchestrator — `draft.default("orchestrator")`; recent v2 TUI builds honor `default_agent` and hoist the default to the head of the agent list | needs a recent v2 build |
+| Built-in MCPs (context7, gh_grep) auto-registered | ✅ | ✅ `ctx.mcp.transform` | `ctx.mcp.transform` is present in all v2.0.x stable hosts; the runtime capability probe is belt-and-suspenders |
+| webfetch secondary-model summaries | ✅ | ✅ via `ctx.generate.text` | host without `ctx.generate` → summaries unavailable (logged) |
+| Background-job state persistence (tombstones, deletion epochs, alias high-water marks) | ➖ process-local | ✅ via `ctx.storage` | optional domain; absent → pure in-memory fallback, zero behavior change (see [Background job state](#background-job-state-rehydrate-probe-and-persistence)) |
+| Foreground model fallback (rate-limit failover) | ✅ | ✅ shim translates re-prompt into `session.switchModel` + `delivery:"steer"` prompt | — |
+| `/preset` (interactive switcher) | ✅ | ✅ TUI plugin entry (`./tui` → `dist/tui2.js`): sidebar + `/preset` dialog or `/preset <name>` fast path | The layer registers from an `append: "app"` slot render because the host's `keymap.layer` is provider-scoped (calling it from plugin `setup` throws `Keymap.Provider is missing`); the command carries an `id` and `slash.arguments`; host needs `ui.slot` + `keymap.layer`; the interactive picker needs `ui.dialog.select` while `/preset <name>` works without it; feedback uses `ui.toast.show`; config-file `preset` still applies at load |
+| TUI default agent | ✅ orchestrator | ✅ orchestrator — `draft.default("orchestrator")`; the v2 TUI honors `default_agent` and hoists the default to the head of the agent list | — |
 | Multiplexer (tmux/zellij/herdr/cmux panes) | ✅ | ❌ host-gated off (`hostFlavor: 'v2'` → `shouldEnableMultiplexer` returns false and the session manager is forced to `type: "none"`) | by design — v2 renders subagents natively |
-| Orchestrator-wake scheduler | ✅ | ❌ evaluated, intentionally not ported | v2's built-in `subagent` tool posts completion notifications to the parent natively, which covers the wake scheduler's job; see [Limitations](#limitations) |
-| `chat.headers` (custom request headers) | ✅ | ❌ unbridged | low value: v2 exposes an HTTP request hook (`session.hook("http.request")`) — will bridge only if asked for |
+| Orchestrator-wake scheduler | ✅ todo-gated (host `todo`/`children`/`status` APIs) | ✅ children-driven degraded mode (`backgroundJobs.orchestratorWake.mode`) | v2 wake enumerates children via `session.list({parentID})` with an event-tracked fallback, gates on children without a terminal `outcome` (staleness-bounded), and delivers with `queue`; v2's native subagent completion nudges still cover the happy path — the port adds a periodic watchdog for stuck children and unreconciled jobs |
+| `chat.headers` (Copilot `x-initiator` routing) | ✅ | ✅ via `session.hook("model.request")` | transport-level only; auxiliary kinds are covered by v2's built-in Copilot provider hook |
 | Companion app | ✅ | ⚠️ unverified | independent desktop app; test separately against v2 |
 
-## Capability floors and version policy
+## Upstream behaviors to know
 
-v2 moves fast and beta numbers are CI build IDs, so floors are stated as
-upstream PR/commit references rather than versions:
+Behaviors of v2 itself that plugin authors should know about — none
+currently break this plugin:
 
-| Feature | Floor | Older-build behavior |
-|---|---|---|
-| Programmatic MCP registration (`ctx.mcp.transform`) | ≥ #45408 | MCPs stay config-only (logged); add them manually with [the snippet](#restoring-built-in-mcps-on-older-v2-builds) |
-| Foreground model switch (`ctx.session.switchModel`) | ≥ #43718 | re-prompt steers on the current model (logged) — rate-limit failover inactive |
-| Project directory (`ctx.location`) | ≥ #45403 | resolved from `process.cwd()` — run `opencode2` from your project root |
-| Command `execute` callbacks (add-only drafts) | ≥ `beta-18269` | slash commands do not register |
-
-Every v2 API the adapter touches is capability-probed at runtime
-(`typeof ctx.mcp?.transform === 'function'`, `s.switchModel`, `ctx.generate`,
-…), so one missing capability degrades that single feature with a log line
-instead of breaking the load.
-
-### Pin your plugin version on v2
-
-v2 **auto-refreshes unpinned npm plugins on every startup** (#45118) —
-`"oh-my-opencode-slim@latest"` effectively means "silently upgrade whenever a
-new version ships". During the current rapid-evolution window (both v2 and
-this adapter are changing quickly), pin an exact version:
-
-```json
-{
-  "plugin": ["oh-my-opencode-slim@2.0.3"]
-}
-```
-
-and bump it deliberately. The plugin logs its active capability set on load,
-so a pinned older build behaves exactly the same tomorrow as it does today.
-
-## Known upstream behaviors
-
-Behaviors of v2 itself that plugin authors should know about — none currently
-break this plugin:
-
-- **MCP tool namespace casing** (#45618): v2 changed the casing of generated
-  MCP tool-name namespaces. **Safe here** — neither the adapters nor the hooks
-  match raw MCP tool names; MCP access is granted per server name
-  (`"mcps": ["context7", "!gh_grep"]` in agent config), and the registration
-  uses our own server names via `draft.set(name, ...)`.
-- **`tool.execute.before` carries no `inputSchema`**: the v2 before-hook
-  event has no tool schema. We don't consume one — the bridge passes a mutable
-  `args` view and writes back what hooks produce.
-- **Command `execute` receives a prompt *object*, not a string**: v2 hands
-  the handler a `PromptInput.Prompt`. The command bridge reads `.text`
-  (`invocation?.prompt?.text ?? ''`) and never assumes a string.
-- **Duplicate idle delivery.** v2 deprecated `session.idle` in favor of
-  `session.status`; the adapter synthesizes `session.idle` additively, so an
-  idle-tolerant consumer watching both events sees idle twice per session.
+- **Event payloads ride under `data`, not `properties`.** The v2
+  event stream (SSE and `ctx.event.subscribe()`) frames each event as
+  `{id, created, type, location?, durable?, metadata?, data}` — the payload
+  is the `data` record, unlike the v1 SDK's `properties` (verified live:
+  every observed event keyed `["id","created","type","durable","data"]`,
+  with the optional `metadata?` key observed on some events).
+  The adapter reads `data` first with `properties` as a legacy fallback and
+  always writes `properties` on the synthesized v1 shapes, because that is
+  the key the v1 consumers read. The interview bridge's event handler
+  (`handleEvent` in `src/v2/interview-bridge.ts`) resolves its payload
+  data-first the same way — reading only `properties` had left its
+  transcript projection and deletion cleanup dead on live v2 for every
+  event (`handleContext` is unaffected; it consumes a different event
+  type).
+- **`session.deleted` is synthesized with a dual id spelling.** v2
+  delivers deletion flat (`{sessionID}`), and the v1 deletion consumers
+  read two different spellings: the cache monitor's session eviction
+  reads `properties.info.id`, while the task-session-manager's
+  deletion handler accepts `properties.sessionID`. The synthesized v1
+  event therefore carries both. Without this synthesis the deletion
+  cleanup (rehydrate tombstone, board teardown, idle-token/input-wait
+  clears) never fired on v2, and deleted runs resurrected as
+  forever-running ghost records on the next request.
+- **Lifecycle keys on `session.execution.*`.** V2 hosts publish durable
+  `session.execution.started/succeeded/failed/interrupted` events
+  (`{sessionID}`, plus `error` on `.failed` and `reason` on
+  `.interrupted`) and emit no busy/idle `session.status` and no
+  `session.idle` on the event stream (`session.status` remains only in the
+  schema). The adapter synthesizes the v1 lifecycle shapes from the
+  execution events (`started` → busy `session.status`; terminal subtypes →
+  idle `session.status` + `session.idle`; `failed` → a v1 `session.error`
+  with the host error payload passed through best-effort, emitted before
+  the idle pair so the error-then-idle flow the event-router expects is
+  preserved). Without this synthesis the orchestrator-wake scheduler never
+  arms on live v2 hosts.
+- **Transcript user messages carry no identity.** Context-hook
+  transcript user messages on live v2 hosts carry `{id, time, text,
+  type}` only — no `agent`, no `sessionID`. The v1 injection gates
+  (phase-reminder, background-job-board, post-file-tool-nudge) key on
+  user-message `info.agent`/`info.sessionID`, so every injection would
+  skip. The v2 context bridge stamps the context event's `sessionID` and
+  the session's known agent (from the event, falling back to the
+  session-prompt bridge's learned state) onto transcript user messages
+  before the bridged messages transform runs — metadata-only envelope
+  enrichment, strictly absence-gated (host-provided values never
+  overwritten), parts/content bytes untouched, idempotent across
+  context events. This also makes the CacheHint-tagged injected parts
+  observable on live v2 hosts.
+- **Runtime status reconciliation is capability-gated.** v2 has no
+  equivalent of the v1 live session-status map (`client.session.status`
+  is not a function on v2 hosts; `session.status` is not exposed to
+  plugins), so the task-session-manager's
+  runtime-status reconciliation poll is disabled entirely on hosts
+  without the method — a single per-instance log line notes the
+  disabled reconciliation instead of logging uncertainty every ~5s poll.
+  v1 hosts expose the method and keep the exact historical polling
+  behavior. Background job stop-confirmation was never obtainable from
+  the v2 poll anyway (the lookup failed every time).
+- **Plugin API surface and adoption status.** The v2 plugin API exposes
+  session hooks `compaction`, `generate`, and `title` (the title and
+  compaction hooks may set `result` to skip the model call entirely)
+  and TUI `ui.tabs.move()` (`tabs.open` does not focus a tab;
+  `tabs.focus` opens the tab if needed). The `SessionContext` request
+  shape carries `generation` and `providerOptions` in a single
+  `options` object — the plugin is unaffected: its context bridge
+  mutates only system/messages, and cache hints ride
+  `ContentPart.cache`. Adoption status: the **compaction hook is
+  adopted** — the plugin strips its tagged synthetic parts from the
+  compaction input; **child-session permission rules are applied** —
+  plugin-managed child sessions receive exact-match task-policy rules
+  once at creation via `ctx.session.update({sessionID, permissions})`
+  (`createPermissionRulesBridge` in `src/v2/setup.ts`; exact-match
+  strings only, no wildcards, while upstream matching semantics settle —
+  PRs #48194/#46495/#46871; triggered on plugin-managed child
+  `session.created` and fail-soft with a one-time warning on reduced
+  hosts without the method); the `generate` session hook (not the
+  `ctx.generate` text channel the webfetch summaries use), the `title`
+  hook, and the `tabs` methods are not used. On the client SDK,
+  `server.status` is named `server.info` (the plugin never calls it),
+  and the `location.reload` / `fs.write` endpoints and the Form
+  `hidden` field are likewise not adopted. The applied child-session
+  allow rules always lose to a matching user-config `deny` (see the
+  config permission policies bullet above).
+  The `title` hook needs no adoption for child sessions: v2 hosts
+  title subagent children deterministically at creation (the
+  `subagent` tool sets `title` from its `description` argument, which
+  the delegation pipeline always supplies) — the hook only matters if
+  custom title formats are wanted. Upstream is still actively fixing
+  compaction×hook plumbing and compaction×cache behavior, so
+  compaction-hook semantics may evolve; the plugin's hook callback is
+  written shape-tolerant (messages-only mutation) to ride those
+  changes.
+- **Duplicate idle delivery.** The adapter synthesizes both an idle
+  `session.status` and a `session.idle` from each terminal execution event,
+  so a consumer watching both sees idle twice per terminal transition.
   Current consumers are idempotent per session (idle-reconciliation's
   per-session timer guards); new idle consumers must tolerate duplicate
   delivery.
+- **Duplicate `permission.asked` delivery.** The adapter appends a
+  v1-field-mapped copy after the raw v2 `permission.asked` event (raw
+  first is a load-bearing invariant for v2-native handlers). Consumers
+  watching both see the ask twice with the same request id — safe because
+  every ask consumer is idempotent per request id (the input-wait
+  tracker's Set, the companion's status setters, wake suppression); new
+  ask consumers must tolerate it, like idle.
+- **Question flow is Form-based.** v2 replaced `question.*` with the Form
+  flow; the adapter synthesizes `question.asked/replied/rejected` from
+  `form.created/replied/cancelled` so v1 consumers keep working. Forms
+  owned by the `"global"` sentinel session (MCP elicitation) are not
+  synthesized — v1 question events are session-scoped.
+- **MCP tool-name namespaces are host-generated.** This plugin never
+  matches raw MCP tool names: MCP access is granted per server name
+  (`"mcps": ["context7", "!gh_grep"]` in agent config), and registration
+  uses its own server names via `draft.set(name, ...)`.
+- **`opencode reload` recreates plugin instances in-process.** The CLI
+  `opencode reload` command, the TUI reload command, and the
+  `location.reload` HTTP endpoint all rebuild the host's location
+  service layer: plugin instances are destroyed and recreated, `setup`
+  re-enters in the same process, and the host calls the cleanup
+  returned by the previous generation before the new generation loads.
+  Pending permissions and forms are cancelled, and running sessions
+  swap to the new service layer at the next step boundary. There is no
+  unload-style lifecycle hook. Module state of an npm-form plugin
+  survives the reload (the module instance is reused); a
+  local-directory plugin is forced onto a fresh module instance
+  whenever its files change. The plugin handles the in-process re-entry
+  explicitly: the v1 `dispose` hook cancels pending foreground-fallback
+  initial-delay timers and fences off in-flight fallback chains at
+  their suspension points (`foregroundFallback.dispose()` — no replay,
+  abort, or transcript read continues through the destroyed client),
+  clears the process-global wake-gate
+  progress so the next generation does not inherit the previous
+  generation's two-wake no-progress caps (`clearAllWakeSessions()`),
+  and explicitly releases companion ownership
+  (`companionManager.onExit()` — idempotent). The v2 `setup` entry
+  calls `resetV2GenerationWarnings()`, rearming the one-time
+  degradation latches (model.request ordering drift, permission-rules
+  unavailable, session.list/remove unavailable) so every generation
+  warns once. Background-job persistence resets unconditionally on
+  every generation setup behind an epoch fence, so persisted write
+  queues cannot leak across generations. The event adapter passes
+  `location.shutdown` events through raw with no synthesis. The
+  user-wait-gate (`wait_for_user` HITL latch) stays armed across a
+  reload by design, and the admission runtime defers its final
+  scheduler/tracker teardown by one macrotask so an immediate re-init
+  can retain active and queued calls.
+- **Config permission policies are kernel-enforced and deny-final.**
+  `experimental.policies` supports `action: "permission"` entries
+  (`effect: "allow"`/`"deny"`, resource wildcards) enforced by the host
+  kernel. An explicit `deny` is final and never reaches the evaluate
+  hooks: a user-config `deny` can suppress the plugin's allow rules or
+  permission upgrades, and the plugin's exact-match allow rules on
+  child sessions coexist with user config — on a match the user `deny`
+  wins over the plugin's allow. No plugin code participates in that
+  resolution.
+- **Provider failure retries are aggressive.** The host retries a
+  failing provider call up to 10 times within a total window of about
+  84 s (4xx responses are never retried). Observation-style hooks
+  therefore fire far more frequently in a failing session than in a
+  healthy one.
+
+### The v2 plugin API surface this adapter uses
+
+- **`session.update({sessionID, title?, permissions?})`.** Sets the
+  session title and/or REPLACES the session-scoped permission rule
+  list. The client shim's v1-facing `session.update({body: {title}})`
+  and the v2 interview bridge's session renames both call it, and the
+  child-session permission bridge applies its rules through the
+  `permissions` field (see the adoption-status bullet above).
+- **`session.interrupt({sessionID, resume})`.** `resume: false` aborts
+  the active run; the shim's abort path sends exactly that.
+- **`experimental.ws.handshake` / `experimental.ws.send` /
+  `experimental.ws.receive` session hooks.** Official experimental
+  hooks on the pinned surface (the mirror-conformance guard's
+  `OfficialSessionHookNames` set of 12); **not registered and not
+  used** by this plugin — they appear only in the official-set pin.
+- **Core `# Your Model` identity system part.** v2 core splices a
+  `# Your Model` identity part at `system[1]` on every LLM request. The
+  plugin's system transform keeps appending the orchestrator prompt to
+  `system[0]` and collapses all parts into one — locked by a regression
+  test in `src/index.test.ts`.
+- **Subagent `model` param.** The built-in `subagent` tool takes an
+  optional `model` argument (`"providerID/modelID"`). The delegation
+  vocabulary exposes it (`modelParam`) and the orchestrator/council
+  prompts carry a one-sentence guardrail: only set it when the user
+  explicitly asks for a specific model or variant; never guess the ID —
+  look it up with the models tool first.
 
 ## Installing on v2
 
-Add to `~/.config/opencode2/opencode.json`:
+Add the npm package, **pinned to an exact version** — v2 auto-refreshes
+unpinned npm plugins on every startup, so `@latest` effectively means
+"silently upgrade whenever a new version ships". The global config root is
+`~/.config/opencode/opencode.json`, shared with v1 (`~/.config/opencode2/`
+is not read for plugin config):
 
 ```json
 {
-  "plugin": ["oh-my-opencode-slim@2.0.3"]
+  "plugin": ["oh-my-opencode-slim@2.2.17"]
 }
 ```
 
-(Pin the exact current version — see
-[version policy](#capability-floors-and-version-policy).)
-
-For local development, point at the built `dist/server.js` directly:
+For local development, point the config at the built `dist/server`
+**directory**:
 
 ```json
 {
-  "plugin": ["/path/to/oh-my-opencode-slim/dist/server.js"]
+  "plugin": ["/path/to/oh-my-opencode-slim/dist/server"]
 }
 ```
 
@@ -207,58 +544,176 @@ Then build:
 
 ```bash
 bun install
-bun run build   # produces dist/index.js (v1), dist/server.js (v2 server),
+bun run build   # produces dist/index.js (v1), dist/server/index.js (v2
+                # server bundle, also served via the ./server subpath),
                 # dist/tui2.js (v2 TUI), dist/cli/
 ```
 
 Verify with `opencode2 run "list your specialist agents" --standalone` — the
 orchestrator should name explorer, librarian, oracle, designer, fixer.
 
+### Registration rules
+
+- **Directory or package entries only.** File-path entries (e.g.
+  `…/dist/server.js`) are rejected with the WARN
+  `configured plugin path must be a directory`. A directory entry's
+  `index.js` is the entrypoint — hence `dist/server` above.
+- **Single-file plugins need a wrapper dir** whose `index.js` re-exports the
+  original file, e.g. `~/.config/opencode/plugins-dev/<name>/index.js`
+  containing `export { default } from "/abs/path/to/plugin.js";`. Do not
+  use the auto-scanned dir names `plugin`/`plugins` for wrapper dirs — a
+  scanned duplicate next to an explicit registration hard-dies on duplicate
+  plugin ID.
+
 ## Configuring models on v2
 
 Agent models are resolved the same way as v1 (per-agent `model` in
-`oh-my-opencode-slim.json`, or inherited from the session/host default). On v2,
-set a working provider+model in your v2 config or the plugin's config file so
-delegated subagents can run.
+`oh-my-opencode-slim.json`, or inherited from the session/host default). On
+v2, set a working provider+model in your config or the plugin's config file
+so delegated subagents can run.
 
-Rate-limit fallback works on v2 builds with `switchModel` (≥ #43718): when the
-foreground model hits a rate limit, the plugin switches the session's model and
-steers the re-prompt through `delivery: "steer"`. On older builds the fallback
-stays inactive and logs honestly — switch the model manually there.
+When the foreground model hits a rate limit, the plugin switches the
+session's model (`session.switchModel`) and steers the re-prompt through
+`delivery: "steer"`. A failing `switchModel` call degrades honestly: the
+re-prompt is still delivered (on the current model) and the plugin's logs
+record that no switch happened — the fallback chain is not aborted. On
+hosts without `session.switchModel`, the fallback replay is rejected with
+a clear error instead of silently replaying on the model that just failed
+(other prompt callers, like the orchestrator-wake scheduler, only pin the
+current model and keep steering).
 
-## Restoring built-in MCPs on older v2 builds
+## Background job state: rehydrate probe and persistence
 
-On v2 builds without `ctx.mcp.transform` (< #45408) the two built-in remote
-MCPs are not auto-registered. They are plain remote URLs — copy this into your
-`~/.config/opencode2/opencode.json` to restore them:
+Two mechanisms keep the in-memory background job board honest against the
+host across process and plugin restarts:
 
-```json
-{
-  "mcp": {
-    "context7": {
-      "type": "remote",
-      "url": "https://mcp.context7.com/mcp",
-      "headers": { "CONTEXT7_API_KEY": "$CONTEXT7_API_KEY" }
-    },
-    "gh_grep": { "type": "remote", "url": "https://mcp.grep.app" }
-  }
-}
-```
+### Rehydrate existence probe (`session.get`)
 
-(`context7` needs `CONTEXT7_API_KEY`; `gh_grep` needs nothing. Drop either key
-if unused.) The librarian agent uses these for library-docs lookup and
-GitHub-wide code search; without them it still works via `webfetch`.
+Rehydration re-registers persisted *running* task tool parts so a plugin
+restart does not orphan in-flight background lanes — but a session deleted
+while the plugin was down would resurrect as a forever-running ghost.
+After rehydration registers a task, the task-session-manager transform
+fires a fire-and-forget `client.session.get` probe per newly registered
+taskID:
+
+- **Capability-gated, not host-gated — but v2-effective.** The probe runs
+  whenever the client exposes `session.get`; hosts without it skip
+  silently. The typed NotFound classification only crosses the v2 plugin
+  boundary (the host passes the raw core effect in-process): the v1 SDK
+  wraps 4xx responses as plain `Error` with a `.cause` (or returns an
+  `{error}` tuple when `throwOnError: false`), so on v1 hosts the probe
+  runs but harmlessly never tombstones — the wrapped rejection falls into
+  the transient fail-open path. The probe lives inside the existing
+  task-session-manager transform — no new pipeline step.
+- **NotFound classification is typed, never heuristic.** A rejection
+  tombstones the task only when `err._tag === 'Session.NotFoundError'`
+  (property check; never `instanceof` or message matching — the SDK error
+  class identity is unstable across host builds). Cleanup is
+  generation-freshness-guarded: the board record's generation is captured
+  before the async `get`, and a NotFound that resolves after a legitimate
+  same-ID relaunch (new generation, tombstone cleared) skips all cleanup
+  instead of deleting the live relaunched record. On a fresh hit, the four
+  probe cleanup actions run as one synchronous block — supervisor
+  `onSessionDeleted` first (it needs the record to exist so
+  deadline-exceeded runs finalize their wall-clock timeout; same ordering
+  as the event-router/coordinator deletion paths), then the rehydrate
+  tombstone, board drop, and concurrency `releaseTask` (all idempotent; a
+  missing `releaseTask` would leak an admission slot forever). The
+  canonical full deletion cleanup (input waits, idle tokens, pending-call
+  tracker, `clearParent`, task-context tracker, snapshots) runs via the
+  `session.deleted` event path.
+- **Any other rejection fails open** — the job stays registered and the
+  normal reconciliation paths keep their chance. The probe never rejects
+  unhandled.
+- **A resolved terminal outcome settles the job** through the same
+  `updateStatus` semantics as the idle-reconciliation host-outcome path:
+  `succeeded` requires usable final assistant text (otherwise the
+  textless-completion diagnostics apply, per the #1115 precedent);
+  `failed`/`interrupted` settle as error with the host outcome recorded.
+
+Related injection hardening: a remembered (possibly stale) processed
+completion skips *cleanly* — the fence check runs before the
+deletion-epoch fail-closed branch in `updateFromInjectedCompletion`, so
+replaying an old completion after a delete + same-ID relaunch can no
+longer poison the fresh generation with `markStatusUncertain`. Unobserved
+completions for a deleted task still fail closed for every provenance
+kind.
+
+### Persistence via `ctx.storage` (v2)
+
+When the v2 host exposes the optional `storage` domain, the plugin
+persists background-job lifecycle state through
+`src/utils/background-job-persistence.ts` (configured in `setup` before
+the v1 factory runs):
+
+- **Tombstones and deletion epochs** are write-through: every in-memory
+  ledger mutation queues a matching persisted update, so the persisted
+  state tracks the ledger (writes are fire-and-forget — a crash between
+  the in-memory mutation and the queue flush loses that persisted entry,
+  an accepted degradation to process-local behavior). Clearing a tombstone
+  on a legitimate relaunch is persisted too — a deleted-then-relaunched
+  task is *not* ghost-skipped after a restart, while its deletion epoch
+  survives for generation fencing (restored epochs keep the epoch counter
+  monotonic).
+- **Alias counters** persist the last-seen counter per
+  `<parentSessionID>:<prefix>`. A post-restart board seeds from these
+  high-water marks, so a new alias never collides with a historical one.
+  The alias→taskID mapping itself is **not** restored — old aliases
+  resolve as not-found after a restart, which is the intended improvement
+  over silently reusing them for unrelated tasks.
+- **Seeding is backend-only.** Without `ctx.storage` (v1 hosts, hosts
+  without the domain) the module is a pure in-memory no-op sink: zero
+  behavior change, fresh boards and ledgers start exactly as
+  process-local as before.
+- **Bounded and serialized.** Persisted tombstones (and their epoch
+  entries) self-cap at the 500 most recent by recorded time; writes for
+  one key are serialized in-process (no concurrent read-modify-write);
+  write failures log and degrade to process-local behavior.
+
+### Diagnostics
+
+Two log lines aid drift diagnosis (both hosts): the task tool's terminal
+output that carries no parsable task id is logged with a ~140-char
+preview (`task output without a task id` — the host-output-drift
+detector), and an idle observation for a *tracked managed child* with no
+running board record logs with a `[task-session-manager] WARN:` prefix
+instead of the routine idle line.
+
+**Secret redaction at the logger.** Every plugin log line — file sink,
+stderr fallback, and the append-failure path — passes through
+shape-based secret redaction at the logger's single compose point
+(`src/utils/redact.ts`): known vendor token prefixes (`sk-`, `gh*`,
+`glpat-`, `xox*`, `AKIA`/`ASIA`), URL credentials
+(`scheme://user:password@` — password only), authorization schemes
+(Bearer/Basic/token), and generic 32+-character opaque runs are masked
+to 4 leading + 2 trailing characters. This is a best-effort barrier
+against *accidental* leaks in short previews, not an adversarial
+guarantee: unprefixed short secrets, secrets containing run-breaking
+characters, and chunked or obfuscated content remain residual gaps,
+while long opaque non-secrets (UUIDs, hashes, long paths) are masked as
+accepted false positives. The parse-miss preview (`task output without
+a task id`) is stricter still: it is **structure-only** — tag and field
+names survive for drift diagnosis, but every value (XML attribute
+values, `key:`/`key=` prose values) is fully replaced with `[masked]`
+before slicing, because parse-miss content is untrusted-by-format and
+values (description fields in particular) carry user-authored text.
+All other log sites rely on the shape-based redaction at the logger
+choke point.
 
 ## Limitations
 
 ### Interview
 
-`/interview` is supported on v2 through a marker command and a trailing-message
-context bridge. The bridge keeps an in-memory transcript projection from v2
-context and streamed text events, and uses the v2 session methods for prompts,
-notifications, and renames. The markdown document remains the durable source
-of truth; completion responses without `<interview_state>` rewrite the current
-spec while retaining frontmatter and Q&A history.
+`/interview` is supported on v2 through a marker command and a
+trailing-message context bridge. The bridge keeps an in-memory transcript
+projection from v2 context and streamed text events, and uses the v2 session
+methods for prompts, notifications, and renames. Interview notifications
+admit the synthetic input with `resume: false` — the interview URL lands in
+the session without waking an agent turn (the v1 `noReply` prompt
+equivalent). The markdown document
+remains the durable source of truth; completion responses without
+`<interview_state>` rewrite the current spec while retaining frontmatter and
+Q&A history.
 
 ### v1-only, by design
 
@@ -266,36 +721,146 @@ spec while retaining frontmatter and Q&A history.
   v2 renders subagents natively, so the multiplexer is host-gated off on v2
   (`shouldEnableMultiplexer` / `sessionManagerMultiplexerConfig` in
   `src/index.ts`).
-- **Orchestrator-wake scheduler** (`backgroundJobs.orchestratorWake`).
-  Evaluated and intentionally not ported: the scheduler's job — nudging an
-  idle parent with unfinished work — is covered on v2 by the host's built-in
-  `subagent` tool, which posts completion notifications to the parent session
-  natively (verified in the v2 source: `notifyWhenDone` in
-  `packages/core/src/tool/plugin/subagent.ts` sends a
-  `session.synthetic` message with a `<subagent sessionID state …>`
-  envelope to the parent). The capability stays v1-only (it also requires
-  host `todo`/`children` surfaces — and the v1 live session-`status` map —
-  that the v2 shim does not provide).
-- **`chat.headers`.** Not bridged (low value on v2 — an HTTP request hook
-  exists if demand appears).
+
+### Not exposed to plugins: `session.list` / `session.remove`
+
+The v2 plugin session domain (`packages/plugin/src/promise/session.ts`,
+`SessionDomain`, mirrored by the runtime object the promise adapter
+builds) exposes exactly `create`/`get`/`switchAgent`/`switchModel`/
+`prompt`/`generate`/`command`/`synthetic`/`interrupt`/`update`/`move`/
+`wait`/`context` — **`list` and `remove` are not handed to plugins**.
+Both endpoints exist on the host's HTTP API, but the
+plugin context never receives them. `session.status`, `session.todo`, and
+`session.children` are likewise not exposed to plugins — the wake
+scheduler's fallback enumeration, the delete no-op below, and the disabled
+runtime-status reconciliation (see
+[Upstream behaviors](#upstream-behaviors-to-know)) all follow from these
+gaps. The client shim capability-probes both at runtime
+(`typeof s.list === 'function'`, `s.remove`), so a future host that
+extends the domain gets real delegation with no plugin change; on all
+v2.0.x stable hosts both probes fail and the shims degrade:
+
+- **Children enumeration (orchestrator-wake).** The shim's
+  `client.session.list` returns the v1-parity empty page `{data: []}`,
+  so `session.list({parentID})`-based enumeration never yields children
+  and the scheduler always runs its **event-tracked fallback**
+  (adapter-synthesized `session.created` parentID links plus tracked
+  busy/idle statuses — the mode the doc's wake section describes as the
+  fallback is effectively the only path on v2). The gate still passes
+  because it probes the *shim's* `list` function, which always exists.
+  The interview dashboard's session scan likewise sees no sessions from
+  `list` on v2.
+- **Session delete.** `client.session.delete` is a **no-op**: the
+  smartfetch secondary-model temp-session cleanup cannot remove sessions
+  through the shim on v2 (the temp sessions simply persist; nothing
+  fails loudly).
+
+Both degradations announce themselves in the plugin log with a single
+deterministic, **one-time-per-process** warning instead of degrading
+silently (`list`) or logging on every call (`remove`):
+
+```
+[v2][shim] session.list unavailable on this host build; children enumeration falls back to event tracking
+[v2][shim] session.remove unavailable on this host build; session delete is a no-op
+```
+
+The guards are module-level booleans with fixed text — no timestamps,
+session ids, or per-call payloads — so repeated wake polls and cleanup
+calls do not flood the log.
+
+### Orchestrator-wake on v2 (children-driven degraded mode)
+
+The wake scheduler is **active on v2** in a degraded mode, configured with
+`backgroundJobs.orchestratorWake.mode` (`"auto"` | `"todo"` | `"children"`,
+default `"auto"`: todo-gating on v1, children-driven on v2; an explicit
+`"todo"` degrades to children because v2 has no todo surface exposed to
+plugins — logged once).
+
+How it differs from the v1 path:
+
+- **Gate:** v2 requires only the shim's `session.list` + `promptAsync`
+  (`session.get` is optional model enrichment). v1 keeps its exact
+  historical probe set (`get`/`todo`/`children`/`status`/`promptAsync`).
+- **Children enumeration:** `session.list({ parentID })` through the shim
+  (v2 `Session.Info` → v1 envelope; `outcome` and `time.updated` mapped).
+  When the listing is unavailable (missing/erroring/empty), an event-tracked
+  fallback uses the adapter-synthesized `session.created` parentID links plus
+  tracked busy/idle statuses — refreshed on every evaluation with the host's
+  authoritative `outcome`/`time.updated` via `session.get` (fail-soft per
+  child). A finished child is therefore terminal immediately instead of
+  reading active for the whole staleness window, and a live child stays
+  visible on its host evidence rather than dropping out on stale local
+  evidence. `session.list` is not exposed to plugins on any stable
+  host
+  (see
+  [Not exposed to plugins](#not-exposed-to-plugins-sessionlist-sessionremove)),
+  so the event-tracked fallback is the operative path. Results are scoped
+  to the session's directory when the host reports one.
+- **Wake condition:** children with `outcome === undefined` (v2 records an
+  outcome only on terminal transition: succeeded|failed|interrupted) that
+  still have fresh update evidence — host `time.updated` or a tracked status
+  change newer than 3× the wake interval (staleness bound for children that
+  crash mid-run without recording an outcome). Stopped-job recovery wakes
+  bypass the condition, as on v1.
+- **Wake delivery:** `delivery: "queue"` — v1 `prompt_async` queued, and a
+  v2 `steer` would hijack an in-flight run. The shim's `promptAsync` keeps
+  `steer` as the default so the foreground-fallback replay is unchanged.
+  The wake model pin carries the session model's variant as the v2-only
+  `modelVariant` argument, so `switchModel` preserves the reasoning-effort
+  setting instead of resetting it to the host default.
+- **Variant-preserving skip (shim-level guard):** a variant-less model pin
+  that already matches the session's current model (same provider + id,
+  read via `session.get` at delivery time) is treated as "continue on this
+  model": the shim skips `switchModel` entirely instead of resetting the
+  variant to default. This covers every internal caller that pins the
+  current model without a variant opinion (wake pins, task-message,
+  same-model fallback steps) even when the pin's source lost the variant.
+  Explicit variants (including `default` via `modelVariant`) and
+  cross-model pins still switch. Hosts without `session.get`, or a failing
+  `get`, keep the legacy variant-free switch.
+- **Fingerprint:** children-only (id + outcome + tracked status + update
+  evidence); the two-wake no-progress cap still bounds cost.
+
+v2's built-in `subagent` tool still posts completion notifications to the
+parent natively — that covers the happy path. What the port adds is a
+periodic watchdog: an idle parent with a stuck or unreconciled child (or a
+job that stopped without a terminal result) gets woken to assess, cancel, or
+respawn, bounded by the same no-progress cap as v1.
 
 ### Environment caveats
 
 - **Reduced/TUI-side hosts.** Some host processes load the plugin's `setup`
   with a reduced, TUI-side context that lacks `agent.transform` (and other
   domains). The adapter capability-guards `setup` and skips registration
-  gracefully for those hosts instead of crashing or retry-storming.
-- **Path-based dev loading.** When v2 loads the plugin by absolute file path it
-  appends a `?mtime=` cache-busting query, which can break resolution of the
-  externalized `jsdom` import from the plugin's `node_modules`. The plugin still
-  loads because webfetch imports it lazily; install as a package or ensure
-  `jsdom` is resolvable to enable webfetch locally. AST-grep resolves its CLI
-  independently and lazily downloads a binary when no package or system binary
-  is available.
-- **Companion app unverified on v2.** The companion is an independent desktop
-  app; test it separately against v2 hosts.
+  gracefully for those hosts instead of crashing or retry-storming. The
+  same applies to the embedded v2 pass inside every v1 host: it invokes
+  `setup` with registration-only domains, so a v1 session's plugin log
+  shows `[v2] tool.transform failed`-style lines and
+  `health check passed {"bridges":4}` — expected noise from that parallel
+  pass, not breakage. The classic `server()` path (a separate plugin-log
+  instance a few seconds apart) carries the full v1 functionality.
+- **TUI-side plugin logs are not captured.** The plugin logger initializes
+  in the server process only, so TUI-side registration failures write no
+  `[v2][tui]` lines anywhere. Verify TUI behavior through the host (command
+  availability, on-disk effects), not via the plugin log.
+- **Local-checkout loading.** When the plugin is registered from a local
+  build, the externalized `jsdom` import must resolve from the plugin's
+  `node_modules` (webfetch imports it lazily, so the plugin still loads
+  without it — install as a package or ensure `jsdom` is resolvable to
+  enable webfetch locally). AST-grep resolves its CLI independently and
+  lazily downloads a binary when no package or system binary is available.
+- **Companion app unverified on v2.** The companion is an independent
+  desktop app; test it separately against v2 hosts.
 - **Prompt-cache rules unchanged.** The v2 bridges reuse the v1 transform
   pipeline under the same cache-safety contract: only trailing messages are
-  mutated, earlier content stays byte-identical, and the v1 enforcement suite
-  (`src/hooks/cache-safety.property.test.ts` and friends) covers the shared
-  transform code the v2 context hook invokes.
+  mutated, earlier content stays byte-identical, and the v1 enforcement
+  suite (`src/hooks/cache-safety.property.test.ts` and friends) covers the
+  shared transform code the v2 context hook invokes. The one v2-only
+  addition is CacheHint tagging: parts injected through
+  `cache-safe-injection` while the v2 context bridge runs carry
+  `cache: {type: "ephemeral"}` (v2 `ContentPart.cache`). The hint is
+  applied via a per-request scoped default (AsyncLocalStorage — the v2
+  host serves different sessions' requests concurrently, so the scope
+  must be isolated per bridged transform) inside the v2 bridge only — v1
+  callers never set it, so the v1 payload (and its snapshots) stay
+  byte-identical.

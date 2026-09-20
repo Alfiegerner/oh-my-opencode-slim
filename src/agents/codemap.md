@@ -26,7 +26,7 @@ Each agent is a **prompt-driven specialist** with a factory function that create
 
 - **Default prompts**: Each agent factory has a base prompt defined in its file (e.g., `explorer.ts`, `oracle.ts`)
 - **User overrides**: From `~/.config/opencode/oh-my-opencode-slim.json` via `loadAgentPrompt()`
-- **Agent colors**: Built-in theme-aware defaults with per-agent hex or theme-color overrides
+- **Agent colors**: Optional per-agent hex or theme-color overrides; no defaults (colorless agents get the host TUI's distinct palette colors)
 - **Permission wildcards**: Applied via `applyDefaultPermissions()` in `index.ts`
 - **Model resolution**: Supports string models, explicit `inheritModelFrom` policies, and priority-ordered arrays (`_modelArray`) for runtime fallback
 - **Skill permissions**: Per-agent MCP and tool access controlled via `getSkillPermissionsForAgent()`
@@ -132,10 +132,9 @@ export function getAgentConfigs(config?: PluginConfig): Record<string, SDKAgentC
 The main plugin entry point (`src/index.ts`) consumes the agent system:
 
 ```typescript
-import { createAgents, getAgentConfigs, getDisabledAgents } from './agents';
+import { createAgents, getAgentConfigs } from './agents';
 
 // During plugin initialization:
-const disabledAgents = getDisabledAgents(config);
 const agentDefs = createAgents(config);
 const agents = getAgentConfigs(config);
 

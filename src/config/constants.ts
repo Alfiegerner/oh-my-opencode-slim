@@ -30,21 +30,6 @@ export const AGENT_THEME_COLORS = [
   'info',
 ] as const;
 
-export type AgentThemeColor = (typeof AGENT_THEME_COLORS)[number];
-
-/** Theme-aware colors used for built-in agents unless users override them. */
-export const DEFAULT_AGENT_COLORS: Record<AgentName, AgentThemeColor> = {
-  orchestrator: 'primary',
-  explorer: 'info',
-  librarian: 'secondary',
-  oracle: 'accent',
-  designer: 'success',
-  fixer: 'warning',
-  observer: 'info',
-  council: 'accent',
-  councillor: 'accent',
-};
-
 /** Agents that cannot be disabled even if listed in disabled_agents config. */
 export const PROTECTED_AGENTS = new Set(['orchestrator', 'councillor']);
 

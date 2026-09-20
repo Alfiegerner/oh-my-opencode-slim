@@ -31,6 +31,7 @@ import {
 } from './constants';
 import type { CouncilConfig } from './council-schema';
 import { deepMerge } from './loader';
+import { discoverProjectLocalSkillNames } from './project-skills';
 import type {
   AcpAgentsConfig,
   AgentOverrideConfig,
@@ -41,7 +42,7 @@ import type {
   PluginConfig,
   WebfetchConfig,
 } from './schema';
-import { getCustomAgentNames } from './utils';
+import { getCustomAgentNames, normalizeAgentSkillDirectives } from './utils';
 
 /** A single agent entry from the host opencode.json config. */
 export interface HostAgentConfig {
@@ -79,15 +80,23 @@ const DEFAULT_BACKGROUND_JOBS: BackgroundJobsConfig = {
   readContextMinLines: DEFAULT_READ_CONTEXT_MIN_LINES,
   readContextMaxFiles: DEFAULT_READ_CONTEXT_MAX_FILES,
   maxRetainedSnapshots: DEFAULT_MAX_RETAINED_SNAPSHOTS,
-  orchestratorWake: { enabled: true, intervalMs: 300_000 },
+  orchestratorWake: { enabled: true, intervalMs: 300_000, mode: 'auto' },
   wallClockTimeoutMs: 0,
   abortGraceMs: 10_000,
+  concurrency: {
+    defaultConcurrency: 0,
+    providerConcurrency: {},
+    modelConcurrency: {},
+  },
+  sameProviderPolicy: {},
   waitForUserGuard: true,
 };
 
 const DEFAULT_FALLBACK: FailoverConfig = {
   enabled: true,
   maxRetries: 3,
+  initialRetryDelayMs: 0,
+  retryDelayMs: 500,
 };
 
 /** First model from an override's model field (string or array). */
@@ -181,7 +190,7 @@ export class RuntimeConfig {
   /** Cache-safety marker: never expose volatile text for prompt assembly. */
   readonly isCacheSafe = true as const;
 
-  private constructor() {}
+  private constructor(private readonly directory: string) {}
 
   /**
    * Seed (or re-seed) the plugin file layer for a directory. Re-seeding
@@ -194,7 +203,7 @@ export class RuntimeConfig {
       existing.seedPlugin(pluginConfig);
       return existing;
     }
-    const instance = new RuntimeConfig();
+    const instance = new RuntimeConfig(directory);
     instance.seedPlugin(pluginConfig);
     registry.set(directory, instance);
     return instance;
@@ -204,7 +213,7 @@ export class RuntimeConfig {
   static get(directory: string): RuntimeConfig {
     let instance = registry.get(directory);
     if (!instance) {
-      instance = new RuntimeConfig();
+      instance = new RuntimeConfig(directory);
       registry.set(directory, instance);
     }
     return instance;
@@ -219,9 +228,11 @@ export class RuntimeConfig {
   private hostSnapshot: HostConfigSnapshot | undefined;
   private runtimePresetName: string | null = null;
   private switchedModels = new Set<string>();
+  private localSkillNamesCache: readonly string[] | undefined;
 
   private seedPlugin(pluginConfig: PluginConfig): void {
     this.pluginConfig = deepFreeze(clonePlain(pluginConfig));
+    this.localSkillNamesCache = undefined;
   }
 
   /**
@@ -262,10 +273,16 @@ export class RuntimeConfig {
       base = mergeAgentOverrides(filePreset, base);
     }
     const runtimePreset = this.runtimePresetAgents();
-    if (!runtimePreset) {
-      return base;
-    }
-    return mergeAgentOverrides(base, runtimePreset);
+    const merged = runtimePreset
+      ? mergeAgentOverrides(base, runtimePreset)
+      : base;
+    const includesLocalSkills = Object.values(merged).some(
+      (override) => override.skills_include_local === true,
+    );
+    return normalizeAgentSkillDirectives(
+      merged,
+      includesLocalSkills ? this.projectLocalSkillNames() : [],
+    );
   }
 
   /**
@@ -524,6 +541,15 @@ export class RuntimeConfig {
       return undefined;
     }
     return this.pluginConfig?.presets?.[name];
+  }
+
+  private projectLocalSkillNames(): readonly string[] {
+    if (this.localSkillNamesCache === undefined) {
+      this.localSkillNamesCache = discoverProjectLocalSkillNames(
+        this.directory,
+      );
+    }
+    return this.localSkillNamesCache;
   }
 
   /** Alias-aware override lookup inside a merged agents record. */

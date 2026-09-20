@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
-import { createServer } from 'node:http';
+import { bindFreePort } from '../interview/test-port';
 import {
   applyInterviewCommandParts,
   createV2InterviewBridge,
@@ -9,32 +9,17 @@ import {
 
 function createContext(overrides?: {
   synthetic?: (input: Record<string, unknown>) => Promise<unknown>;
-  rename?: (input: Record<string, unknown>) => Promise<unknown>;
+  update?: (input: Record<string, unknown>) => Promise<unknown>;
   prompt?: (input: Record<string, unknown>) => Promise<unknown>;
 }): any {
   return {
     session: {
       hook: mock(async () => ({ dispose() {} })),
       synthetic: overrides?.synthetic,
-      rename: overrides?.rename,
+      update: overrides?.update,
       prompt: overrides?.prompt,
     },
   };
-}
-
-async function findFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = createServer();
-    server.listen(0, () => {
-      const address = server.address();
-      if (!address || typeof address === 'string') {
-        server.close(() => reject(new Error('Failed to get free port')));
-        return;
-      }
-      const port = address.port;
-      server.close(() => resolve(port));
-    });
-  });
 }
 
 describe('markerText', () => {
@@ -66,9 +51,9 @@ describe('v2 interview bridge', () => {
   test('registers an add-only marker command and rewrites only the tail', async () => {
     const directory = `.tmp-v2-interview-${Date.now()}`;
     const synthetic = mock(async () => ({}));
-    const rename = mock(async () => ({}));
+    const update = mock(async () => ({}));
     const bridge = createV2InterviewBridge(
-      createContext({ synthetic, rename }),
+      createContext({ synthetic, update }),
       {
         outputFolder: directory,
       } as never,
@@ -118,7 +103,7 @@ describe('v2 interview bridge', () => {
     expect(event.messages[1].content[0].text).toContain('build a notes app');
     expect(event.messages[1].content[0].text).toContain('<interview_state>');
     expect(synthetic).toHaveBeenCalled();
-    expect(rename).toHaveBeenCalledWith({
+    expect(update).toHaveBeenCalledWith({
       sessionID: 'ses_v2',
       title: 'Interview: build a notes app',
     });
@@ -180,14 +165,16 @@ describe('v2 interview bridge', () => {
         prompt: track('prompt'),
         synthetic: track('synthetic'),
         switchAgent: track('switchAgent'),
-        rename: track('rename'),
+        update: track('update'),
       },
     } as never);
 
     await bridge.runtime.notify('ses_n', 'ready');
     expect(calls).toContainEqual({
       method: 'synthetic',
-      input: { sessionID: 'ses_n', text: 'ready' },
+      // resume:false = admit the interview URL without waking the session
+      // (v1's noReply prompt equivalent; no agent turn, no double-send).
+      input: { sessionID: 'ses_n', text: 'ready', resume: false },
     });
 
     await bridge.runtime.continue('ses_c', 'go on');
@@ -202,7 +189,7 @@ describe('v2 interview bridge', () => {
 
     await bridge.runtime.rename('ses_r', 'Interview: x');
     expect(calls).toContainEqual({
-      method: 'rename',
+      method: 'update',
       input: { sessionID: 'ses_r', title: 'Interview: x' },
     });
 
@@ -257,8 +244,53 @@ describe('v2 interview bridge', () => {
     ]);
   });
 
+  test('snapshots transcript before downstream part injection', async () => {
+    const directory = `.tmp-v2-interview-snap-${Date.now()}`;
+    const bridge = createV2InterviewBridge(createContext(), {
+      outputFolder: directory,
+    } as never);
+    const event = {
+      sessionID: 'ses_snapshot',
+      agent: 'orchestrator',
+      model: {},
+      system: [],
+      tools: {},
+      messages: [
+        {
+          id: 'answer',
+          role: 'user',
+          content: [{ type: 'text', text: markerText('the answer') }],
+        },
+      ],
+    };
+
+    await bridge.handleContext(event);
+    const captured = bridge.getTranscript('ses_snapshot');
+    event.messages[0].content.push({
+      type: 'text',
+      text: 'injected by downstream transform',
+      synthetic: true,
+      metadata: { source: 'bridge-test' },
+    } as { type: string; text: string });
+
+    expect(captured[0]?.parts?.[0]?.text).toContain('the answer');
+    expect(
+      captured[0]?.parts?.some(
+        (part) => part.text === 'injected by downstream transform',
+      ),
+    ).toBe(false);
+    bridge.dispose();
+    await fs.rm(`${process.cwd()}/${directory}`, {
+      recursive: true,
+      force: true,
+    });
+  });
+
   test('projects text events and removes a deleted session', async () => {
-    const bridge = createV2InterviewBridge(createContext());
+    const directory = `.tmp-v2-interview-text-${Date.now()}`;
+    const bridge = createV2InterviewBridge(createContext(), {
+      outputFolder: directory,
+    } as never);
     await bridge.handleContext({
       sessionID: 'ses_text',
       agent: 'orchestrator',
@@ -269,7 +301,7 @@ describe('v2 interview bridge', () => {
         {
           id: 'u',
           role: 'user',
-          content: [{ type: 'text', text: 'hello' }],
+          content: [{ type: 'text', text: markerText('hello') }],
         },
       ],
     });
@@ -295,11 +327,88 @@ describe('v2 interview bridge', () => {
     });
     expect(bridge.getTranscript('ses_text')).toEqual([]);
     bridge.dispose();
+    await fs.rm(`${process.cwd()}/${directory}`, {
+      recursive: true,
+      force: true,
+    });
+  });
+
+  test('resolves sessionID from live `data`-keyed events (text + deletion)', async () => {
+    // Live v2 hosts key the event payload under `data`; reading only
+    // `event.properties` left handleEvent dead on live v2 for ALL events.
+    const directory = `.tmp-v2-interview-live-${Date.now()}`;
+    const bridge = createV2InterviewBridge(createContext(), {
+      outputFolder: directory,
+    } as never);
+    await bridge.handleContext({
+      sessionID: 'ses_live',
+      agent: 'orchestrator',
+      model: {},
+      system: [],
+      tools: {},
+      messages: [
+        {
+          id: 'u',
+          role: 'user',
+          content: [{ type: 'text', text: markerText('hello') }],
+        },
+      ],
+    });
+    await bridge.handleEvent({
+      type: 'session.next.text.started',
+      data: { sessionID: 'ses_live' },
+    });
+    await bridge.handleEvent({
+      type: 'session.next.text.delta',
+      data: { sessionID: 'ses_live', delta: 'from data' },
+    });
+    expect(bridge.getTranscript('ses_live').at(-1)?.parts?.[0]?.text).toBe(
+      'from data',
+    );
+
+    await bridge.handleEvent({
+      type: 'session.deleted',
+      data: { sessionID: 'ses_live' },
+    });
+    expect(bridge.getTranscript('ses_live')).toEqual([]);
+    bridge.dispose();
+    await fs.rm(`${process.cwd()}/${directory}`, {
+      recursive: true,
+      force: true,
+    });
+  });
+
+  test('ignores text streams for sessions that are not interviews', async () => {
+    const bridge = createV2InterviewBridge(createContext());
+    await bridge.handleContext({
+      sessionID: 'ses_plain',
+      agent: 'orchestrator',
+      model: {},
+      system: [],
+      tools: {},
+      messages: [
+        {
+          id: 'u',
+          role: 'user',
+          content: [{ type: 'text', text: 'hello' }],
+        },
+      ],
+    });
+    await bridge.handleEvent({
+      type: 'session.next.text.started',
+      properties: { sessionID: 'ses_plain' },
+    });
+    await bridge.handleEvent({
+      type: 'session.next.text.delta',
+      properties: { sessionID: 'ses_plain', delta: 'ignored' },
+    });
+    expect(bridge.getTranscript('ses_plain')).toEqual([]);
+    bridge.dispose();
   });
 
   test('shares one configured dashboard across multiple v2 sessions', async () => {
     const directory = `.tmp-v2-dashboard-${Date.now()}`;
-    const port = await findFreePort();
+    const { port, server } = await bindFreePort();
     const config = {
       outputFolder: directory,
       dashboard: true,
@@ -310,6 +419,7 @@ describe('v2 interview bridge', () => {
     const bridge1 = createV2InterviewBridge(
       createContext({ synthetic: synthetic1 }),
       config,
+      { server },
     );
     await new Promise((resolve) => setTimeout(resolve, 100));
     const bridge2 = createV2InterviewBridge(
@@ -352,6 +462,11 @@ describe('v2 interview bridge', () => {
     } finally {
       await bridge1.dispose();
       await bridge2.dispose();
+      // Safety net: close the held server if the dashboard never adopted it.
+      if (server.listening) {
+        server.closeAllConnections();
+        server.close();
+      }
       await fs.rm(`${process.cwd()}/${directory}`, {
         recursive: true,
         force: true,

@@ -6,11 +6,22 @@ import type {
 } from '../../utils/background-job-board';
 import type { BackgroundJobStore } from '../../utils/background-job-store';
 import type { BackgroundJobSupervisor } from '../../utils/background-job-supervisor';
+import type { BackgroundJobTerminalGate } from '../../utils/background-job-terminal-gate';
+import {
+  fetchChildTranscript,
+  responseError,
+  stringifyError,
+} from '../../utils/child-transcript';
+import { isRecord } from '../../utils/guards';
+import { createInternalAgentTextPart } from '../../utils/internal-initiator';
+import { log } from '../../utils/logger';
 import { getClient } from '../../utils/opencode-client';
+import type { SessionSelection } from '../../utils/session-selection';
 
 const DEFAULT_NOTIFICATION_RETRIES = 3;
 const DEFAULT_RETRY_DELAY_MS = 1_000;
 const TERMINAL_NOTIFICATION_TIMEOUT_MS = 10_000;
+const DEFAULT_HANDOFF_EXPIRY_MS = 30_000;
 
 type SessionMessage = {
   info?: {
@@ -32,7 +43,12 @@ type RevivedRun = {
   generation: number;
   parentSessionID: string;
   baselineMessageID?: string;
+  readonly attemptStartedAt: number;
   description: string;
+  /** Monotonic observation identity: incremented on every
+   * registration so evidence consumers can fence a snapshot against a
+   * same-generation substitution. */
+  revision: number;
   notification: {
     attempts: number;
     sent: boolean;
@@ -40,7 +56,7 @@ type RevivedRun = {
     retryTimer?: ReturnType<typeof setTimeout>;
   };
   terminalState?: 'completed' | 'error';
-  probeInFlight?: Promise<boolean>;
+  terminalRevision?: number;
 };
 
 export interface RevivedRunTracker {
@@ -50,26 +66,74 @@ export interface RevivedRunTracker {
     generation: number;
     parentSessionID: string;
     baselineMessageID?: string;
+    attemptStartedAt?: number;
     description: string;
   }): void;
   isTracked(taskID: string, generation: number): boolean;
+  /** Baseline anchor for a tracked run, so transcript-evidence consumers
+   * (stop gate) can attribute the trailing answer to THIS run instead of
+   * a substituted attempt. Undefined for untracked/stale generations. */
+  baselineFor(taskID: string, generation: number): string | undefined;
+  attemptStartedAtFor(taskID: string, generation: number): number | undefined;
   probe(taskID: string, generation: number): Promise<boolean>;
   onTerminal(record: BackgroundJobRecord): void;
+  /** Fallback observation handoff: prepare before the admission await
+   * so the stop gate defers terminal publication until a delivery owner
+   * exists. Admit converts the preparation into a tracked run
+   * (immediate probe, no reinstall). Reject withdraws on an explicit
+   * host refusal (error envelope / capability rejection). A hung
+   * admission PROMOTES the preparation into the owning run instead of
+   * dropping it. `isObservationPending` stays true until admit/reject
+   * OR a bounded unresolved-admission timer lifts the fence (owner
+   * kept) so a valid empty transcript can still confirm stopped. */
+  prepareObservation(input: {
+    taskID: string;
+    generation: number;
+    parentSessionID: string;
+    baselineMessageID?: string;
+    description: string;
+  }): boolean;
+  admitObservation(taskID: string, generation: number): boolean;
+  /** Explicit host refusal (error envelope / capability rejection):
+   * nothing was admitted, ownership is released. */
+  rejectObservation(taskID: string, generation: number): void;
+  /** Unknown admission outcome (transport failed without a response):
+   * the prepared ownership CONVERTS into a tracked run instead of being
+   * dropped — the host may still have accepted the replay. The gate
+   * fence lifts after one more expiry window if admit/reject never
+   * arrive; the owner stays. */
+  settleObservationUnresolved(taskID: string, generation: number): boolean;
+  isObservationPending(taskID: string, generation: number): boolean;
+  /** Observation-identity fence for the stop gate: a monotonic
+   * revision per tracked run; changes on re-registration even when the
+   * baseline value is identical (especially undefined). */
+  revisionFor(taskID: string, generation: number): number | undefined;
   dispose(): void;
 }
 
 export function createRevivedRunTracker(options: {
   input: PluginInput;
   backgroundJobBoard: BackgroundJobStore;
+  terminalGate: BackgroundJobTerminalGate;
   backgroundJobSupervisor?: BackgroundJobSupervisor;
   maxNotificationRetries?: number;
   notificationRetryDelayMs?: number;
+  handoffExpiryMs?: number;
   onRegister?: (taskID: string) => void;
   onSettled?: (taskID: string) => void;
   contextFilesForPrompt?: (taskID: string) => ContextFile[];
   pruneContext?: () => void;
+  /** Resolve the parent session's CURRENT agent/model selection at send
+   * time (#1079): a terminal notification must continue the parent in
+   * the mode the session uses now, never a hardcoded `orchestrator`.
+   * Resolved on EVERY attempt (retries re-enter the send path). When
+   * absent or unresolved, behavior falls back to `orchestrator`. */
+  resolveSelection?: (sessionID: string) => Promise<SessionSelection>;
 }): RevivedRunTracker {
   const runs = new Map<string, RevivedRun>();
+  // Monotonic observation identity across registrations (fence for the
+  // stop gate's evidence snapshot; see RevivedRun.revision).
+  let revisionSequence = 0;
   const maxNotificationRetries =
     options.maxNotificationRetries ?? DEFAULT_NOTIFICATION_RETRIES;
   const retryDelayMs =
@@ -79,19 +143,14 @@ export function createRevivedRunTracker(options: {
   const captureBaseline = async (
     taskID: string,
   ): Promise<string | undefined> => {
-    const session = getClient(options.input).session;
-    const messages =
-      typeof session.messages === 'function'
-        ? session.messages.bind(session)
-        : undefined;
-    if (typeof messages !== 'function') return undefined;
-    const response = await messages({
-      path: { id: taskID },
-      query: { directory: options.input.directory },
-    });
-    const error = responseError(response);
-    if (error !== undefined) throw new Error(errorText(error));
-    const data = Array.isArray(response.data) ? response.data : [];
+    const response = await fetchChildTranscript(
+      getClient(options.input),
+      taskID,
+      options.input.directory,
+    );
+    if (response === undefined) return undefined;
+    const data =
+      isRecord(response) && Array.isArray(response.data) ? response.data : [];
     const last = data.at(-1) as SessionMessage | undefined;
     return typeof last?.info?.id === 'string' ? last.info.id : undefined;
   };
@@ -107,21 +166,29 @@ export function createRevivedRunTracker(options: {
   ): Promise<boolean> => {
     const run = runs.get(taskID);
     if (!run || run.generation !== generation || disposed) return false;
-    if (run.probeInFlight) return run.probeInFlight;
-
-    run.probeInFlight = probeRun(run).finally(() => {
-      run.probeInFlight = undefined;
+    const result = await options.terminalGate.reconcile(run, {
+      kind: 'inspect',
     });
-    return run.probeInFlight;
+    if (disposed || runs.get(taskID) !== run || result.kind === 'stale')
+      return false;
+    onTerminal(result.record);
+    return result.record.state !== 'running';
   };
 
   const onTerminal = (record: BackgroundJobRecord): void => {
     const run = runs.get(record.taskID);
     if (!run || run.generation !== record.generation) return;
+    const current = options.backgroundJobBoard.get(record.taskID);
+    if (
+      !current ||
+      current.generation !== record.generation ||
+      current.terminalRevision !== record.terminalRevision ||
+      current.state === 'running'
+    )
+      return;
     if (record.state === 'cancelled') {
       settleRun(run, record);
       options.backgroundJobSupervisor?.onTerminal(record);
-      discardRun(run);
       return;
     }
     if (record.state !== 'completed' && record.state !== 'error') {
@@ -140,73 +207,15 @@ export function createRevivedRunTracker(options: {
     runs.clear();
   };
 
-  async function probeRun(run: RevivedRun): Promise<boolean> {
-    const session = getClient(options.input).session;
-    const messages =
-      typeof session.messages === 'function'
-        ? session.messages.bind(session)
-        : undefined;
-    if (typeof messages !== 'function') return false;
-    let response: unknown;
-    try {
-      response = await messages({
-        path: { id: run.taskID },
-        query: { directory: options.input.directory },
-      });
-    } catch {
-      return false;
-    }
-
-    const data =
-      isRecord(response) && Array.isArray(response.data)
-        ? (response.data as SessionMessage[])
-        : [];
-    const baselineIndex = run.baselineMessageID
-      ? data.findIndex((message) => message.info?.id === run.baselineMessageID)
-      : -1;
-    if (run.baselineMessageID && baselineIndex < 0) return false;
-
-    const lastIndex = data.length - 1;
-    const last = data[lastIndex];
-    if (last?.info?.role !== 'assistant') return false;
-    if (lastIndex <= baselineIndex) return false;
-    if (typeof last.info.time?.completed !== 'number') return false;
-    if (last.info.finish === 'tool-calls' || last.info.finish === 'unknown') {
-      return false;
-    }
-    if (hasPendingToolCall(data, baselineIndex)) return false;
-    if (last.info.error !== undefined) {
-      const result = errorText(last.info.error);
-      const updated = options.backgroundJobBoard.updateStatus({
-        taskID: run.taskID,
-        expectedGeneration: run.generation,
-        state: 'error',
-        resultSummary: result || 'Revived child session failed.',
-      });
-      return updated?.generation === run.generation && finish(run, updated);
-    }
-    const text = (last.parts ?? [])
-      .filter(
-        (part) =>
-          (part.type === 'text' || part.type === 'reasoning') &&
-          typeof part.text === 'string' &&
-          part.text.length > 0,
-      )
-      .map((part) => part.text as string)
-      .join('\n\n')
-      .trim();
-    const updated = options.backgroundJobBoard.updateStatus({
-      taskID: run.taskID,
-      expectedGeneration: run.generation,
-      state: 'completed',
-      resultSummary: text,
-    });
-    return updated?.generation === run.generation && finish(run, updated);
-  }
-
   function finish(run: RevivedRun, record: BackgroundJobRecord): boolean {
+    if (disposed || runs.get(run.taskID) !== run) return false;
     if (record.state !== 'completed' && record.state !== 'error') return false;
-    if (run.terminalState && run.terminalState !== record.state) return true;
+    if (run.terminalRevision !== record.terminalRevision) {
+      if (run.notification.retryTimer)
+        clearTimeout(run.notification.retryTimer);
+      run.notification = { attempts: 0, sent: false, pending: false };
+      run.terminalRevision = record.terminalRevision;
+    }
     run.terminalState = record.state;
     settleRun(run, record);
     options.backgroundJobSupervisor?.onTerminal(record);
@@ -225,13 +234,39 @@ export function createRevivedRunTracker(options: {
     options.onSettled?.(run.taskID);
   }
 
+  function isCurrentNotification(
+    run: RevivedRun,
+    record: BackgroundJobRecord,
+    notification: RevivedRun['notification'],
+  ): boolean {
+    const current = options.backgroundJobBoard.get(run.taskID);
+    return (
+      !disposed &&
+      runs.get(run.taskID) === run &&
+      run.notification === notification &&
+      run.generation === record.generation &&
+      run.terminalRevision === record.terminalRevision &&
+      current?.generation === record.generation &&
+      current.terminalRevision === record.terminalRevision &&
+      run.terminalState === record.state &&
+      terminalOutcome(current) === record.state
+    );
+  }
+
   async function notifyParent(
     run: RevivedRun,
     record: BackgroundJobRecord,
   ): Promise<void> {
-    if (disposed || run.notification.sent || run.notification.pending) return;
-    run.notification.pending = true;
-    run.notification.attempts += 1;
+    const notification = run.notification;
+    if (
+      !isCurrentNotification(run, record, notification) ||
+      notification.sent ||
+      notification.pending
+    )
+      return;
+    notification.pending = true;
+    notification.attempts += 1;
+    let lease: BackgroundJobLease | undefined;
     try {
       const session = getClient(options.input).session;
       const promptAsync =
@@ -241,30 +276,40 @@ export function createRevivedRunTracker(options: {
       if (typeof promptAsync !== 'function') {
         throw new Error('session.promptAsync unavailable');
       }
-      const current = options.backgroundJobBoard.get(run.taskID);
-      if (
-        !current ||
-        current.generation !== run.generation ||
-        terminalOutcome(current) !== run.terminalState ||
-        record.state !== run.terminalState
-      ) {
-        discardRun(run);
-        return;
-      }
-      const lease = options.backgroundJobBoard.acquireTerminalNotificationLease(
-        run.taskID,
-        run.generation,
-      );
-      if (!lease) {
-        scheduleNotificationRetry(run, record);
-        return;
-      }
       const state = record.state === 'completed' ? 'completed' : 'error';
       const tag = state === 'completed' ? 'task_result' : 'task_error';
       const summary =
         state === 'completed'
           ? `Background task completed: ${run.description}`
           : `Background task failed: ${run.description}`;
+      // Resolve BEFORE acquiring the lease: a hung host read must not
+      // pin the notification lease. Host `session.get` is bounded inside
+      // resolveCurrentSelection; metadata still completes the hierarchy
+      // if that read times out (#1079).
+      const selection = options.resolveSelection
+        ? await options
+            .resolveSelection(run.parentSessionID)
+            .catch((): undefined => undefined)
+        : undefined;
+      if (
+        !isCurrentNotification(run, record, notification) ||
+        notification.sent
+      ) {
+        return;
+      }
+      lease = options.backgroundJobBoard.acquireTerminalNotificationLease(
+        run.taskID,
+        run.generation,
+        record.terminalRevision,
+      );
+      if (!lease) {
+        // Waiting for an older publication's transport does not spend this
+        // publication's send budget: no transport attempt has started.
+        notification.attempts -= 1;
+        scheduleNotificationRetry(run, record, notification);
+        return;
+      }
+      const notifyAgent = selection?.agent ?? 'orchestrator';
       const text = [
         `<task id="${run.taskID}" state="${state}">`,
         `<summary>${summary}</summary>`,
@@ -274,55 +319,89 @@ export function createRevivedRunTracker(options: {
         `</${tag}>`,
         '</task>',
       ].join('\n');
-      const response = await awaitNotificationTransport(
-        options.backgroundJobBoard,
-        lease,
-        () =>
-          promptAsync({
+      await awaitNotificationTransport(
+        () => {
+          if (
+            !isCurrentNotification(run, record, notification) ||
+            notification.sent ||
+            !lease ||
+            !options.backgroundJobBoard.validateLease(lease)
+          ) {
+            throw new Error('Terminal notification is no longer current');
+          }
+          return (
+            promptAsync as (args: Record<string, unknown>) => Promise<unknown>
+          )({
             path: { id: run.parentSessionID },
             query: { directory: options.input.directory },
+            // v1 prompt_async queues; 'queue' preserves that on v2 hosts
+            // ('steer' — the shim default — would hijack an in-flight
+            // parent run, the same TOCTOU #1192 closed for task-revive).
+            // Extra root fields are dropped by the v1 SDK RequestInit
+            // path (same pattern as task-revive #1192).
+            delivery: 'queue',
+            // Lifecycle continuation (#1079): on v2 the shim inherits the
+            // host's persisted selection instead of re-pinning the resolved
+            // snapshot model. On v1 the flag is dropped by the SDK and the
+            // explicit body model applies.
+            modelSelection: 'inherit',
+            ...(selection?.variant ? { modelVariant: selection.variant } : {}),
             body: {
-              agent: 'orchestrator',
-              parts: [{ type: 'text', synthetic: true, text }],
+              agent: notifyAgent,
+              ...(selection?.model ? { model: selection.model } : {}),
+              // Internal-initiator part (synthetic flag + metadata + marker):
+              // the v2 client-shim routes these through session.synthetic so
+              // the notification stays machine-context instead of a visible
+              // user message, and the session-prompt bridge classifies the
+              // admission as internal (not external user activity). A bare
+              // `synthetic: true` part loses its flag in the flat v2 prompt
+              // translation (#1157).
+              parts: [createInternalAgentTextPart(text)],
             },
-          }),
+          });
+        },
+        // Acceptance belongs to the publication, even if an older attempt
+        // settles after its local timeout or while another attempt sends.
+        () => {
+          if (!isCurrentNotification(run, record, notification)) return;
+          notification.sent = true;
+          if (notification.retryTimer) {
+            clearTimeout(notification.retryTimer);
+            notification.retryTimer = undefined;
+          }
+        },
       );
-      const error = responseError(response);
-      if (error !== undefined) throw new Error(errorText(error));
-      const latest = options.backgroundJobBoard.get(run.taskID);
-      if (
-        !latest ||
-        latest.generation !== run.generation ||
-        terminalOutcome(latest) !== run.terminalState
-      ) {
-        discardRun(run);
-        return;
-      }
-      run.notification.sent = true;
     } catch {
-      scheduleNotificationRetry(run, record);
+      scheduleNotificationRetry(run, record, notification);
     } finally {
-      run.notification.pending = false;
+      if (lease) options.backgroundJobBoard.releaseLease(lease);
+      notification.pending = false;
     }
   }
 
   function scheduleNotificationRetry(
     run: RevivedRun,
     record: BackgroundJobRecord,
+    notification: RevivedRun['notification'],
   ): void {
     if (
-      disposed ||
-      runs.get(run.taskID) !== run ||
-      run.notification.attempts >= maxNotificationRetries ||
-      run.notification.retryTimer
+      !isCurrentNotification(run, record, notification) ||
+      notification.sent ||
+      notification.attempts >= maxNotificationRetries ||
+      notification.retryTimer
     ) {
       return;
     }
-    run.notification.retryTimer = setTimeout(() => {
-      run.notification.retryTimer = undefined;
+    notification.retryTimer = setTimeout(() => {
+      notification.retryTimer = undefined;
+      if (
+        !isCurrentNotification(run, record, notification) ||
+        notification.sent
+      )
+        return;
       void notifyParent(run, record);
     }, retryDelayMs);
-    run.notification.retryTimer.unref?.();
+    notification.retryTimer.unref?.();
   }
 
   function register(input: {
@@ -330,15 +409,14 @@ export function createRevivedRunTracker(options: {
     generation: number;
     parentSessionID: string;
     baselineMessageID?: string;
+    attemptStartedAt?: number;
     description: string;
   }): void {
-    const old = runs.get(input.taskID);
-    if (old?.notification.retryTimer) clearTimeout(old.notification.retryTimer);
-    runs.set(input.taskID, {
-      ...input,
-      notification: { attempts: 0, sent: false, pending: false },
-    });
-    options.onRegister?.(input.taskID);
+    // External registration (e.g. task_revive) supersedes any pending
+    // fallback handoff for this task: it replaces the prepared owner
+    // with its own observation identity.
+    deleteHandoff(input.taskID);
+    installRun(input);
   }
 
   function discardRun(run: RevivedRun): void {
@@ -347,38 +425,309 @@ export function createRevivedRunTracker(options: {
     runs.delete(run.taskID);
   }
 
+  const baselineFor = (
+    taskID: string,
+    generation: number,
+  ): string | undefined => {
+    const run = runs.get(taskID);
+    if (run?.generation !== generation) return undefined;
+    return run.baselineMessageID;
+  };
+
+  const attemptStartedAtFor = (taskID: string, generation: number) => {
+    const attempt = pendingHandoffs.get(taskID) ?? runs.get(taskID);
+    return attempt?.generation === generation
+      ? attempt.attemptStartedAt
+      : undefined;
+  };
+
+  // --- Fallback observation handoff -----------------------------------
+  // A prepared handoff fences the stop gate from publishing a terminal
+  // state while a fallback's admission await is still pending: the job
+  // may ALREADY hold the re-prompted result, but no delivery owner
+  // exists yet — publishing then would strand the result again (the
+  // exact false-stop-incident shape).
+  //
+  // Preparing SUPPLANTS the previous publisher (an in-flight probe of
+  // the substituted observation fences out on its identity check
+  // instead of publishing), and an UNRESOLVED outcome (expiry / unknown
+  // transport failure) CONVERTS the preparation into a tracked run —
+  // the prepared owner — so a late admission finds delivery already
+  // owned. The preparation is never dropped while the admission
+  // outcome is unknown.
+  const pendingHandoffs = new Map<
+    string,
+    {
+      generation: number;
+      parentSessionID: string;
+      baselineMessageID?: string;
+      readonly attemptStartedAt: number;
+      description: string;
+      state: 'pending' | 'promoted';
+      expiryTimer?: ReturnType<typeof setTimeout>;
+    }
+  >();
+  const handoffExpiryMs = options.handoffExpiryMs ?? DEFAULT_HANDOFF_EXPIRY_MS;
+
+  function deleteHandoff(taskID: string): void {
+    const pending = pendingHandoffs.get(taskID);
+    if (!pending) return;
+    if (pending.expiryTimer) clearTimeout(pending.expiryTimer);
+    pendingHandoffs.delete(taskID);
+  }
+
+  function isObservationPending(taskID: string, generation: number): boolean {
+    // BOTH states fence the gate: 'pending' = admission await in
+    // flight; 'promoted' = the owner was installed by expiry or an
+    // unresolved transport failure, but the ADMISSION itself is still
+    // unresolved — the re-prompt may yet start, so an `absent` verdict
+    // must not become a terminal stop meanwhile. The entry is cleaned
+    // on admit/reject, external registration, or the bounded
+    // unresolved-admission timer (owner kept).
+    const pending = pendingHandoffs.get(taskID);
+    return pending?.generation === generation;
+  }
+
+  /** Install a run WITHOUT touching handoff bookkeeping (admit/expiry
+   * manage their own entries); public register() resolves any pending
+   * handoff first — an external registration (revive) supersedes it. */
+  function installRun(input: {
+    taskID: string;
+    generation: number;
+    parentSessionID: string;
+    baselineMessageID?: string;
+    attemptStartedAt?: number;
+    description: string;
+  }): void {
+    const old = runs.get(input.taskID);
+    if (old?.notification.retryTimer) clearTimeout(old.notification.retryTimer);
+    runs.set(input.taskID, {
+      ...input,
+      attemptStartedAt: input.attemptStartedAt ?? Date.now(),
+      revision: ++revisionSequence,
+      notification: { attempts: 0, sent: false, pending: false },
+    });
+    options.onRegister?.(input.taskID);
+  }
+
+  /** After promotion the owner is installed but admission is still
+   * unknown. Keep fencing the gate for one more expiry window, then
+   * probe again and lift the fence WITHOUT discarding the owner — a
+   * still-empty transcript can confirm stopped, a late result still
+   * has a delivery owner. */
+  function armPromotedResolution(taskID: string, generation: number): void {
+    const pending = pendingHandoffs.get(taskID);
+    if (pending?.state !== 'promoted' || pending.generation !== generation) {
+      return;
+    }
+    if (pending.expiryTimer) clearTimeout(pending.expiryTimer);
+    pending.expiryTimer = setTimeout(() => {
+      const current = pendingHandoffs.get(taskID);
+      if (current?.state !== 'promoted' || current.generation !== generation) {
+        return;
+      }
+      deleteHandoff(taskID);
+      // Background probing is fail-soft: a failure must be logged and
+      // swallowed, never escape as an unhandled rejection.
+      void probe(taskID, generation).catch((err) => {
+        log('[revived-run-tracker] handoff-expiry probe failed', String(err));
+      });
+    }, handoffExpiryMs);
+    pending.expiryTimer.unref?.();
+  }
+
+  /** Convert a pending preparation into the owning tracked run. Used
+   * by expiry (hung admission) and unresolved transport failures: the
+   * prepared owner must survive so a late acceptance — or the
+   * already-persisted result — is still delivered. */
+  function promoteHandoffToOwner(taskID: string): boolean {
+    const pending = pendingHandoffs.get(taskID);
+    if (pending?.state !== 'pending') return false;
+    if (pending.expiryTimer) clearTimeout(pending.expiryTimer);
+    pending.state = 'promoted';
+    pending.expiryTimer = undefined;
+    const record = options.backgroundJobBoard.get(taskID);
+    if (
+      record?.state !== 'running' ||
+      record.generation !== pending.generation ||
+      record.background !== true
+    ) {
+      // The execution was superseded while the admission was unknown:
+      // nothing to own.
+      deleteHandoff(taskID);
+      return false;
+    }
+    installRun({
+      taskID,
+      generation: pending.generation,
+      parentSessionID: pending.parentSessionID,
+      baselineMessageID: pending.baselineMessageID,
+      attemptStartedAt: pending.attemptStartedAt,
+      description: pending.description,
+    });
+    // The re-prompt may already be persisted (admission is async): own
+    // it now rather than waiting for an idle that already happened.
+    // Background probing is fail-soft: log and swallow, never leak an
+    // unhandled rejection.
+    void probe(taskID, pending.generation).catch((err) => {
+      log('[revived-run-tracker] promoted-owning probe failed', String(err));
+    });
+    armPromotedResolution(taskID, pending.generation);
+    return true;
+  }
+
+  function prepareObservation(input: {
+    taskID: string;
+    generation: number;
+    parentSessionID: string;
+    baselineMessageID?: string;
+    description: string;
+  }): boolean {
+    if (disposed) return false;
+    const record = options.backgroundJobBoard.get(input.taskID);
+    if (
+      record?.state !== 'running' ||
+      record.generation !== input.generation ||
+      record.background !== true
+    ) {
+      return false;
+    }
+    // Supplant the previous publisher: the run being substituted is
+    // discarded NOW — its in-flight probe fences out on the identity
+    // check instead of publishing the substituted attempt's terminal.
+    const old = runs.get(input.taskID);
+    if (old) discardRun(old);
+    deleteHandoff(input.taskID);
+    const expiryTimer = setTimeout(() => {
+      // Hung admission: the preparation converts into the owning run;
+      // responsibility is never dropped on a timer.
+      void promoteHandoffToOwner(input.taskID);
+    }, handoffExpiryMs);
+    expiryTimer.unref?.();
+    pendingHandoffs.set(input.taskID, {
+      generation: input.generation,
+      parentSessionID: input.parentSessionID,
+      baselineMessageID: input.baselineMessageID,
+      attemptStartedAt: Date.now(),
+      description: input.description,
+      state: 'pending',
+      expiryTimer,
+    });
+    return true;
+  }
+
+  function admitObservation(taskID: string, generation: number): boolean {
+    const pending = pendingHandoffs.get(taskID);
+    if (!pending || pending.generation !== generation) return false;
+    if (pending.state === 'promoted') {
+      // Late acceptance of an already-promoted owner: the admission is
+      // NOW resolved — clean the preparation and run the probe WITHOUT
+      // reinstalling the run or resetting sent/pending (the installed
+      // owner keeps its identity and notification state). The probe is
+      // the missing trigger when the result was persisted while the
+      // admission ack was in flight and no idle event will fire again.
+      deleteHandoff(taskID);
+      // Background probing is fail-soft: log and swallow, never leak an
+      // unhandled rejection.
+      void probe(taskID, generation).catch((err) => {
+        log('[revived-run-tracker] resolved-handoff probe failed', String(err));
+      });
+      return true;
+    }
+    deleteHandoff(taskID);
+    const record = options.backgroundJobBoard.get(taskID);
+    if (
+      record?.state !== 'running' ||
+      record.generation !== generation ||
+      record.background !== true
+    ) {
+      return false;
+    }
+    installRun({
+      taskID,
+      generation,
+      parentSessionID: pending.parentSessionID,
+      baselineMessageID: pending.baselineMessageID,
+      attemptStartedAt: pending.attemptStartedAt,
+      description: pending.description,
+    });
+    // Immediate probe: the re-prompt admission is async — if the
+    // substituted run already went idle (fast answer + delayed
+    // admission accounting), no idle event will fire again.
+    // Background probing is fail-soft: log and swallow, never leak an
+    // unhandled rejection.
+    void probe(taskID, generation).catch((err) => {
+      log('[revived-run-tracker] immediate probe failed', String(err));
+    });
+    return true;
+  }
+
+  /** Explicit host refusal (error envelope, capability rejection): no
+   * work was admitted, so nothing is owned. Unknown transport failures
+   * must use settleObservationUnresolved instead. */
+  function rejectObservation(taskID: string, generation: number): void {
+    const pending = pendingHandoffs.get(taskID);
+    if (!pending || pending.generation !== generation) return;
+    deleteHandoff(taskID);
+    if (pending.state === 'promoted') {
+      const run = runs.get(taskID);
+      if (run?.generation === generation) discardRun(run);
+    }
+  }
+
+  /** Unknown admission outcome (transport failed without a response —
+   * the host may still have accepted the replay): the prepared
+   * ownership CONVERTS into a tracked run instead of being dropped. */
+  function settleObservationUnresolved(
+    taskID: string,
+    generation: number,
+  ): boolean {
+    const pending = pendingHandoffs.get(taskID);
+    if (!pending || pending.generation !== generation) return false;
+    return promoteHandoffToOwner(taskID);
+  }
+
   return {
     captureBaseline,
     register,
     isTracked,
+    baselineFor,
+    attemptStartedAtFor,
     probe,
     onTerminal,
-    dispose,
+    prepareObservation,
+    admitObservation,
+    rejectObservation,
+    settleObservationUnresolved,
+    isObservationPending,
+    revisionFor: (taskID, generation) => {
+      const run = runs.get(taskID);
+      return run?.generation === generation ? run.revision : undefined;
+    },
+    dispose: () => {
+      disposed = true;
+      for (const pending of pendingHandoffs.values()) {
+        clearTimeout(pending.expiryTimer);
+      }
+      pendingHandoffs.clear();
+      dispose();
+    },
   };
 }
 
 async function awaitNotificationTransport<T>(
-  backgroundJobBoard: BackgroundJobStore,
-  lease: BackgroundJobLease,
   operation: () => Promise<T>,
+  onAccepted: () => void,
 ): Promise<T> {
-  let settled = false;
-  let timedOut = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const transport = Promise.resolve()
     .then(operation)
-    .then(
-      (value) => {
-        settled = true;
-        if (timedOut) backgroundJobBoard.releaseLease(lease);
-        return value;
-      },
-      (error: unknown) => {
-        settled = true;
-        if (timedOut) backgroundJobBoard.releaseLease(lease);
-        throw error;
-      },
-    );
+    .then((value) => {
+      const error = responseError(value);
+      if (error !== undefined) throw new Error(stringifyError(error));
+      onAccepted();
+      return value;
+    });
 
   try {
     return await Promise.race([
@@ -391,15 +740,8 @@ async function awaitNotificationTransport<T>(
         timer.unref?.();
       }),
     ]);
-  } catch (error) {
-    if (error instanceof NotificationTransportTimeoutError) {
-      timedOut = true;
-      if (settled) backgroundJobBoard.releaseLease(lease);
-    }
-    throw error;
   } finally {
     if (timer) clearTimeout(timer);
-    if (!timedOut) backgroundJobBoard.releaseLease(lease);
   }
 }
 
@@ -422,38 +764,4 @@ function terminalOutcome(
   return record.state === 'completed' || record.state === 'error'
     ? record.state
     : undefined;
-}
-
-function hasPendingToolCall(
-  messages: SessionMessage[],
-  baselineIndex: number,
-): boolean {
-  return messages.slice(baselineIndex + 1).some((message) =>
-    (message.parts ?? []).some((part) => {
-      if (part.type !== 'tool') return false;
-      const status = part.state?.status;
-      return status !== 'completed' && status !== 'error';
-    }),
-  );
-}
-
-function responseError(response: unknown): unknown {
-  if (!isRecord(response)) return undefined;
-  return response.error === undefined || response.error === null
-    ? undefined
-    : response.error;
-}
-
-function errorText(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === 'string') return error;
-  try {
-    return JSON.stringify(error);
-  } catch {
-    return String(error);
-  }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
 }

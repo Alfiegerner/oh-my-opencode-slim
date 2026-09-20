@@ -4,13 +4,9 @@ import {
   DEFAULT_MAX_RETAINED_SNAPSHOTS,
 } from './constants';
 import { CouncilConfigSchema } from './council-schema';
+import { ProviderModelIdSchema } from './model-id-schema';
 
-export const ProviderModelIdSchema = z
-  .string()
-  .regex(
-    /^[^/\s]+\/[^\s]+$/,
-    'Expected provider/model format (provider/.../model)',
-  );
+export { ProviderModelIdSchema } from './model-id-schema';
 
 // Permission schemas — mirror the SDK's PermissionConfig type with shallow
 // validation. Action values are validated; unknown tool keys pass through.
@@ -61,9 +57,6 @@ export const AgentColorSchema = z.union([
 
 // Agent override configuration (distinct from SDK's AgentConfig)
 export const ModelInheritanceSourceSchema = z.enum(['session', 'orchestrator']);
-export type ModelInheritanceSource = z.infer<
-  typeof ModelInheritanceSourceSchema
->;
 
 export const AgentOverrideConfigSchema = z
   .object({
@@ -87,6 +80,24 @@ export const AgentOverrideConfigSchema = z
     temperature: z.number().min(0).max(2).optional(),
     variant: z.string().optional().catch(undefined),
     skills: z.array(z.string()).optional(), // skills this agent can use ("*" = all, "!item" = exclude)
+    skills_add: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Skill names to add to this agent's effective skills list. Applied after the resolved `skills` list during config resolution; removal via `skills_remove` wins. Folded into `skills` at resolution time.",
+      ),
+    skills_remove: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Skill names to remove from this agent's effective skills list. Applied after `skills_add` during config resolution, so removal wins over addition. Folded into `skills` at resolution time.",
+      ),
+    skills_include_local: z
+      .boolean()
+      .optional()
+      .describe(
+        "When true, adds every valid skill under the current project's `.opencode/skills/**/SKILL.md` tree to this agent's effective skills list before `skills_remove` is applied. Global and external skill sources are not included.",
+      ),
     mcps: z.array(z.string()).optional(), // MCPs this agent can use ("*" = all, "!item" = exclude)
     prompt: z.string().min(1).optional(),
     orchestratorPrompt: z.string().min(1).optional(),
@@ -131,7 +142,7 @@ export type ZellijPaneMode = z.infer<typeof ZellijPaneModeSchema>;
 export const MultiplexerConfigSchema = z.object({
   type: MultiplexerTypeSchema.default('none'),
   layout: MultiplexerLayoutSchema.default('main-vertical'),
-  main_pane_size: z.number().min(20).max(80).default(60), // percentage for main pane
+  main_pane_size: z.number().min(20).max(80).default(60), // percentage
   zellij_pane_mode: ZellijPaneModeSchema.default('agent-tab'),
 });
 
@@ -174,6 +185,43 @@ export const InterviewConfigSchema = z.object({
 
 export type InterviewConfig = z.infer<typeof InterviewConfigSchema>;
 
+const ConcurrencyLimitSchema = z.number().int().min(0).max(1000);
+
+export const BackgroundTaskConcurrencyConfigSchema = z
+  .object({
+    defaultConcurrency: z
+      .number()
+      .int()
+      .min(0)
+      .max(1000)
+      .default(0)
+      .describe(
+        'Maximum concurrently running native background tasks. 0 disables the default cap.',
+      ),
+    providerConcurrency: z
+      .record(z.string().min(1), ConcurrencyLimitSchema)
+      .default({})
+      .describe(
+        'Per-provider concurrency caps keyed by provider ID. The most specific configured cap wins: model > provider > default. 0 means unlimited for that provider.',
+      ),
+    modelConcurrency: z
+      .record(z.string().min(1), ConcurrencyLimitSchema)
+      .default({})
+      .describe(
+        'Per-model concurrency caps keyed by provider/model ID. The most specific configured cap wins: model > provider > default. 0 means unlimited for that model.',
+      ),
+  })
+  .strict()
+  .default({
+    defaultConcurrency: 0,
+    providerConcurrency: {},
+    modelConcurrency: {},
+  });
+
+export type BackgroundTaskConcurrencyConfig = z.infer<
+  typeof BackgroundTaskConcurrencyConfigSchema
+>;
+
 export const BackgroundJobsConfigSchema = z.object({
   strategy: z
     .enum(['latest', 'checkpoint-compatible'])
@@ -211,10 +259,16 @@ export const BackgroundJobsConfigSchema = z.object({
         .describe(
           'Continuous parent-idle interval between orchestrator wake evaluations (60,000–2,147,483,647ms). Default 300,000 (5 minutes). 0 is invalid.',
         ),
+      mode: z
+        .enum(['auto', 'todo', 'children'])
+        .default('auto')
+        .describe(
+          'Wake-condition source. "auto" uses todo-gating on v1 hosts and children-driven degraded mode on v2 hosts (no todo surface there); "todo" or "children" pin one mode, degrading to children when the host lacks the todo API. Default "auto".',
+        ),
     })
-    .default({ enabled: true, intervalMs: 300_000 })
+    .default({ enabled: true, intervalMs: 300_000, mode: 'auto' })
     .describe(
-      'Periodic orchestrator wake scheduler for idle sessions with incomplete todos. Default enabled at a 5-minute interval. Requires host session APIs (session.get, todo, children, status, promptAsync); inactive on the v2 shim.',
+      'Periodic orchestrator wake scheduler for idle sessions. v1: requires host session APIs (session.get, todo, children, status, promptAsync) and wakes while incomplete todos remain. v2: runs in children-driven degraded mode (requires session.list + promptAsync) and wakes while un-finished child sessions remain. Default enabled at a 5-minute interval.',
     ),
   wallClockTimeoutMs: z
     .union([z.literal(0), z.number().int().min(60_000).max(2_147_483_647)])
@@ -230,6 +284,13 @@ export const BackgroundJobsConfigSchema = z.object({
     .default(10_000)
     .describe(
       'Grace period after a wall-clock deadline while OpenCode confirms the child terminal state (1,000–60,000ms).',
+    ),
+  concurrency: BackgroundTaskConcurrencyConfigSchema,
+  sameProviderPolicy: z
+    .record(z.string().min(1), z.literal('foreground'))
+    .default({})
+    .describe(
+      'Opt-in per-provider policy for native background tasks: when the parent session and the child agent both resolve to a provider listed here with value "foreground", the background request is converted to foreground execution (existing foreground path, no concurrency admission). Unlisted or unknown providers keep background behavior. Default {} (no conversion).',
     ),
   waitForUserGuard: z
     .boolean()
@@ -250,7 +311,6 @@ export type BackgroundJobsConfig = z.infer<typeof BackgroundJobsConfigSchema>;
  */
 export const LEGACY_FALLBACK_KEYS = [
   'timeoutMs',
-  'retryDelayMs',
   'retry_on_empty',
   'runtimeOverride',
 ] as const;
@@ -287,6 +347,25 @@ export const FailoverConfigSchema = z.preprocess(
           'Number of consecutive 429/rate-limit responses tolerated on the ' +
             'same model before aborting (or swapping to the next fallback ' +
             'model when a chain is configured).',
+        ),
+      initialRetryDelayMs: z
+        .number()
+        .int()
+        .min(0)
+        .default(0)
+        .describe(
+          'Delay in milliseconds before triggering the first fallback on a ' +
+            'failover-worthy error. Gives intercepting plugins time to recover ' +
+            'the current model before the fallback chain advances. 0 disables.',
+        ),
+      retryDelayMs: z
+        .number()
+        .int()
+        .min(0)
+        .default(500)
+        .describe(
+          'Delay in milliseconds between consecutive fallback attempts ' +
+            'after the initial trigger. 0 disables.',
         ),
     })
     .strict(),
@@ -376,9 +455,6 @@ export const AcpAgentConfigSchema = z
 
 export const AcpAgentsConfigSchema = z.record(z.string(), AcpAgentConfigSchema);
 
-export type AcpAgentPermissionMode = z.infer<
-  typeof AcpAgentPermissionModeSchema
->;
 export type AcpAgentConfig = z.infer<typeof AcpAgentConfigSchema>;
 export type AcpAgentsConfig = z.infer<typeof AcpAgentsConfigSchema>;
 

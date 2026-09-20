@@ -1,3 +1,4 @@
+import type { Server } from 'node:http';
 import type { InterviewConfig, PluginConfig } from '../config';
 import { DEFAULT_DASHBOARD_PORT } from '../interview/dashboard';
 import { createDashboardManager } from '../interview/dashboard-manager';
@@ -5,7 +6,9 @@ import type { InterviewSessionRuntime } from '../interview/runtime';
 import { createInterviewServer } from '../interview/server';
 import { createInterviewService } from '../interview/service';
 import type { InterviewMessage } from '../interview/types';
+import { isRecord } from '../utils/guards';
 import { log } from '../utils/logger';
+import { createSessionListShim } from './client-shim';
 import { createSessionSubmit, textFromContent } from './session-submit';
 import type {
   V2CommandDraft,
@@ -75,6 +78,10 @@ export function applyInterviewCommandParts(
 export function createV2InterviewBridge(
   ctx: V2Context,
   config?: InterviewConfig,
+  options: {
+    /** Already-listening server for the dashboard role to adopt. */
+    server?: Server;
+  } = {},
 ): V2InterviewBridge {
   const transcripts = new Map<string, InterviewMessage[]>();
   const activeText = new Map<string, string>();
@@ -85,14 +92,15 @@ export function createV2InterviewBridge(
   const runtime: InterviewSessionRuntime = {
     messages: async (sessionID) => transcripts.get(sessionID) ?? [],
     notify: async (sessionID, text) => {
-      // synthetic only — no prompt fallback: synthetic avoids triggering an
-      // agent turn; a prompt fallback would double-send and wake the loop.
+      // synthetic only — no prompt fallback: `resume: false` admits the
+      // input WITHOUT waking the session, mirroring the v1 noReply prompt
+      // (a prompt fallback would double-send and wake the loop).
       if (typeof methods.synthetic !== 'function') {
         log('[v2][interview] synthetic unavailable for notify', { sessionID });
         return;
       }
       try {
-        await methods.synthetic({ sessionID, text });
+        await methods.synthetic({ sessionID, text, resume: false });
       } catch (err) {
         log('[v2][interview] synthetic notify failed', {
           sessionID,
@@ -113,12 +121,13 @@ export function createV2InterviewBridge(
       await submitUserText(sessionID, text);
     },
     rename: async (sessionID, title) => {
-      if (typeof methods.rename !== 'function') {
+      // Renames go through session.update({sessionID, title}).
+      if (typeof methods.update !== 'function') {
         log('[v2][interview] session rename unavailable', { sessionID });
         return;
       }
       try {
-        await methods.rename({ sessionID, title });
+        await methods.update({ sessionID, title });
       } catch (err) {
         log('[v2][interview] session rename failed', {
           sessionID,
@@ -142,9 +151,13 @@ export function createV2InterviewBridge(
         outputFolder,
         {
           runtime,
+          // v1-shaped list over v2 session.list (directory discovery for
+          // the dashboard's session scan); empty page when the host lacks
+          // the method.
           sessionClient: {
-            list: async () => ({ data: [] }),
+            list: createSessionListShim(methods),
           } as never,
+          server: options.server,
         },
       )
     : null;
@@ -194,15 +207,27 @@ export function createV2InterviewBridge(
     });
   }
 
-  async function handleContext(event: V2SessionContextEvent): Promise<void> {
-    const messages = toInterviewMessages(event);
-    transcripts.set(event.sessionID, messages);
+  function isManagedInterviewSession(sessionID: string): boolean {
+    return (
+      transcripts.has(sessionID) ||
+      Boolean(
+        (dashboardManager?.service ?? service).getActiveInterviewId(sessionID),
+      )
+    );
+  }
 
+  async function handleContext(event: V2SessionContextEvent): Promise<void> {
     const trailing = event.messages.at(-1);
-    if (trailing?.role !== 'user') return;
-    const text = textFromContent(trailing.content);
+    const text =
+      trailing?.role === 'user' ? textFromContent(trailing.content) : '';
     const match = text.match(MARKER_PATTERN);
-    if (!match) return;
+    const managed = isManagedInterviewSession(event.sessionID);
+    if (!match && !managed) return;
+
+    // Capture the current view before executing /interview so resume and
+    // creation can read the history. Ordinary sessions never enter here.
+    transcripts.set(event.sessionID, toInterviewMessages(event));
+    if (!match || trailing?.role !== 'user') return;
 
     const output = {
       parts: [] as Array<{
@@ -255,24 +280,36 @@ export function createV2InterviewBridge(
 
   async function handleEvent(event: Record<string, unknown>): Promise<void> {
     const type = typeof event.type === 'string' ? event.type : '';
-    const properties = (event.properties ?? {}) as Record<string, unknown>;
+    // Data-first: live v2 hosts key the event payload under `data` (the
+    // OpenCodeEvent wire shape); `properties` is the legacy/test spelling.
+    // Reading only `properties` left this handler dead on live v2 for ALL
+    // events. handleContext is unaffected (different event type).
+    const properties = isRecord(event.data)
+      ? event.data
+      : isRecord(event.properties)
+        ? event.properties
+        : {};
     const sessionID =
       (typeof properties.sessionID === 'string' && properties.sessionID) ||
       ((properties.info as { id?: string } | undefined)?.id ?? '');
     if (!sessionID) return;
 
+    const managed = isManagedInterviewSession(sessionID);
     if (type === 'session.next.text.started') {
+      if (!managed) return;
       activeText.set(sessionID, '');
       beginText(sessionID);
       return;
     }
     if (type === 'session.next.text.delta') {
+      if (!managed) return;
       const text = `${activeText.get(sessionID) ?? ''}${typeof properties.delta === 'string' ? properties.delta : ''}`;
       activeText.set(sessionID, text);
       appendText(sessionID, text);
       return;
     }
     if (type === 'session.next.text.ended') {
+      if (!managed) return;
       const text =
         typeof properties.text === 'string'
           ? properties.text

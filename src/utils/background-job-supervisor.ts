@@ -1,10 +1,13 @@
 import type { BackgroundJobRecord } from './background-job-board';
 import type { BackgroundJobStore } from './background-job-store';
+import type { BackgroundJobTerminalGate } from './background-job-terminal-gate';
+import { log } from './logger';
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
 export interface BackgroundJobSupervisorOptions {
   backgroundJobStore: BackgroundJobStore;
+  terminalGate: BackgroundJobTerminalGate;
   wallClockTimeoutMs: number;
   abortGraceMs: number;
   abort: (taskID: string) => Promise<unknown>;
@@ -62,6 +65,10 @@ export class BackgroundJobSupervisor {
       generation: record.generation,
       parentSessionID: record.parentSessionID,
     };
+    if (record.deadlineExceededAt !== undefined) {
+      this.runs.set(record.taskID, run);
+      return;
+    }
     run.deadlineTimer = this.setTimer(
       () => this.onDeadline(record.taskID, record.generation),
       Math.max(
@@ -78,6 +85,7 @@ export class BackgroundJobSupervisor {
       record.state === 'completed' ||
       record.state === 'error' ||
       record.state === 'cancelled' ||
+      record.state === 'stopped' ||
       record.state === 'reconciled'
     ) {
       const run = this.runs.get(record.taskID);
@@ -101,14 +109,13 @@ export class BackgroundJobSupervisor {
       return false;
     }
     if (record.deadlineExceededAt !== undefined && record.state === 'running') {
-      this.options.backgroundJobStore.finalizeWallClockTimeout({
-        taskID,
-        generation: record.generation,
-        now: this.now(),
-        statusUncertain: false,
-        resultSummary:
-          'Background task exceeded its wall-clock deadline; session deletion confirmed the abort.',
-      });
+      const token = this.options.terminalGate.capture(record);
+      if (token)
+        this.options.terminalGate.observe(token, {
+          kind: 'deleted',
+          origin: 'session.deleted',
+          readStartedAt: token.readStartedAt,
+        });
       this.clear(taskID);
       return true;
     }
@@ -166,15 +173,22 @@ export class BackgroundJobSupervisor {
     const run = this.runs.get(taskID);
     if (this.disposed || !run || run.generation !== generation) return;
     run.graceTimer = undefined;
-    this.options.backgroundJobStore.finalizeWallClockTimeout({
+    this.options.backgroundJobStore.markStatusUncertain(
       taskID,
+      'Background task exceeded its wall-clock deadline; abort was not confirmed before the grace period expired.',
       generation,
-      now: this.now(),
-      statusUncertain: true,
-      resultSummary:
-        'Background task exceeded its wall-clock deadline; abort was not confirmed before the grace period expired.',
-    });
-    this.clear(taskID);
+      this.now(),
+    );
+    // Background reconciliation is fail-soft: a failure must be logged
+    // and swallowed, never escape as an unhandled rejection.
+    void this.options.terminalGate
+      .reconcile({ taskID, generation }, { kind: 'deadline' })
+      .catch((err) => {
+        log(
+          '[background-job-supervisor] deadline reconcile failed',
+          String(err),
+        );
+      });
   }
 
   private clear(taskID: string): void {

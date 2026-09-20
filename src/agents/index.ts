@@ -4,19 +4,20 @@ import {
   AGENT_ALIASES,
   type AgentOverrideConfig,
   ALL_AGENT_NAMES,
-  DEFAULT_AGENT_COLORS,
-  DEFAULT_DISABLED_AGENTS,
   DEFAULT_MODELS,
   loadAgentPrompt,
   type PluginConfig,
-  PROTECTED_AGENTS,
   SUBAGENT_NAMES,
 } from '../config';
 import { getAgentMcpList } from '../config/agent-mcps';
 import type { RuntimeConfig } from '../config/runtime';
 import { escapeRegExp, normalizeAgentName } from '../utils/agent-variant';
+import { delegationVocabulary } from '../v2/adapters';
 
-import { createCouncilAgent } from './council';
+import {
+  createCouncilAgent,
+  ensureCouncilCompactionException,
+} from './council';
 import { buildCouncillorAgents, getCouncillorSeatName } from './council-agents';
 import { createCouncillorAgent } from './councillor';
 import { createDesignerAgent } from './designer';
@@ -32,6 +33,7 @@ import {
 } from './orchestrator';
 import { appendTaskRejectionInstruction } from './task-rejection';
 
+export { ensureCouncilCompactionException } from './council';
 export type { AgentDefinition } from './orchestrator';
 
 type AgentFactory = (
@@ -49,18 +51,23 @@ const TASK_CONTROL_TOOL_NAMES = [
 ] as const;
 const SAFE_AGENT_ALIAS_RE = /^[a-z][a-z0-9_-]*$/i;
 
+export function resolvePrimaryModelValue(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const first = value[0];
+  return typeof first === 'string'
+    ? first
+    : first && typeof first === 'object' && 'id' in first
+      ? typeof first.id === 'string'
+        ? first.id
+        : undefined
+      : undefined;
+}
+
 function getPrimaryModelFromOverride(
   override: AgentOverrideConfig | undefined,
 ): string | undefined {
-  const model = override?.model;
-  if (typeof model === 'string') {
-    return model;
-  }
-  if (Array.isArray(model) && model.length > 0) {
-    const first = model[0];
-    return typeof first === 'string' ? first : first?.id;
-  }
-  return undefined;
+  return resolvePrimaryModelValue(override?.model);
 }
 
 /**
@@ -418,16 +425,22 @@ const SUBAGENT_FACTORIES: Record<SubagentName, AgentFactory> = {
  * Instantiates the orchestrator and all subagents, applying user config and defaults.
  *
  * @param runtime - Runtime configuration interface (plugin layer, preset-aware)
+ * @param options - Optional options including projectDirectory and hostFlavor
  * @returns Array of agent definitions (orchestrator first, then subagents)
  */
 export function createAgents(
   runtime: RuntimeConfig,
-  options?: { projectDirectory?: string },
+  options?: { projectDirectory?: string; hostFlavor?: string },
 ): AgentDefinition[] {
+  // Native delegation vocabulary for the host flavor ('v2' → subagent/agent,
+  // v1/default → task/subagent_type). Construction-time constant — cache-safe.
+  const vocab = delegationVocabulary(options?.hostFlavor);
   const mergedAgents = runtime.agents();
   const disabled = new Set(runtime.disabledAgents);
   if (!runtime.council) {
     disabled.add('council');
+    // The bare councillor is only meaningful as part of configured Council Mode.
+    disabled.add('councillor');
   }
 
   const primaryModel = runtime.primaryModel;
@@ -478,7 +491,6 @@ export function createAgents(
     .map(([name, factory]) => {
       // Get base agent definition using the subagent factory with undefined prompts
       const agent = factory(getModelForAgent(name), undefined, undefined);
-      agent.config.color ??= DEFAULT_AGENT_COLORS[name];
 
       const customPrompts = loadAgentPrompt(name, {
         preset: runtime.preset,
@@ -498,6 +510,11 @@ export function createAgents(
         defaultPrompt,
         customPrompts.appendPrompt,
       );
+      if (name === 'council') {
+        agent.config.prompt = ensureCouncilCompactionException(
+          agent.config.prompt ?? '',
+        );
+      }
 
       return agent;
     });
@@ -603,13 +620,15 @@ export function createAgents(
   // Build dynamic councillor agents from council config (flatten mode).
   // Each councillor becomes a dispatchable subagent with its own model,
   // so the orchestrator can task() them with native panes at depth 1.
+  // Only a *configured* color is inherited: councillor override first, then
+  // council override. No default fallback — unconfigured councillors stay
+  // colorless so the host TUI palette keeps assigning distinct colors.
   const councillorColor =
     getOverrideFromAgents(mergedAgents, 'councillor')?.color ??
-    getOverrideFromAgents(mergedAgents, 'council')?.color ??
-    DEFAULT_AGENT_COLORS.councillor;
+    getOverrideFromAgents(mergedAgents, 'council')?.color;
   const councillorAgents = buildCouncillorAgents(runtime, disabled).map(
     (agent) => {
-      agent.config.color ??= councillorColor;
+      if (councillorColor) agent.config.color ??= councillorColor;
       applyDefaultPermissions(agent, undefined, runtime.disabledSkills);
       return agent;
     },
@@ -645,8 +664,8 @@ export function createAgents(
     councillorAgents.length > 0 ? ['council'] : undefined,
     !runtime.disabledTools.includes('wait_for_user'),
     runtime.backgroundJobs.orchestratorWake.enabled,
+    options?.hostFlavor,
   );
-  orchestrator.config.color ??= DEFAULT_AGENT_COLORS.orchestrator;
 
   const inlineOrchestratorPrompt = orchestratorOverride?.prompt;
   const defaultOrchestratorPrompt = orchestrator.config.prompt ?? '';
@@ -769,10 +788,14 @@ export function createAgents(
     const dispatchList = councillorAgents
       .map(
         (a: AgentDefinition) =>
-          `   - task(subagent_type='${a.name}', description='Councillor ${getCouncillorSeatName(a.name)} on <brief topic>', prompt=<user's question>)`,
+          `   - ${vocab.tool}(${vocab.agentParam}='${a.name}', description='Councillor ${getCouncillorSeatName(a.name)} on <brief topic>', prompt=<user's question>)`,
       )
       .join('\n');
-    updatedPrompt = `${updatedPrompt}\n\n## Council Mode\n\nWhen you need to run a council or the user asks for consensus/multiple opinions, use this procedure INSTEAD of delegating to @council:\n\n1. If the question references an external resource (PR, URL, issue, doc), fetch its content FIRST using your own tools (webfetch/bash/gh), then embed a concise summary in the prompt you send to each councillor — councillors have read-only codebase access only and cannot fetch external content themselves.\n2. Dispatch the user's question (with any fetched context) to each councillor in PARALLEL via task():\n${dispatchList}\n3. Collect ALL councillor responses. If any councillor returns empty or does not respond within 3 minutes, proceed without it — do not wait indefinitely. If a councillor's response is empty, retry that councillor once before continuing.\n4. Call task(subagent_type='council', description='Synthesize council report') with a prompt that includes the original user question AND all councillor responses. For each councillor, label its response with its seat name AND its model (e.g. "alpha (gpt-5.6-luna)"). Format each councillor's seat name and response clearly separated. If a councillor failed or timed out, include that status explicitly (e.g. "beta (gemini-3-pro): FAILED/TIMED OUT") instead of omitting it. Skip only councillors that returned empty after one retry.\n5. Present the council's synthesized report.\n\nThis ensures each councillor runs with its own model and the council agent synthesizes the full multi-model consensus.`;
+    updatedPrompt = `${updatedPrompt}\n\n## Council Mode\n\nWhen you need to run a council or the user asks for consensus/multiple opinions, use this procedure INSTEAD of delegating to @council:\n\n1. If the question references an external resource (PR, URL, issue, doc), fetch its content FIRST using your own tools (webfetch/bash/gh), then embed a concise summary in the prompt you send to each councillor — councillors have read-only codebase access only and cannot fetch external content themselves.\n2. Dispatch the user's question (with any fetched context) to each councillor in PARALLEL via ${vocab.tool}():\n${dispatchList}\n3. Collect ALL councillor responses. If any councillor returns empty or does not respond within 3 minutes, proceed without it — do not wait indefinitely. If a councillor's response is empty, retry that councillor once before continuing.\n4. Call ${vocab.tool}(${vocab.agentParam}='council', description='Synthesize council report') with a prompt that includes the original user question AND all councillor responses. For each councillor, label its response with its seat name AND its model (e.g. "alpha (gpt-5.6-luna)"). Format each councillor's seat name and response clearly separated. If a councillor failed or timed out, include that status explicitly (e.g. "beta (gemini-3-pro): FAILED/TIMED OUT") instead of omitting it. Skip only councillors that returned empty after one retry.\n5. Present the council's synthesized report.\n\nThis ensures each councillor runs with its own model and the council agent synthesizes the full multi-model consensus.${
+      vocab.modelParam
+        ? ` The ${vocab.tool} tool also accepts an optional \`${vocab.modelParam}\` argument ("providerID/modelID"). Only set it when the user explicitly asks for a specific model or variant; never guess the ID — look it up with the models tool first, filtering to your own provider.`
+        : ''
+    }`;
   }
 
   orchestrator.config.prompt = updatedPrompt;
@@ -785,12 +808,12 @@ export function createAgents(
  * Converts agent definitions to SDK config format and applies classification metadata.
  *
  * @param runtime - Runtime configuration interface (plugin layer, preset-aware)
- * @param options - Optional options including projectDirectory
+ * @param options - Optional options including projectDirectory and hostFlavor
  * @returns Record mapping agent names to their SDK configurations
  */
 export function getAgentConfigs(
   runtime: RuntimeConfig,
-  options?: { projectDirectory?: string },
+  options?: { projectDirectory?: string; hostFlavor?: string },
 ): Record<string, SDKAgentConfig> {
   const agents = createAgents(runtime, options);
 
@@ -856,21 +879,4 @@ export function getAgentConfigs(
   }
 
   return Object.fromEntries(entries);
-}
-
-/**
- * Get the set of disabled agent names from config, applying protection rules.
- */
-export function getDisabledAgents(config?: PluginConfig): Set<string> {
-  const userDisabled = config?.disabled_agents;
-  const disabledSource = Array.isArray(userDisabled)
-    ? userDisabled
-    : DEFAULT_DISABLED_AGENTS;
-  const disabled = new Set<string>();
-  for (const name of disabledSource) {
-    if (!PROTECTED_AGENTS.has(name)) {
-      disabled.add(name);
-    }
-  }
-  return disabled;
 }

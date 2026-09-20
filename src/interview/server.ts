@@ -6,6 +6,7 @@ import {
 } from 'node:http';
 import { URL } from 'node:url';
 import { extractResumeSlug, readJsonBody, sendHtml, sendJson } from './helpers';
+import type { createInterviewService } from './service';
 import type {
   InterviewAnswer,
   InterviewFileItem,
@@ -70,6 +71,39 @@ function parseAnswersPayload(value: unknown): { answers: InterviewAnswer[] } {
   };
 }
 
+/**
+ * Server deps delegating every service operation to a single
+ * `createInterviewService` instance — the shared shape used by the
+ * per-session server, the dashboard fallback server, and the v2 interview
+ * bridge.
+ */
+export function createInterviewServerDeps(
+  service: ReturnType<typeof createInterviewService>,
+  outputFolder: string,
+  port: number,
+) {
+  return {
+    getState: (interviewId: string) => service.getInterviewState(interviewId),
+    listInterviewFiles: () => service.listInterviewFiles(),
+    listInterviews: () => service.listInterviews(),
+    submitAnswers: (interviewId: string, answers: InterviewAnswer[]) =>
+      service.submitAnswers(interviewId, answers),
+    submitBlockComment: (
+      interviewId: string,
+      section: string,
+      comment: string,
+    ) => service.submitBlockComment(interviewId, section, comment),
+    submitChat: (interviewId: string, message: string) =>
+      service.submitChat(interviewId, message),
+    handleNudgeAction: (
+      interviewId: string,
+      action: 'more-questions' | 'confirm-complete',
+    ) => service.handleNudgeAction(interviewId, action),
+    outputFolder,
+    port,
+  };
+}
+
 export function createInterviewServer(deps: {
   getState: (interviewId: string) => Promise<InterviewState>;
   listInterviewFiles: () => Promise<InterviewFileItem[]>;
@@ -90,6 +124,8 @@ export function createInterviewServer(deps: {
   ) => Promise<void>;
   outputFolder: string;
   port: number;
+  /** Already-listening server to adopt instead of binding `port`. */
+  server?: Server;
 }): {
   ensureStarted: () => Promise<string>;
   close: () => void;
@@ -314,14 +350,21 @@ export function createInterviewServer(deps: {
     }
 
     startPromise = new Promise((resolve, reject) => {
-      const server = createServer((request, response) => {
+      const requestHandler = (
+        request: IncomingMessage,
+        response: ServerResponse,
+      ) => {
         handle(request, response).catch((error) => {
           sendJson(response, 500, {
             error:
               error instanceof Error ? error.message : 'Internal server error',
           });
         });
-      });
+      };
+
+      // Adopt an already-listening server (deterministic port ownership)
+      // or bind a fresh one on deps.port.
+      const server = deps.server ?? createServer(requestHandler);
       server.requestTimeout = 30_000;
       server.headersTimeout = 10_000;
 
@@ -341,6 +384,23 @@ export function createInterviewServer(deps: {
           reject(error);
         }
       });
+
+      if (deps.server) {
+        // Adoption path: already listening. Swap the placeholder handler
+        // for the interview server handler and read the port from the
+        // address.
+        const address = server.address();
+        if (!address || typeof address === 'string') {
+          startPromise = null;
+          reject(new Error('Failed to start interview server'));
+          return;
+        }
+        server.removeAllListeners('request');
+        server.on('request', requestHandler);
+        baseUrl = `http://127.0.0.1:${address.port}`;
+        resolve(baseUrl);
+        return;
+      }
 
       server.listen(deps.port, '127.0.0.1', () => {
         const address = server.address();

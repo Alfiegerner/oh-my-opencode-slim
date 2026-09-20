@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import { BackgroundJobBoard } from '../utils/background-job-board';
 import { BackgroundJobCoordinator } from '../utils/background-job-coordinator';
+import { BackgroundJobBoard } from '../utils/background-job-fixture';
 import { CmuxSessionStore } from './cmux/session-state';
 import {
   MultiplexerSessionManager,
@@ -319,7 +319,7 @@ describe('MultiplexerSessionManager', () => {
       expect(mockWaitForSessionReady).toHaveBeenCalledWith(
         `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
         'child-timeout',
-        expect.any(Object),
+        expect.objectContaining({ directory: '/test/directory' }),
       );
     });
 
@@ -357,6 +357,11 @@ describe('MultiplexerSessionManager', () => {
       });
 
       expect(mockWaitForSessionReady).toHaveBeenCalledTimes(2);
+      expect(mockWaitForSessionReady).toHaveBeenLastCalledWith(
+        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
+        'child-recover-timeout',
+        expect.objectContaining({ directory: '/test/directory' }),
+      );
       expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(1);
       expect(mockMultiplexer.spawnPane).toHaveBeenLastCalledWith(
         'child-recover-timeout',

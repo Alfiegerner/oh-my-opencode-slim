@@ -9,6 +9,7 @@ import {
   createInterviewService as createRealInterviewService,
   MAX_RETAINED_ABANDONED,
 } from './service';
+import { bindFreePort } from './test-port';
 import type { InterviewAnswer } from './types';
 import { renderInterviewPage } from './ui';
 
@@ -1852,24 +1853,6 @@ describe('renderInterviewPage', () => {
   });
 });
 
-/** Discover a free port by briefly binding to port 0, then closing. */
-async function findFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = createServer();
-    srv.listen(0, '127.0.0.1', () => {
-      const addr = srv.address();
-      srv.close(() => {
-        if (!addr || typeof addr === 'string') {
-          reject(new Error('Failed to find free port'));
-          return;
-        }
-        resolve(addr.port);
-      });
-    });
-    srv.on('error', reject);
-  });
-}
-
 describe('interview server port configuration', () => {
   const noopDeps = {
     getState: mock(
@@ -1896,13 +1879,18 @@ describe('interview server port configuration', () => {
   };
 
   test('server starts on a specific port when port is non-zero', async () => {
-    const freePort = await findFreePort();
-    const server = createInterviewServer({ ...noopDeps, port: freePort });
+    const held = await bindFreePort();
+    const server = createInterviewServer({
+      ...noopDeps,
+      port: held.port,
+      server: held.server,
+    });
     try {
       const baseUrl = await server.ensureStarted();
-      expect(baseUrl).toBe(`http://127.0.0.1:${freePort}`);
+      expect(baseUrl).toBe(`http://127.0.0.1:${held.port}`);
     } finally {
       server.close();
+      if (held.server.listening) held.server.close();
     }
   });
 
@@ -1920,15 +1908,20 @@ describe('interview server port configuration', () => {
   });
 
   test('baseUrl contains the correct port number for fixed port', async () => {
-    const freePort = await findFreePort();
-    const server = createInterviewServer({ ...noopDeps, port: freePort });
+    const held = await bindFreePort();
+    const server = createInterviewServer({
+      ...noopDeps,
+      port: held.port,
+      server: held.server,
+    });
     try {
       const baseUrl = await server.ensureStarted();
       const portStr = baseUrl.split(':').pop();
       const port = Number.parseInt(portStr ?? '0', 10);
-      expect(port).toBe(freePort);
+      expect(port).toBe(held.port);
     } finally {
       server.close();
+      if (held.server.listening) held.server.close();
     }
   });
 
@@ -2132,6 +2125,56 @@ describe('interview service abandoned-record retention', () => {
       // render its final state.
       const state = await service.getInterviewState(id);
       expect(state.mode).toBe('abandoned');
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('interview service empty-transcript belt (v2 retention loss)', () => {
+  test('an active interview with an empty whole-transcript read stays awaiting-agent', async () => {
+    const tempDir = await fs.mkdtemp('/tmp/interview-test-');
+    try {
+      const ctx = createMockContext({ directory: tempDir });
+      const service = createInterviewService(ctx, undefined, {
+        // A runtime whose whole-transcript read is empty — impossible on
+        // v1 (real SDK reads), the exact state a live v2 interview sees
+        // when the bridge's retention eviction dropped its transcript.
+        runtime: {
+          messages: async () => [],
+          notify: async () => {},
+          continue: async () => {},
+          rename: async () => {},
+        },
+      });
+      service.setBaseUrlResolver(async () => 'http://localhost:9999');
+
+      const output = { parts: [] as Array<{ type: string; text?: string }> };
+      await service.handleCommandExecuteBefore(
+        {
+          command: 'interview',
+          sessionID: 'ses_evicted',
+          arguments: 'eviction belt idea',
+        },
+        output,
+      );
+      const interviewId = service.getActiveInterviewId('ses_evicted');
+      expect(interviewId).not.toBeNull();
+
+      // Idle + no parsed state: without the belt this computed 'completed'
+      // even though the whole-transcript read was empty — the answer form
+      // vanished for a live interview (PR #1171).
+      await service.handleEvent({
+        event: {
+          type: 'session.status',
+          properties: {
+            sessionID: 'ses_evicted',
+            status: { type: 'idle' },
+          },
+        },
+      });
+      const state = await service.getInterviewState(interviewId as string);
+      expect(state.mode).toBe('awaiting-agent');
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true });
     }
