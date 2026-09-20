@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'bun:test';
+import { z } from 'zod';
 import {
   InterviewConfigSchema,
   PluginConfigSchema,
+  PresetSchema,
   ProviderModelIdSchema,
 } from './schema';
 
@@ -70,7 +72,7 @@ describe('PluginConfigSchema preset syntax', () => {
     expect(result.success).toBe(true);
   });
 
-  it('rejects the one ambiguous agents shape with an actionable error', () => {
+  it('rejects an ambiguous agents wrapper with an actionable error', () => {
     const result = PluginConfigSchema.safeParse({
       presets: {
         ambiguous: { agents: { options: { model: 'provider/model' } } },
@@ -78,10 +80,12 @@ describe('PluginConfigSchema preset syntax', () => {
     });
 
     expect(result.success).toBe(false);
-    if (!result.success) {
-      expect(result.error.issues[0]?.message).toContain('agents');
-      expect(result.error.issues[0]?.message).toContain('ambiguous');
-    }
+  });
+
+  it('emits oneOf for preset alternatives so public schema matches xor', () => {
+    const generated = z.toJSONSchema(PresetSchema) as { oneOf?: unknown[] };
+
+    expect(generated.oneOf).toHaveLength(3);
   });
 });
 

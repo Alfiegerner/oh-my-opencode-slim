@@ -43,6 +43,18 @@ describe('preset inheritance', () => {
     });
   });
 
+  test('canonical inheritance clears a same-layer aliased model', () => {
+    expect(
+      mergeAgentOverrides(
+        { explorer: { model: 'base/model' } },
+        {
+          explore: { model: 'legacy/model' },
+          explorer: { inheritModelFrom: 'session' },
+        },
+      ),
+    ).toEqual({ explorer: { inheritModelFrom: 'session' } });
+  });
+
   test('resolves legacy flat presets unchanged', () => {
     const presets = parsePresets({
       presets: { fast: { explorer: { model: 'provider/fast' } } },
@@ -80,6 +92,18 @@ describe('preset inheritance', () => {
 
     expect(resolvePreset('custom', presets)).toEqual({
       model: { model: 'model/model' },
+    });
+  });
+
+  test('retains a legacy options-named custom agent', () => {
+    const presets = parsePresets({
+      presets: {
+        custom: { options: { model: 'options/model' } },
+      },
+    });
+
+    expect(resolvePreset('custom', presets)).toEqual({
+      options: { model: 'options/model' },
     });
   });
 

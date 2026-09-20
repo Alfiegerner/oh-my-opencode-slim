@@ -6,7 +6,7 @@
  */
 
 export const BUILD_VERSION = '2.2.22';
-export const BUILD_TIME = '2026-09-20T14:22:20.385Z';
+export const BUILD_TIME = '2026-09-20T14:42:50.996Z';
 
 /** Plugin build identity for diagnostics logs. */
 export function getBuildInfo(): { version: string; buildTime: string } {

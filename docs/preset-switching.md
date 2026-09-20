@@ -38,8 +38,8 @@ the built-in `/models`, so it triggers no LLM turn.
 
 `/preset` writes the selected preset name to the user config file. It does not
 create an in-memory agent override, and it does not hot-swap the current agent
-registry. Always reload OpenCode or start a new conversation after applying a
-preset.
+registry. Reload OpenCode after applying a preset; a new conversation in the
+same OpenCode process keeps the existing agent registry.
 
 ## Editing inherited presets
 

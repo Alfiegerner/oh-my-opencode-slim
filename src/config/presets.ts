@@ -5,7 +5,7 @@ import type {
   PresetDefinition,
   PresetInput,
 } from './schema';
-import { AgentOverrideConfigSchema, PresetAgentsSchema } from './schema';
+import { PresetAgentsSchema } from './schema';
 
 /** Recursively merge JSON objects; arrays and scalar values are replaced. */
 export function deepMerge<T extends Record<string, unknown>>(
@@ -51,10 +51,27 @@ export function mergeAgentOverrides(
   const canonicalBase = canonicalizeAgentAliases(base);
   const canonicalOverride = canonicalizeAgentAliases(override);
   const merged = deepMerge(canonicalBase, canonicalOverride) ?? canonicalBase;
+  // Alias fields are merged first, so an alias model can temporarily appear
+  // beside a canonical inheritModelFrom directive. Remember that directive
+  // from the original layer before clearing the inherited model below.
+  const canonicalInheritanceDirectives = new Set(
+    Object.entries(override)
+      .filter(([name]) => {
+        const canonicalName = AGENT_ALIASES[name] ?? name;
+        const canonicalValue = override[canonicalName];
+        return (
+          canonicalName !== name &&
+          canonicalValue?.model === undefined &&
+          canonicalValue?.inheritModelFrom !== undefined
+        );
+      })
+      .map(([name]) => AGENT_ALIASES[name] ?? name),
+  );
   for (const [name, agentOverride] of Object.entries(canonicalOverride)) {
     if (
-      agentOverride.model !== undefined ||
-      agentOverride.inheritModelFrom === undefined
+      !canonicalInheritanceDirectives.has(name) &&
+      (agentOverride.model !== undefined ||
+        agentOverride.inheritModelFrom === undefined)
     ) {
       continue;
     }
@@ -133,9 +150,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Convert every accepted external syntax to one canonical representation. */
 export function normalizePreset(input: PresetInput): PresetDefinition {
   if (isRecord(input) && isRecord(input.agents)) {
-    const isAgentRecord = AgentOverrideConfigSchema.safeParse(input.agents);
     const isPresetAgentMap = PresetAgentsSchema.safeParse(input.agents);
-    if (!isAgentRecord.success && isPresetAgentMap.success) {
+    if (isPresetAgentMap.success) {
       const { agents, extends: parent, ...inlineEntries } = input;
       return {
         extends: typeof parent === 'string' ? parent : undefined,

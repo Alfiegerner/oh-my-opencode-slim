@@ -180,37 +180,13 @@ const InlinePresetDefinitionSchema = z
   .catchall(AgentOverrideConfigSchema);
 
 /** Raw preset syntax accepted in configuration files. */
-export const PresetSchema = z
-  .union([
-    PresetDefinitionSchema,
-    InlinePresetDefinitionSchema,
-    PresetAgentsSchema,
-  ])
-  .superRefine((value, ctx) => {
-    // A legacy flat preset may contain an agent literally named `agents`.
-    // When that value is itself also a valid agent map, the old and structured
-    // forms are indistinguishable. Reject only this genuinely ambiguous shape
-    // and document the reserved collision through the schema error.
-    if (
-      !isRecordForSchema(value) ||
-      !isRecordForSchema(value.agents) ||
-      !AgentOverrideConfigSchema.safeParse(value.agents).success ||
-      !PresetAgentsSchema.safeParse(value.agents).success
-    ) {
-      return;
-    }
-
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['agents'],
-      message:
-        'The preset field "agents" is ambiguous when its value is also an agent map. Rename the legacy custom agent, or use a non-colliding agent name in the structured agents wrapper.',
-    });
-  });
-
-function isRecordForSchema(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
+export const PresetSchema = z.xor(
+  [PresetDefinitionSchema, InlinePresetDefinitionSchema, PresetAgentsSchema],
+  {
+    error:
+      'Preset syntax is ambiguous: use a non-colliding custom agent name instead of an agents wrapper collision.',
+  },
+);
 
 export type PresetDefinition = z.infer<typeof PresetDefinitionSchema>;
 export type PresetInput = z.infer<typeof PresetSchema>;
