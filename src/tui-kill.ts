@@ -10,9 +10,11 @@
 import type { OpencodeClient } from '@opencode-ai/sdk';
 import { getSidebarAgentTargets } from './tui';
 import type { TuiSnapshot } from './tui-state';
+import { log } from './utils/logger';
 import {
   abortSessionWithTimeout,
   SESSION_ABORT_TIMEOUT_MS,
+  sessionAbortFailure,
   withTimeout,
 } from './utils/session';
 
@@ -85,9 +87,12 @@ export async function killAllRunningSubagents(
         // exclusive signal is the `v2` accessor, which exists on the v2
         // SDK root and not on v1. v2 takes flat { sessionID, directory }
         // params; v1 takes nested { path } through
-        // abortSessionWithTimeout. Both share the same timeout cap.
+        // abortSessionWithTimeout. Both share the same timeout cap and
+        // the same envelope validation: the SDKs resolve (rather than
+        // reject) rejected aborts, so the response must be inspected
+        // before counting the kill.
         if (rec && 'v2' in rec && typeof rec.session?.abort === 'function') {
-          await withTimeout(
+          const result = await withTimeout(
             rec.session.abort({
               sessionID,
               ...(directory ? { directory } : {}),
@@ -95,16 +100,25 @@ export async function killAllRunningSubagents(
             SESSION_ABORT_TIMEOUT_MS,
             `Session abort timed out after ${SESSION_ABORT_TIMEOUT_MS}ms`,
           );
+          const failure = sessionAbortFailure(result);
+          if (failure) throw new Error(failure);
         } else if (typeof rec?.session?.abort === 'function') {
           await abortSessionWithTimeout(
             rec as unknown as OpencodeClient,
             sessionID,
           );
         } else {
-          return false;
+          throw new Error('client does not expose session.abort');
         }
         return true;
-      } catch {
+      } catch (error) {
+        // The toast points at the plugin log, so every per-session
+        // failure lands here with the session id and the cause.
+        log(
+          `[tui-kill] abort failed for ${sessionID}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
         return false;
       }
     }),

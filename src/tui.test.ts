@@ -1882,6 +1882,52 @@ describe('kill-all running subagents', () => {
     );
   });
 
+  test('resolved error envelopes and false results count as failures', async () => {
+    // The SDKs resolve (rather than reject) rejected aborts, so a resolved
+    // error envelope must not be counted as a killed session.
+    const v1Client = {
+      app: { agents: async () => ({}) },
+      session: {
+        abort: async (args: { path: { id: string } }) => ({
+          error: `reject ${args.path.id}`,
+        }),
+      },
+    };
+    const v1Result = await killAllRunningSubagents(
+      v1Client,
+      killSnapshot(),
+      'conv-1',
+    );
+    expect(v1Result).toEqual({ killed: 0, failed: 2, total: 2 });
+
+    const v2Client = {
+      app: { agents: async () => ({}) },
+      v2: {},
+      session: {
+        abort: async () => ({ error: 'busy' }),
+      },
+    };
+    const v2Result = await killAllRunningSubagents(
+      v2Client,
+      killSnapshot(),
+      'conv-1',
+    );
+    expect(v2Result).toEqual({ killed: 0, failed: 2, total: 2 });
+
+    const falseClient = {
+      app: { agents: async () => ({}) },
+      session: {
+        abort: async () => false,
+      },
+    };
+    const falseResult = await killAllRunningSubagents(
+      falseClient,
+      killSnapshot(),
+      'conv-1',
+    );
+    expect(falseResult).toEqual({ killed: 0, failed: 2, total: 2 });
+  });
+
   test('v2 SDK-shaped client aborts with flat sessionID + directory', async () => {
     const calls: Record<string, unknown>[] = [];
     // Real v2 clients carry app.agents AND the v2 accessor — this fixture
