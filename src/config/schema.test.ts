@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'bun:test';
+import { z } from 'zod';
 import {
   InterviewConfigSchema,
   PluginConfigSchema,
+  PresetSchema,
   ProviderModelIdSchema,
 } from './schema';
 
@@ -52,6 +54,38 @@ describe('PluginConfigSchema ACP wrapper models', () => {
     if (result.success) {
       expect(result.data.acpAgents?.helper?.wrapperModel).toBe(wrapperModel);
     }
+  });
+});
+
+describe('PluginConfigSchema preset syntax', () => {
+  it('accepts legacy custom names that resemble metadata fields', () => {
+    const result = PluginConfigSchema.safeParse({
+      presets: {
+        legacy: {
+          extends: { model: 'provider/extends' },
+          agents: { model: 'provider/agents' },
+          model: { model: 'provider/model' },
+        },
+      },
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects an ambiguous agents wrapper with an actionable error', () => {
+    const result = PluginConfigSchema.safeParse({
+      presets: {
+        ambiguous: { agents: { options: { model: 'provider/model' } } },
+      },
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it('emits oneOf for preset alternatives so public schema matches xor', () => {
+    const generated = z.toJSONSchema(PresetSchema) as { oneOf?: unknown[] };
+
+    expect(generated.oneOf).toHaveLength(3);
   });
 });
 

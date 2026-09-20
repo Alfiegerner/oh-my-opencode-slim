@@ -12,7 +12,8 @@
  * server-side default export (src/index.ts) plays no role in that — in
  * fact it must stay free of any `tui` key (see the note there).
  */
-import type { PluginConfig } from '../config';
+import type { PluginConfig, Preset, PresetInput } from '../config';
+import { normalizePreset, resolvePreset } from '../config';
 import { loadPluginConfig } from '../config/loader';
 import {
   buildAgentUpdates,
@@ -107,9 +108,16 @@ const NO_PRESETS_MESSAGE =
  * matching the v1 picker's tooltip.
  */
 export function buildPresetOptions(config: PluginConfig): PresetOption[] {
-  const presets = config.presets ?? {};
-  return Object.entries(presets).map(([name, preset]) => {
-    const summary = buildPresetSummary(buildAgentUpdates(preset));
+  const presets = (config.presets ?? {}) as Record<string, PresetInput>;
+  return Object.entries(presets).map(([name, rawPreset]) => {
+    let effectivePreset: Preset;
+    try {
+      effectivePreset = resolvePreset(name, presets);
+    } catch {
+      const normalized = normalizePreset(rawPreset);
+      effectivePreset = normalized.agents;
+    }
+    const summary = buildPresetSummary(buildAgentUpdates(effectivePreset));
     return {
       title: name,
       value: name,

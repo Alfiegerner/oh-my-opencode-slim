@@ -81,6 +81,76 @@ describe('v2 tui preset plugin', () => {
       );
     });
 
+    test('shows effective resolved summaries for inheritance-only child presets', () => {
+      const config = {
+        presets: {
+          base: {
+            orchestrator: { model: 'anthropic/claude-sonnet-4-5' },
+          },
+          child: {
+            extends: 'base',
+            agents: {},
+          },
+        },
+      } as unknown as PluginConfig;
+
+      const options = buildPresetOptions(config);
+
+      const childOption = options.find((o) => o.value === 'child');
+      expect(childOption).toBeDefined();
+      expect(childOption?.description).toContain(
+        'orchestrator → model: anthropic/claude-sonnet-4-5',
+      );
+    });
+
+    test('shows effective resolved summaries combining base and child overrides', () => {
+      const config = {
+        presets: {
+          base: {
+            orchestrator: { model: 'anthropic/claude-sonnet-4-5' },
+            oracle: { model: 'openai/gpt-5-mini' },
+          },
+          child: {
+            extends: 'base',
+            agents: {
+              orchestrator: { model: 'openai/o3' },
+            },
+          },
+        },
+      } as unknown as PluginConfig;
+
+      const options = buildPresetOptions(config);
+
+      const childOption = options.find((o) => o.value === 'child');
+      expect(childOption).toBeDefined();
+      expect(childOption?.description).toContain(
+        'orchestrator → model: openai/o3',
+      );
+      expect(childOption?.description).toContain(
+        'oracle → model: openai/gpt-5-mini',
+      );
+    });
+
+    test('shows summaries for presets with only non-model fields', () => {
+      const config = {
+        presets: {
+          skillsOnly: {
+            orchestrator: {
+              inheritModelFrom: 'oracle',
+              skills: ['test-skill'],
+            },
+          },
+        },
+      } as unknown as PluginConfig;
+
+      const options = buildPresetOptions(config);
+
+      expect(options).toHaveLength(1);
+      expect(options[0]?.value).toBe('skillsOnly');
+      expect(options[0]?.description).toContain('inherit: oracle');
+      expect(options[0]?.description).toContain('skills: test-skill');
+    });
+
     test('returns an empty list when no presets are configured', () => {
       expect(buildPresetOptions({} as PluginConfig)).toEqual([]);
     });
@@ -112,6 +182,30 @@ describe('v2 tui preset plugin', () => {
       expect(result.message).toContain('not found');
       expect(result.message).toContain('balanced');
       expect(readUserConfig()).toEqual({ preset: 'balanced' });
+    });
+
+    test('fails cleanly when project config explicitly sets a different preset', () => {
+      const projectConfigDir = path.join(projectDir, '.opencode');
+      fs.mkdirSync(projectConfigDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(projectConfigDir, 'oh-my-opencode-slim.jsonc'),
+        JSON.stringify({ preset: 'project-preset' }),
+      );
+
+      writeUserConfig({
+        presets: {
+          balanced: { orchestrator: { model: 'anthropic/claude-sonnet-4-5' } },
+          'project-preset': { orchestrator: { model: 'openai/gpt-5' } },
+        },
+      });
+
+      const result = applyPresetByName(projectDir, makeConfig(), 'balanced');
+
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain(
+        'project config (.opencode) explicitly sets preset "project-preset"',
+      );
+      expect(readUserConfig().preset).toBeUndefined();
     });
   });
 
@@ -238,6 +332,34 @@ describe('v2 tui preset plugin', () => {
       await runPresetFlow(stub.ctx, 'cheap');
 
       expect(readUserConfig().preset).toBe('cheap');
+    });
+
+    test('toasts warning and does not persist when project config preset conflicts', async () => {
+      const projectConfigDir = path.join(projectDir, '.opencode');
+      fs.mkdirSync(projectConfigDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(projectConfigDir, 'oh-my-opencode-slim.jsonc'),
+        JSON.stringify({ preset: 'locked-by-project' }),
+      );
+
+      writeUserConfig({
+        preset: 'old',
+        presets: {
+          cheap: { orchestrator: { model: 'openai/gpt-5-mini' } },
+          'locked-by-project': {
+            orchestrator: { model: 'anthropic/claude-sonnet-4-5' },
+          },
+        },
+      });
+
+      const stub = makeStubCtx('cheap');
+      await runPresetFlow(stub.ctx);
+
+      expect(stub.toasts).toHaveLength(1);
+      expect(stub.toasts[0]).toContain(
+        'project config (.opencode) explicitly sets preset "locked-by-project"',
+      );
+      expect(readUserConfig().preset).toBe('old');
     });
   });
 
