@@ -4,9 +4,11 @@
  * The script runs inside CI's `npm pack --json --ignore-scripts`
  * (prepare → build), so it must keep STDOUT absolutely silent — the
  * release verifier slices pack JSON from the first `[` on stdout, and a
- * `[gen-build-info] …` prefix line breaks that parse. It must also be a
- * read-compare-write: an identical stamp may not touch the tracked
- * source file (`postversion` owns the committed stamp).
+ * `[gen-build-info] …` prefix line breaks that parse. It must also keep
+ * the tracked source file untouched on unforced runs whenever it already
+ * matches the template for the current version — only a version change,
+ * template drift, an absent file, or `--force` (`postversion` owns the
+ * committed stamp) may rewrite it, so builds never dirty git.
  */
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import {
@@ -99,7 +101,32 @@ describe('scripts/gen-build-info', () => {
     expect(statSync(outputPath).mtimeMs).toBe(beforeMtime);
   });
 
-  test('a differing stamp rewrites the file', () => {
+  test('an unforced run with a newer clock keeps the committed stamp', () => {
+    const rootDir = track(createFixture());
+    const outputPath = join(rootDir, outputRelative);
+    generateBuildInfo({
+      rootDir,
+      now: firstStamp,
+      writer: { error: () => {} },
+    });
+    // Strong no-write proof: a rewrite of a read-only file would throw.
+    chmodSync(outputPath, 0o444);
+    try {
+      const { wrote } = generateBuildInfo({
+        rootDir,
+        now: secondStamp,
+        writer: { error: () => {} },
+      });
+      expect(wrote).toBe(false);
+    } finally {
+      chmodSync(outputPath, 0o644);
+    }
+    expect(readFileSync(outputPath, 'utf8')).toBe(
+      renderBuildInfoSource('9.9.99', '2026-09-19T00:00:00.000Z'),
+    );
+  });
+
+  test('a forced run restamps even when the version is unchanged', () => {
     const rootDir = track(createFixture());
     const outputPath = join(rootDir, outputRelative);
     generateBuildInfo({
@@ -109,6 +136,7 @@ describe('scripts/gen-build-info', () => {
     });
     const { wrote } = generateBuildInfo({
       rootDir,
+      force: true,
       now: secondStamp,
       writer: { error: () => {} },
     });
@@ -116,6 +144,47 @@ describe('scripts/gen-build-info', () => {
     expect(wrote).toBe(true);
     expect(readFileSync(outputPath, 'utf8')).toBe(
       renderBuildInfoSource('9.9.99', '2026-09-19T01:02:03.456Z'),
+    );
+  });
+
+  test('a version change rewrites the file without force', () => {
+    const rootDir = track(createFixture());
+    const outputPath = join(rootDir, outputRelative);
+    generateBuildInfo({
+      rootDir,
+      now: firstStamp,
+      writer: { error: () => {} },
+    });
+    writeFileSync(
+      join(rootDir, 'package.json'),
+      JSON.stringify({ name: 'fixture', version: '10.0.0' }),
+      'utf8',
+    );
+    const { wrote } = generateBuildInfo({
+      rootDir,
+      now: secondStamp,
+      writer: { error: () => {} },
+    });
+
+    expect(wrote).toBe(true);
+    expect(readFileSync(outputPath, 'utf8')).toBe(
+      renderBuildInfoSource('10.0.0', '2026-09-19T01:02:03.456Z'),
+    );
+  });
+
+  test('a file that drifted from the template is rewritten without force', () => {
+    const rootDir = track(createFixture());
+    const outputPath = join(rootDir, outputRelative);
+    writeFileSync(outputPath, '// hand-edited placeholder\n', 'utf8');
+    const { wrote } = generateBuildInfo({
+      rootDir,
+      now: firstStamp,
+      writer: { error: () => {} },
+    });
+
+    expect(wrote).toBe(true);
+    expect(readFileSync(outputPath, 'utf8')).toBe(
+      renderBuildInfoSource('9.9.99', '2026-09-19T00:00:00.000Z'),
     );
   });
 

@@ -5,12 +5,14 @@
  * package.json) and the build timestamp as two string constants, so
  * runtime logs can identify the exact build that produced them.
  *
- * Runs as the first step of `bun run build`. The committed file is an
- * offline placeholder that a real build overwrites — but only when the
- * generated content actually DIFFERS (read-compare-write): an identical
- * stamp never touches the file, so repeated builds cannot dirty tracked
- * source. `postversion` owns the committed stamp (it re-runs this script
- * and amends the release commit).
+ * Runs as the first step of `bun run build`. The committed stamp is
+ * owned by `postversion`, which re-runs this script with `--force` and
+ * amends the release commit. An ordinary (unforced) run keeps the
+ * committed stamp whenever the on-disk file already carries the current
+ * package version: it only writes when the file is absent, the version
+ * changed, or the file no longer matches the generated template. This
+ * keeps repeated dev builds from dirtying tracked source; the trade-off
+ * is that BUILD_TIME identifies the release stamp, not each local build.
  *
  * ALL console output goes to STDERR. CI packs the artifact with
  * `npm pack --json --ignore-scripts`; the runner npm still executes the
@@ -54,10 +56,15 @@ export function getBuildInfo(): { version: string; buildTime: string } {
 `;
 }
 
-/** Write the stamp iff the generated content differs from what is on
- * disk. Returns whether the file was rewritten. */
+/** Write the stamp iff needed. Unforced: the file is kept as-is when it
+ * already matches the generated template for the current package version
+ * (only its BUILD_TIME may differ), so dev builds never dirty tracked
+ * source. `force` always restamps with a fresh BUILD_TIME (`postversion`
+ * uses this for the release commit). Returns whether the file was
+ * rewritten. */
 export function generateBuildInfo(options: {
   rootDir: string;
+  force?: boolean;
   now?: () => Date;
   writer?: BuildInfoWriter;
 }): { wrote: boolean } {
@@ -87,11 +94,19 @@ export function generateBuildInfo(options: {
     previous = undefined; // Absent (fresh checkout / clean dist): write it.
   }
 
-  if (previous === contents) {
-    writer.error(
-      `[gen-build-info] ${outputPath} already current (version ${pkg.version}, built ${buildTime}); not rewritten`,
-    );
-    return { wrote: false };
+  if (!options.force && previous !== undefined) {
+    const previousTime = previous.match(
+      /^export const BUILD_TIME = '([^'\\]*)';$/m,
+    )?.[1];
+    if (
+      previousTime !== undefined &&
+      previous === renderBuildInfoSource(pkg.version, previousTime)
+    ) {
+      writer.error(
+        `[gen-build-info] ${outputPath} already current (version ${pkg.version}, built ${previousTime}); not rewritten`,
+      );
+      return { wrote: false };
+    }
   }
 
   mkdirSync(dirname(outputPath), { recursive: true });
@@ -104,5 +119,8 @@ export function generateBuildInfo(options: {
 
 if (import.meta.main) {
   const __dirname = dirname(fileURLToPath(import.meta.url));
-  generateBuildInfo({ rootDir: join(__dirname, '..') });
+  generateBuildInfo({
+    rootDir: join(__dirname, '..'),
+    force: process.argv.includes('--force'),
+  });
 }
