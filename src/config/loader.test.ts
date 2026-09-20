@@ -1362,6 +1362,70 @@ describe('preset resolution', () => {
     expect(config.agents?.oracle?.model).toBe('dev-model');
   });
 
+  test('an invalid unused inheritance chain does not block a valid preset', () => {
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        preset: 'valid',
+        presets: {
+          broken: { extends: 'missing', agents: { oracle: { model: 'bad' } } },
+          valid: { oracle: { model: 'good' } },
+        },
+      }),
+    );
+
+    const warnings: ConfigLoadWarning[] = [];
+    const config = loadPluginConfig(projectDir, {
+      silent: true,
+      onWarning: (warning) => warnings.push(warning),
+    });
+
+    expect(config.agents?.oracle?.model).toBe('good');
+    expect(config.presets?.valid).toEqual({ oracle: { model: 'good' } });
+    expect(config.presets?.broken).toBeUndefined();
+    expect(warnings.some((warning) => warning.message.includes('broken'))).toBe(
+      true,
+    );
+  });
+
+  test('a selected malformed chain warns without applying a partial ancestor', () => {
+    const projectDir = path.join(tempDir, 'project');
+    const projectConfigDir = path.join(projectDir, '.opencode');
+    fs.mkdirSync(projectConfigDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
+      JSON.stringify({
+        preset: 'child',
+        presets: {
+          base: { oracle: { model: 'ancestor-only' } },
+          child: {
+            extends: 'missing',
+            agents: { explorer: { model: 'partial' } },
+          },
+        },
+        agents: { fixer: { model: 'root' } },
+      }),
+    );
+
+    const warnings: ConfigLoadWarning[] = [];
+    const config = loadPluginConfig(projectDir, {
+      silent: true,
+      onWarning: (warning) => warnings.push(warning),
+    });
+
+    expect(config.agents).toEqual({ fixer: { model: 'root' } });
+    expect(
+      warnings.some(
+        (warning) =>
+          warning.message.includes('child') &&
+          warning.message.includes('missing'),
+      ),
+    ).toBe(true);
+  });
+
   test('invalid preset shape: bad agent config in preset fails schema validation', () => {
     const projectDir = path.join(tempDir, 'project');
     const projectConfigDir = path.join(projectDir, '.opencode');

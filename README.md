@@ -47,7 +47,7 @@ The main idea is simple: instead of forcing one model to do everything, the plug
 - **[Multiplexer integration](docs/multiplexer-integration.md)** - watch agents
   work live in Tmux, Zellij, Herdr, cmux, or kitty panes.
 - **[Preset switching](docs/preset-switching.md)** - swap the whole team's
-  models at runtime with `/preset`.
+  models at runtime with `/preset`, with single-parent preset inheritance.
 - **[Code intelligence tools](docs/tools.md)** - LSP tools, AST-aware search
   across 25 languages, and built-in MCPs for docs and GitHub code
   search.
@@ -175,6 +175,12 @@ The default generated configuration includes both `openai` and `opencode-go` pre
   }
 }
 ```
+
+Presets can inherit from one base preset with `extends`: a `design` preset can
+extend `base` and override only its designer model. Changes are persisted by
+`/preset` and take effect after an OpenCode reload or a new conversation. See
+[Configuration](docs/configuration.md#preset-inheritance) for the inheritance
+example and precedence rules.
 
 ### Preset Docs
 

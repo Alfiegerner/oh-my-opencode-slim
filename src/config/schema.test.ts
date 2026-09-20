@@ -55,6 +55,36 @@ describe('PluginConfigSchema ACP wrapper models', () => {
   });
 });
 
+describe('PluginConfigSchema preset syntax', () => {
+  it('accepts legacy custom names that resemble metadata fields', () => {
+    const result = PluginConfigSchema.safeParse({
+      presets: {
+        legacy: {
+          extends: { model: 'provider/extends' },
+          agents: { model: 'provider/agents' },
+          model: { model: 'provider/model' },
+        },
+      },
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects the one ambiguous agents shape with an actionable error', () => {
+    const result = PluginConfigSchema.safeParse({
+      presets: {
+        ambiguous: { agents: { options: { model: 'provider/model' } } },
+      },
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]?.message).toContain('agents');
+      expect(result.error.issues[0]?.message).toContain('ambiguous');
+    }
+  });
+});
+
 describe('PluginConfigSchema image_routing', () => {
   it('accepts image_routing: direct with observer disabled', () => {
     const result = PluginConfigSchema.safeParse({

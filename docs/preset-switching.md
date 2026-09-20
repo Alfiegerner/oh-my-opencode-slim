@@ -10,7 +10,7 @@ the built-in `/models`, so it triggers no LLM turn.
 | Level | What you do |
 |-------|-------------|
 | 1. Preset list | Apply / Edit / Delete an existing preset, or create a new one |
-| 2. Agent arrangement | Add / remove / edit the agents in a preset, then Save (or Save & Apply) |
+| 2. Agent arrangement | Choose a Base preset, add / remove / edit local agents, then Save (or Save & Apply) |
 | 3. Edit agent | Pick model → variant (thinking strength) → temperature → options (JSON) |
 
 > `/preset` is a TUI-only slash command (like `/models`). Invoke it via
@@ -32,9 +32,27 @@ the built-in `/models`, so it triggers no LLM turn.
    Hot-swapping the agent tree mid-conversation could truncate context (a
    new model may have a smaller window), drift prior assistant turns under
    a changed system prompt, leave running subagents referencing stale agent
-   definitions, or shift tool/skill availability. A future path to true
-   in-session switching without reset requires a host API for atomic
-   agent-registry refresh with session compatibility checks.
+    definitions, or shift tool/skill availability. A future path to true
+    in-session switching without reset requires a host API for atomic
+    agent-registry refresh with session compatibility checks.
+
+`/preset` writes the selected preset name to the user config file. It does not
+create an in-memory agent override, and it does not hot-swap the current agent
+registry. Always reload OpenCode or start a new conversation after applying a
+preset.
+
+## Editing inherited presets
+
+At Level 2, select **Base preset** to choose one parent preset or **(none)**.
+The manager prevents self-references and inheritance cycles. Inherited agents
+are shown for context but are read-only. To change one, use **+ Add agent** to
+create a local override, then edit it at Level 3.
+
+Saving an inherited preset preserves its `extends` value and writes only its
+local agent overrides; it does not flatten or copy inherited agents into the
+child. Editing the base preset therefore affects its children after the next
+reload. A base preset with dependents cannot be deleted until those children
+choose another base or clear inheritance.
 
 ### Level 3 — model and variant selection
 
@@ -73,7 +91,8 @@ a raw JSON prompt for provider-specific settings (e.g.
 
 ## Supported Fields
 
-The following fields are applied when the preset is loaded on restart:
+The following fields are applied when the preset is loaded after a reload or
+new conversation:
 
 | Field | Description |
 |-------|-------------|
@@ -82,7 +101,11 @@ The following fields are applied when the preset is loaded on restart:
 | `variant` | Model variant (e.g. `"thinking"`) |
 | `options` | Provider-specific options (e.g. thinking budget) |
 
-Fields not applied at runtime (require restart): `prompt`, `skills`, `mcps`, `displayName`.
+The `extends` field is resolved at the same reload boundary. Presets support
+one parent only; multi-parent inheritance is not supported.
+
+Fields not applied to the current session (require reload/new conversation):
+`prompt`, `skills`, `mcps`, `displayName`.
 
 ## Startup Preset vs Runtime Switching
 
@@ -91,11 +114,11 @@ There are two ways to activate a preset:
 | Method | How | Persists? |
 |--------|-----|-----------|
 | Config file | Set `"preset": "cheap"` in `oh-my-opencode-slim.jsonc` | Yes, across restarts |
-| `/preset` TUI command | Select a preset from the picker during a session | Yes — writes to config file |
+| `/preset` TUI command | Select a preset from the picker during a session | Yes — writes to config file; reload/new conversation required |
 
 The `/preset` TUI command writes the selected preset name to the config file,
-so the switch persists across restarts. **Reload OpenCode** for the new preset
-to take effect on the agent registry. The current session continues
-uninterrupted with its existing models.
+so the switch persists across restarts. **Reload OpenCode** or start a new
+conversation for the new preset to take effect on the agent registry. The
+current session continues uninterrupted with its existing models.
 
 > See [Configuration](configuration.md) for the full preset option reference.

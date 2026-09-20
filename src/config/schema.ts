@@ -153,9 +153,67 @@ export type AgentOverrideConfig = z.infer<typeof AgentOverrideConfigSchema>;
 /** Normalized model entry with optional per-model variant. */
 export type ModelEntry = { id: string; variant?: string };
 
-export const PresetSchema = z.record(z.string(), AgentOverrideConfigSchema);
+/** The agent entries in a preset after inheritance has been resolved. */
+export const PresetAgentsSchema = z.record(
+  z.string(),
+  AgentOverrideConfigSchema,
+);
 
-export type Preset = z.infer<typeof PresetSchema>;
+export type Preset = z.infer<typeof PresetAgentsSchema>;
+
+/**
+ * Structured preset syntax. The `agents` wrapper is the preferred syntax for
+ * new presets; the loader also accepts the inline form below so adding an
+ * `extends` key does not require moving existing agent entries.
+ */
+export const PresetDefinitionSchema = z
+  .object({
+    extends: z.string().min(1).optional(),
+    agents: PresetAgentsSchema,
+  })
+  .strict();
+
+const InlinePresetDefinitionSchema = z
+  .object({
+    extends: z.string().min(1),
+  })
+  .catchall(AgentOverrideConfigSchema);
+
+/** Raw preset syntax accepted in configuration files. */
+export const PresetSchema = z
+  .union([
+    PresetDefinitionSchema,
+    InlinePresetDefinitionSchema,
+    PresetAgentsSchema,
+  ])
+  .superRefine((value, ctx) => {
+    // A legacy flat preset may contain an agent literally named `agents`.
+    // When that value is itself also a valid agent map, the old and structured
+    // forms are indistinguishable. Reject only this genuinely ambiguous shape
+    // and document the reserved collision through the schema error.
+    if (
+      !isRecordForSchema(value) ||
+      !isRecordForSchema(value.agents) ||
+      !AgentOverrideConfigSchema.safeParse(value.agents).success ||
+      !PresetAgentsSchema.safeParse(value.agents).success
+    ) {
+      return;
+    }
+
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['agents'],
+      message:
+        'The preset field "agents" is ambiguous when its value is also an agent map. Rename the legacy custom agent, or use a non-colliding agent name in the structured agents wrapper.',
+    });
+  });
+
+function isRecordForSchema(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export type PresetDefinition = z.infer<typeof PresetDefinitionSchema>;
+export type PresetInput = z.infer<typeof PresetSchema>;
 
 // MCP names
 export const McpNameSchema = z.enum(['context7', 'gh_grep']);
@@ -505,7 +563,7 @@ function rejectOrchestratorPromptOnOrchestrator(
   }
 }
 
-export const PluginConfigSchema = z
+export const RawPluginConfigSchema = z
   .object({
     preset: z.string().optional(),
     setDefaultAgent: z.boolean().optional(),
@@ -585,15 +643,46 @@ export const PluginConfigSchema = z
 
     if (value.presets) {
       for (const [presetName, preset] of Object.entries(value.presets)) {
-        rejectOrchestratorPromptOnOrchestrator(preset, ctx, [
-          'presets',
-          presetName,
-        ]);
+        const presetRecord = preset as Record<string, unknown>;
+        const overrides =
+          typeof presetRecord.agents === 'object' &&
+          presetRecord.agents !== null &&
+          !Array.isArray(presetRecord.agents)
+            ? presetRecord.agents
+            : Object.fromEntries(
+                Object.entries(presetRecord).filter(
+                  ([name]) => name !== 'extends',
+                ),
+              );
+        rejectOrchestratorPromptOnOrchestrator(
+          overrides as Record<
+            string,
+            z.infer<typeof AgentOverrideConfigSchema>
+          >,
+          ctx,
+          ['presets', presetName],
+        );
       }
     }
   });
 
-export type PluginConfig = z.infer<typeof PluginConfigSchema>;
+/** Configuration shape returned by the schema before preset resolution. */
+export type RawPluginConfig = z.infer<typeof RawPluginConfigSchema>;
+
+/**
+ * Public parsed-file type. Presets intentionally remain raw here: the schema
+ * validates file syntax, while the loader resolves inheritance separately.
+ */
+export type PluginConfig = RawPluginConfig;
+
+/** Configuration shape consumed by RuntimeConfig after preset resolution. */
+export type ResolvedPluginConfig = Omit<RawPluginConfig, 'presets'> & {
+  presets?: Record<string, Preset>;
+};
+
+// PluginConfigSchema describes the parsed file shape. It must not claim to
+// return resolved presets: doing so would make the schema output unsound.
+export const PluginConfigSchema = RawPluginConfigSchema;
 
 // Agent names - re-exported from constants for convenience
 export type { AgentName } from './constants';
