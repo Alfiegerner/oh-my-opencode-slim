@@ -23,6 +23,7 @@ import type { BackgroundJobTerminalGate } from '../../utils/background-job-termi
 import { isRecord as isObjectRecord } from '../../utils/guards';
 import { log } from '../../utils/logger';
 import { isMissingRememberedSessionError } from './board-injection';
+import { SESSION_ID_PATTERN } from '../../utils/session';
 import type { PendingTaskCall } from './pending-call-tracker';
 import { convertSameProviderBackgroundTask } from './same-provider-policy';
 import { normalizeLateCancelledTaskOutput } from './status-utils';
@@ -129,6 +130,15 @@ export async function handleToolExecuteBefore(
     /** Opt-in provider → "foreground" map for same-provider conversion. */
     sameProviderPolicy?: Record<string, 'foreground'>;
     getLifecycleEpoch?: () => number;
+    /**
+     * Host-truth probe: does the parent conversation have a running child
+     * session that the in-memory board does not track (e.g. after a plugin
+     * restart)? Used to refuse unknown-alias drops that could duplicate
+     * live work. Fail-closed: implementers should return true on errors.
+     */
+    hasUntrackedRunningChild?: (
+      parentSessionID?: string,
+    ) => Promise<boolean>;
   },
 ): Promise<void> {
   const toolName = input.tool.toLowerCase();
@@ -238,6 +248,10 @@ export async function handleToolExecuteBefore(
 
       if (knownManagedTask) {
         refuseKnownTaskResume(requested, knownManagedTask, agentType);
+      } else if (SESSION_ID_PATTERN.test(requested)) {
+        // Board miss but looks like a native session: still resume. Dropping
+        // ses_* here would break relaunch after rehydrate lag.
+        pendingCall.resumedTaskId = requested;
       } else if (UUID_SHAPE.test(requested)) {
         // Hallucinated id: random UUIDs name nothing in this board and are the
         // known failure signature of degraded fallback providers (2026-09-19:
@@ -249,10 +263,24 @@ export async function handleToolExecuteBefore(
         });
         delete args.task_id;
       } else {
-        refuseExplicitTaskId(
-          requested,
-          `Unknown task ID or alias: ${requested}. task() did not drop the id and did not create another session.`,
-        );
+        // Unknown alias (fix-99, v2 non-ses sessionID): drop the id and spawn
+        // a new child instead of refuse-without-spawn — unless the board may
+        // have merely lost the mapping (plugin restart) while a child session
+        // is still running: silently spawning then would duplicate live work
+        // and lose the specialist's context.
+        if (await deps.hasUntrackedRunningChild?.(input.sessionID)) {
+          refuseExplicitTaskId(
+            requested,
+            `Unknown task ID or alias: ${requested}. The board may have lost its mapping (plugin restart) while a child session is still running; task() will not silently spawn a duplicate. Omit task_id to deliberately spawn a fresh session, or resume with the exact ses_* session id.`,
+            { unknownAlias: true, probe: 'untracked-running-child' },
+          );
+        }
+        log('[task-session-manager] dropped unknown task_id; spawning new session', {
+          task_id: requested,
+          agentType,
+          parentSessionID: input.sessionID,
+        });
+        delete args.task_id;
       }
     } else {
       const relaunchLease = deps.backgroundJobBoard.acquireRelaunchLease(

@@ -5460,17 +5460,15 @@ describe('task-session-manager hook', () => {
     expect(spawn.args.task_id).toBeUndefined();
   });
 
-  test('refuses unknown reusable aliases without dropping task_id', async () => {
+  test('drops unknown reusable aliases and continues as a new spawn', async () => {
     const { hook } = createHook();
     const resume = { args: { subagent_type: 'fixer', task_id: 'fix-99' } };
 
-    await expect(
-      hook['tool.execute.before'](
-        { tool: 'task', sessionID: 'parent-1', callID: 'resume-1' },
-        resume,
-      ),
-    ).rejects.toThrow(/Unknown task ID or alias: fix-99/);
-    expect(resume.args.task_id).toBe('fix-99');
+    await hook['tool.execute.before'](
+      { tool: 'task', sessionID: 'parent-1', callID: 'resume-1' },
+      resume,
+    );
+    expect(resume.args.task_id).toBeUndefined();
   });
 
   test('reads before and after launch attach with unique-line counts and caps', async () => {
