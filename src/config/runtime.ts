@@ -272,9 +272,15 @@ export class RuntimeConfig {
     if (!hostLayer) {
       return merged;
     }
+    const hostOverride =
+      merged?.model === undefined && merged?.inheritModelFrom !== undefined
+        ? Object.fromEntries(
+            Object.entries(hostLayer).filter(([key]) => key !== 'model'),
+          )
+        : hostLayer;
     return deepMerge(
       merged as Record<string, unknown> | undefined,
-      hostLayer as Record<string, unknown> | undefined,
+      hostOverride as Record<string, unknown> | undefined,
     ) as AgentOverrideConfig | undefined;
   }
 

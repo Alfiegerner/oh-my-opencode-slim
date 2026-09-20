@@ -171,7 +171,7 @@ export function switchPresetOnDisk(
   return {
     ok: true,
     presetName,
-    message: `Saved preset "${presetName}". Reload OpenCode (or start a new conversation) for it to take effect. The current session keeps its existing agent models to avoid truncating context, drifting prior turns, or destabilizing running subagents.`,
+    message: `Saved preset "${presetName}". Reload OpenCode for it to take effect. The current session keeps its existing agent models to avoid truncating context, drifting prior turns, or destabilizing running subagents.`,
     summary: buildPresetSummary(agentUpdates),
   };
 }

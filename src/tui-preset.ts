@@ -202,7 +202,7 @@ function applyPresetWithMessage(
     variant: result.ok ? 'success' : 'warning',
     title: result.ok ? title : 'Preset switch failed',
     message: result.ok
-      ? `Saved preset "${presetName}". Start a new conversation (or reload OpenCode) to use it. ${result.summary.join('; ')}`
+      ? `Saved preset "${presetName}". Reload OpenCode to use it. ${result.summary.join('; ')}`
       : result.message,
   });
 }
