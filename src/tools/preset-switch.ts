@@ -30,6 +30,8 @@ export interface PresetSwitchResult {
   summary: string[];
 }
 
+type PersistPresetResult = { ok: true } | { ok: false; message: string };
+
 /** A flattened, SDK-shaped agent override derived from a preset entry. */
 export interface AgentUpdate {
   model?: string;
@@ -156,7 +158,15 @@ export function switchPresetOnDisk(
   }
 
   const agentUpdates = buildAgentUpdates(effectivePreset);
-  persistPresetName(directory, presetName);
+  const persistence = persistPresetName(directory, presetName);
+  if (!persistence.ok) {
+    return {
+      ok: false,
+      presetName,
+      message: `Could not save preset "${presetName}": ${persistence.message}`,
+      summary: [],
+    };
+  }
 
   return {
     ok: true,
@@ -319,29 +329,66 @@ export function buildPresetSummary(
 
 /**
  * Persist the preset name to the user-level config file so it survives
- * restarts. Best-effort: a failure must not abort the switch, because the
- * persisted name is what makes the next reload pick up the new preset.
+ * restarts. A failure is returned so callers do not report a switch that will
+ * not survive the next reload.
  *
  * Note: this rewrites the file as plain JSON (JSONC comments are not
  * preserved), matching the prior server-side behavior.
  */
-function persistPresetName(directory: string, presetName: string): void {
+function persistPresetName(
+  directory: string,
+  presetName: string,
+): PersistPresetResult {
+  let userConfigPath: string | null;
   try {
-    const { userConfigPath } = findPluginConfigPaths(directory);
-    if (!userConfigPath) return;
+    userConfigPath = findPluginConfigPaths(directory).userConfigPath;
+  } catch (error) {
+    return {
+      ok: false,
+      message: `Could not locate the user config file: ${describeError(error)}.`,
+    };
+  }
+
+  if (!userConfigPath) {
+    return {
+      ok: false,
+      message:
+        'No user config file was found. Create oh-my-opencode-slim.jsonc or .json before switching presets.',
+    };
+  }
+
+  let persisted: Record<string, unknown>;
+  try {
     // Strip a UTF-8 BOM (RFC 8259 permits one); JSON.parse would otherwise
     // fail with "Unrecognized token" and the preset would not be persisted.
     const raw = fs.readFileSync(userConfigPath, 'utf-8').replace(/^\uFEFF/, '');
-    const persisted = JSON.parse(stripJsonComments(raw)) as Record<
-      string,
-      unknown
-    >;
+    const parsed: unknown = JSON.parse(stripJsonComments(raw));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('the config root must be a JSON object');
+    }
+    persisted = parsed as Record<string, unknown>;
+  } catch (error) {
+    return {
+      ok: false,
+      message: `Could not read or parse the user config file: ${describeError(error)}.`,
+    };
+  }
+
+  try {
     persisted.preset = presetName;
     fs.writeFileSync(userConfigPath, `${JSON.stringify(persisted, null, 2)}\n`);
-  } catch {
-    // Non-critical: the preset name is also returned in the switch result
-    // so the caller can surface it to the user.
+  } catch (error) {
+    return {
+      ok: false,
+      message: `Could not write the user config file: ${describeError(error)}.`,
+    };
   }
+
+  return { ok: true };
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**

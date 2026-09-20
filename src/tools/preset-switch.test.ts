@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -32,6 +32,10 @@ beforeEach(() => {
   process.env.XDG_CONFIG_HOME = path.join(tempDir, 'xdg-config');
   delete process.env.OPENCODE_CONFIG_DIR;
   delete process.env.OH_MY_OPENCODE_SLIM_PRESET;
+
+  const userConfigDir = path.join(tempDir, 'xdg-config', 'opencode');
+  fs.mkdirSync(userConfigDir, { recursive: true });
+  fs.writeFileSync(path.join(userConfigDir, 'oh-my-opencode-slim.json'), '{}');
 });
 
 afterEach(() => {
@@ -361,15 +365,75 @@ describe('switchPresetOnDisk', () => {
     expect(result.message).toContain('inheritance cycle detected');
   });
 
-  test('does not throw when the user config file is missing', () => {
-    // No config file on disk; persistPresetName is best-effort.
+  test('fails when the user config file is missing', () => {
+    fs.rmSync(path.join(tempDir, 'xdg-config', 'opencode'), {
+      recursive: true,
+      force: true,
+    });
+
     const config: PluginConfig = {
       presets: {
         cheap: { orchestrator: { model: 'anthropic/claude-3.5-haiku' } },
       },
     };
 
-    expect(() => switchPresetOnDisk(tempDir, 'cheap', config)).not.toThrow();
+    const result = switchPresetOnDisk(tempDir, 'cheap', config);
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain('No user config file was found');
+    expect(result.message).not.toContain('Saved preset');
+  });
+
+  test('fails when the user config file is malformed', () => {
+    const configDir = path.join(tempDir, 'opencode-config');
+    fs.mkdirSync(configDir, { recursive: true });
+    process.env.OPENCODE_CONFIG_DIR = configDir;
+    fs.writeFileSync(
+      path.join(configDir, 'oh-my-opencode-slim.json'),
+      '{ invalid json',
+    );
+
+    const config: PluginConfig = {
+      presets: {
+        cheap: { orchestrator: { model: 'anthropic/claude-3.5-haiku' } },
+      },
+    };
+
+    const result = switchPresetOnDisk(tempDir, 'cheap', config);
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain(
+      'Could not read or parse the user config file',
+    );
+    expect(result.message).not.toContain('Saved preset');
+  });
+
+  test('fails when writing the user config file fails', () => {
+    const configDir = path.join(tempDir, 'opencode-config');
+    fs.mkdirSync(configDir, { recursive: true });
+    process.env.OPENCODE_CONFIG_DIR = configDir;
+    fs.writeFileSync(
+      path.join(configDir, 'oh-my-opencode-slim.json'),
+      '{"preset":"old"}',
+    );
+
+    const writeSpy = spyOn(fs, 'writeFileSync').mockImplementation(() => {
+      throw new Error('permission denied');
+    });
+    try {
+      const result = switchPresetOnDisk(tempDir, 'cheap', {
+        presets: {
+          cheap: { orchestrator: { model: 'anthropic/claude-3.5-haiku' } },
+        },
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain('Could not write the user config file');
+      expect(result.message).toContain('permission denied');
+      expect(result.message).not.toContain('Saved preset');
+    } finally {
+      writeSpy.mockRestore();
+    }
   });
 
   test('applies preset with only non-model fields (inheritModelFrom, skills, permission)', () => {
