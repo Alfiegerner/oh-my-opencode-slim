@@ -145,6 +145,16 @@ export function switchPresetOnDisk(
     };
   }
 
+  const envPreset = process.env.OH_MY_OPENCODE_SLIM_PRESET;
+  if (envPreset && envPreset !== presetName) {
+    return {
+      ok: false,
+      presetName,
+      message: `Cannot switch to preset "${presetName}": OH_MY_OPENCODE_SLIM_PRESET is set to "${envPreset}", which takes precedence on reload. Unset the environment variable or set it to "${presetName}" first.`,
+      summary: [],
+    };
+  }
+
   const agentUpdates = buildAgentUpdates(effectivePreset);
   persistPresetName(directory, presetName);
 

@@ -178,7 +178,7 @@ The default generated configuration includes both `openai` and `opencode-go` pre
 
 Presets can inherit from one base preset with `extends`: a `design` preset can
 extend `base` and override only its designer model. Changes are persisted by
-`/preset` and take effect after an OpenCode reload or a new conversation. See
+`/preset` and take effect after an OpenCode reload. See
 [Configuration](docs/configuration.md#preset-inheritance) for the inheritance
 example and precedence rules.
 

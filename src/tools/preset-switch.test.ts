@@ -19,16 +19,19 @@ import {
 let previousXdgDataHome: string | undefined;
 let previousXdgConfigHome: string | undefined;
 let previousOpenCodeConfigDir: string | undefined;
+let previousPresetEnv: string | undefined;
 let tempDir: string;
 
 beforeEach(() => {
   previousXdgDataHome = process.env.XDG_DATA_HOME;
   previousXdgConfigHome = process.env.XDG_CONFIG_HOME;
   previousOpenCodeConfigDir = process.env.OPENCODE_CONFIG_DIR;
+  previousPresetEnv = process.env.OH_MY_OPENCODE_SLIM_PRESET;
   tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-preset-switch-'));
   process.env.XDG_DATA_HOME = tempDir;
   process.env.XDG_CONFIG_HOME = path.join(tempDir, 'xdg-config');
   delete process.env.OPENCODE_CONFIG_DIR;
+  delete process.env.OH_MY_OPENCODE_SLIM_PRESET;
 });
 
 afterEach(() => {
@@ -48,6 +51,12 @@ afterEach(() => {
     delete process.env.OPENCODE_CONFIG_DIR;
   } else {
     process.env.OPENCODE_CONFIG_DIR = previousOpenCodeConfigDir;
+  }
+
+  if (previousPresetEnv === undefined) {
+    delete process.env.OH_MY_OPENCODE_SLIM_PRESET;
+  } else {
+    process.env.OH_MY_OPENCODE_SLIM_PRESET = previousPresetEnv;
   }
 
   fs.rmSync(tempDir, { recursive: true, force: true });
@@ -457,6 +466,37 @@ describe('switchPresetOnDisk', () => {
     const result = switchPresetOnDisk(tempDir, 'shared-preset', config);
 
     expect(result.ok).toBe(true);
+  });
+
+  test('rejects switching when the environment selects a different preset', () => {
+    const configDir = path.join(tempDir, 'opencode-config');
+    fs.mkdirSync(configDir, { recursive: true });
+    process.env.OPENCODE_CONFIG_DIR = configDir;
+    const configPath = path.join(configDir, 'oh-my-opencode-slim.json');
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({ preset: 'old', presets: { old: {}, selected: {} } }),
+    );
+    process.env.OH_MY_OPENCODE_SLIM_PRESET = 'env-selected';
+
+    const config: PluginConfig = {
+      presets: {
+        selected: {
+          orchestrator: { model: 'anthropic/claude-3.5-haiku' },
+        },
+      },
+    };
+
+    const result = switchPresetOnDisk(tempDir, 'selected', config);
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain('OH_MY_OPENCODE_SLIM_PRESET');
+    expect(result.message).toContain('"env-selected"');
+    expect(result.message).toContain('takes precedence on reload');
+    expect(JSON.parse(fs.readFileSync(configPath, 'utf-8'))).toEqual({
+      preset: 'old',
+      presets: { old: {}, selected: {} },
+    });
   });
 });
 

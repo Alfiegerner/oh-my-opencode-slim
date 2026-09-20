@@ -26,8 +26,7 @@ the built-in `/models`, so it triggers no LLM turn.
    sidebar is NOT refreshed mid-session (the agent registry is unchanged
    until reload; showing new models against running agents would be
    misleading)
-4. **Reload OpenCode** (or start a new conversation) for the new preset to
-   take effect on the agent registry
+4. **Reload OpenCode** for the new preset to take effect on the agent registry
 5. The current session is **not** reloaded — this is deliberate.
    Hot-swapping the agent tree mid-conversation could truncate context (a
    new model may have a smaller window), drift prior assistant turns under
@@ -91,8 +90,8 @@ a raw JSON prompt for provider-specific settings (e.g.
 
 ## Supported Fields
 
-The following fields are applied when the preset is loaded after a reload or
-new conversation:
+The following fields are applied when the preset is loaded after an OpenCode
+reload:
 
 | Field | Description |
 |-------|-------------|
@@ -104,7 +103,7 @@ new conversation:
 The `extends` field is resolved at the same reload boundary. Presets support
 one parent only; multi-parent inheritance is not supported.
 
-Fields not applied to the current session (require reload/new conversation):
+Fields not applied to the current session (require an OpenCode reload):
 `prompt`, `skills`, `mcps`, `displayName`.
 
 ## Startup Preset vs Runtime Switching
@@ -114,11 +113,11 @@ There are two ways to activate a preset:
 | Method | How | Persists? |
 |--------|-----|-----------|
 | Config file | Set `"preset": "cheap"` in `oh-my-opencode-slim.jsonc` | Yes, across restarts |
-| `/preset` TUI command | Select a preset from the picker during a session | Yes — writes to config file; reload/new conversation required |
+| `/preset` TUI command | Select a preset from the picker during a session | Yes — writes to config file; OpenCode reload required |
 
 The `/preset` TUI command writes the selected preset name to the config file,
-so the switch persists across restarts. **Reload OpenCode** or start a new
-conversation for the new preset to take effect on the agent registry. The
-current session continues uninterrupted with its existing models.
+so the switch persists across restarts. **Reload OpenCode** for the new preset
+to take effect on the agent registry. The current session continues
+uninterrupted with its existing models.
 
 > See [Configuration](configuration.md) for the full preset option reference.

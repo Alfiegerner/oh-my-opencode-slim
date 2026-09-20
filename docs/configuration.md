@@ -113,8 +113,8 @@ All config files support **JSONC** (JSON with Comments):
 ### Runtime Preset Switching
 
 Presets can also be selected from the TUI with `/preset`. The selection is
-written to the user config file; reload OpenCode or start a new conversation
-for it to take effect. See [Preset Switching](preset-switching.md) for details.
+written to the user config file; reload OpenCode for it to take effect. See
+[Preset Switching](preset-switching.md) for details.
 
 | `presets` | object | - | Named preset configurations |
 |-----------|--------|---|-----------------------------|
@@ -233,7 +233,7 @@ if its value should vary by preset. Host config remains the final override.
 
 The `/preset` TUI persists the selected preset name and does not create an
 in-memory agent override or hot-swap the current agent registry. Reload
-OpenCode or start a new conversation after changing the active preset.
+OpenCode after changing the active preset.
 
 > **niri note:** `companion-v0.1.3` includes the fixed native companion release.
 > To make it open as a bottom-right overlay, add a niri rule matching its stable

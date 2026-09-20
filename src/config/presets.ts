@@ -153,10 +153,13 @@ export function normalizePreset(input: PresetInput): PresetDefinition {
     const isPresetAgentMap = PresetAgentsSchema.safeParse(input.agents);
     if (isPresetAgentMap.success) {
       const { agents, extends: parent, ...inlineEntries } = input;
-      return {
-        extends: typeof parent === 'string' ? parent : undefined,
+      const normalized: PresetDefinition = {
         agents: deepMerge(inlineEntries as Preset, agents as Preset) as Preset,
       };
+      if (typeof parent === 'string') {
+        normalized.extends = parent;
+      }
+      return normalized;
     }
   }
 
@@ -167,10 +170,13 @@ export function normalizePreset(input: PresetInput): PresetDefinition {
         Object.entries(record).filter(([name]) => name !== 'extends'),
       )
     : record;
-  return {
-    extends: hasParent ? (record.extends as string) : undefined,
+  const normalized: PresetDefinition = {
     agents: agentEntries as Preset,
   };
+  if (hasParent) {
+    normalized.extends = record.extends as string;
+  }
+  return normalized;
 }
 
 export type PresetMap = Record<string, PresetInput>;

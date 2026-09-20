@@ -7,6 +7,7 @@ import type { ResolvedPresetMap } from './presets';
 import {
   deepMerge,
   mergeAgentOverrides,
+  normalizePreset,
   PresetResolutionError,
   resolvePreset,
 } from './presets';
@@ -276,6 +277,23 @@ function retainExplicitBackgroundJobsFields(
   };
 }
 
+/** Normalize preset syntax before layered config objects are merged. */
+function normalizePresetDeclarations(config: RawPluginConfig): RawPluginConfig {
+  if (!config.presets) {
+    return config;
+  }
+
+  return {
+    ...config,
+    presets: Object.fromEntries(
+      Object.entries(config.presets).map(([name, preset]) => [
+        name,
+        normalizePreset(preset),
+      ]),
+    ),
+  };
+}
+
 /**
  * Load and validate plugin configuration from a specific file path.
  * Supports both .json and .jsonc formats (JSON with comments).
@@ -469,13 +487,13 @@ function loadConfigFromPath(
       !Object.hasOwn(rawConfig.webfetch, 'enabled')
     ) {
       const { enabled: _enabled, ...webfetch } = layerConfig.webfetch;
-      return {
+      layerConfig = {
         ...layerConfig,
         webfetch: webfetch as RawPluginConfig['webfetch'],
       };
     }
 
-    return layerConfig;
+    return normalizePresetDeclarations(layerConfig);
   } catch (error) {
     // File doesn't exist or isn't readable - this is expected and fine
     if (
