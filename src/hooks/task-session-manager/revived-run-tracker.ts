@@ -306,7 +306,12 @@ export function createRevivedRunTracker(options: {
     if (
       !isCurrentNotification(run, record, notification) ||
       notification.sent ||
-      notification.pending
+      notification.pending ||
+      // Released lifecycle: ownership passed to the fallback publication
+      // wake at give-up — this tracker must never deliver for it again,
+      // or a duplicate terminal observation could queue a second prompt
+      // beside the fallback wake (two turns for one result).
+      notification.ownershipReleased
     )
       return;
     notification.pending = true;

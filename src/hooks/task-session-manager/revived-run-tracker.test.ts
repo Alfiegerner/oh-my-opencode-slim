@@ -1575,13 +1575,16 @@ describe('revived run tracker', () => {
         },
       ]);
 
-      // A duplicate terminal observation of the SAME revision re-enters
-      // notifyParent (a third transport attempt) but must NOT re-fire
-      // the release: exactly-once per notification lifecycle.
+      // A duplicate terminal observation of the SAME revision must NOT
+      // make a third transport attempt: the released lifecycle passed
+      // delivery ownership to the fallback publication wake, so a fresh
+      // attempt here could queue a second prompt beside it (two parent
+      // turns for one result). The release stays exactly-once and the
+      // tracker stays silent.
       harness.tracker.onTerminal(terminal);
       await flushNotify();
       await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(harness.prompt).toHaveBeenCalledTimes(3);
+      expect(harness.prompt).toHaveBeenCalledTimes(2);
       expect(released).toHaveLength(1);
 
       // Plain dispose never fires the release either.
