@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { PluginConfig } from '../config';
 import baseTui from '../tui';
+import { recordTuiAgentActivity, recordTuiSessionParent } from '../tui-state';
 import tui2Plugin, {
   applyPresetByName,
   buildPresetOptions,
@@ -411,6 +412,90 @@ describe('v2 tui preset plugin', () => {
       expect(stub.slotClaims).toHaveLength(0);
       expect(stub.layers).toHaveLength(0);
       expect(cleanup).toBeUndefined();
+    });
+
+    test('layer includes omo.kill_all with alt+w bind', async () => {
+      const stub = makeSetupCtx();
+      let cleanup: (() => void) | undefined;
+      try {
+        cleanup = (await tui2Plugin.setup(
+          stub.ctx as unknown as V2TuiPluginContext,
+        )) as (() => void) | undefined;
+
+        stub.renderAppSlot();
+
+        const command = stub.layers[0]?.commands.find(
+          (c) => c.id === 'omo.kill_all',
+        );
+        expect(command?.title).toBe('OMO: kill all running subagents');
+        expect(command?.group).toBe('System');
+        expect(command?.palette).toBe(true);
+        expect(command?.slash).toEqual({ name: 'killall' });
+        expect((command as { bind?: string } | undefined)?.bind).toBe('alt+w');
+      } finally {
+        cleanup?.();
+      }
+    });
+
+    test('omo.kill_all run aborts visible-conversation running subagents and toasts', async () => {
+      const originalDataHome = process.env.XDG_DATA_HOME;
+      const dataHome = fs.mkdtempSync(path.join(os.tmpdir(), 'omos-kill2-'));
+      const aborts: string[] = [];
+      const toasts: string[] = [];
+      let cleanup: (() => void) | undefined;
+      try {
+        process.env.XDG_DATA_HOME = dataHome;
+        recordTuiSessionParent('ora-live', 'conv-1', projectDir);
+        recordTuiAgentActivity(
+          {
+            sessionID: 'ora-live',
+            agentName: 'oracle',
+            active: true,
+            details: { status: 'busy' },
+          },
+          projectDir,
+        );
+
+        const stub = makeSetupCtx();
+        (stub.ctx as { client?: unknown }).client = {
+          v2: {},
+          session: {
+            abort: async (args: { sessionID: string }) => {
+              aborts.push(args.sessionID);
+            },
+          },
+        };
+        (stub.ctx.ui as { router?: unknown }).router = {
+          current: () => ({ type: 'session', sessionID: 'conv-1' }),
+        };
+        (stub.ctx.ui as { toast?: unknown }).toast = {
+          show: (toast: { message: string }) => {
+            toasts.push(toast.message);
+          },
+        };
+
+        cleanup = (await tui2Plugin.setup(
+          stub.ctx as unknown as V2TuiPluginContext,
+        )) as (() => void) | undefined;
+        stub.renderAppSlot();
+
+        const command = stub.layers[0]?.commands.find(
+          (c) => c.id === 'omo.kill_all',
+        );
+        await command?.run();
+        // run() is fire-and-forget (void runKillAllFlow): the abort call
+        // starts synchronously, the toast lands a microtask later.
+        await Bun.sleep(50);
+
+        expect(aborts).toEqual(['ora-live']);
+        expect(toasts).toHaveLength(1);
+        expect(toasts[0]).toContain('Kill-all sent to 1 running subagent');
+      } finally {
+        cleanup?.();
+        fs.rmSync(dataHome, { recursive: true, force: true });
+        if (originalDataHome === undefined) delete process.env.XDG_DATA_HOME;
+        else process.env.XDG_DATA_HOME = originalDataHome;
+      }
     });
   });
 });
