@@ -1,6 +1,13 @@
 import { describe, expect, test } from 'bun:test';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import packageJson from '../../package.json' with { type: 'json' };
-import { createAcpInitializeParams, trackProgress } from './acp-run';
+import {
+  createAcpInitializeParams,
+  createAcpRunTool,
+  trackProgress,
+} from './acp-run';
 
 describe('ACP initialize payload', () => {
   test('sends protocol-compliant client implementation information', () => {
@@ -96,4 +103,75 @@ describe('trackProgress', () => {
     expect(rendered?.progress).toContain('call 44');
     expect(rendered?.progress).not.toContain('call 15\n');
   });
+});
+
+describe('acp_run integration', () => {
+  test('streams tool progress through ctx.metadata and returns final text', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'acp-progress-'));
+    const serverPath = join(dir, 'server.js');
+    await writeFile(
+      serverPath,
+      [
+        'let seen = 0; let buf = "";',
+        'process.stdin.setEncoding("utf8");',
+        'process.stdin.on("data", (chunk) => {',
+        '  buf += chunk; let idx;',
+        '  while ((idx = buf.indexOf("\\n")) >= 0) {',
+        '    const line = buf.slice(0, idx); buf = buf.slice(idx + 1);',
+        '    if (!line.trim()) continue;',
+        '    const msg = JSON.parse(line);',
+        '    seen++;',
+        '    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: seen === 2 ? { sessionId: "sess-t" } : {} }) + "\\n");',
+        '    if (seen === 2) {',
+        '      const updates = [',
+        '        { sessionUpdate: "tool_call", toolCallId: "t1", title: "Read src/server.js", status: "in_progress" },',
+        '        { sessionUpdate: "tool_call_update", toolCallId: "t1", title: "Read src/server.js", status: "completed" },',
+        '        { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "done" } },',
+        '      ];',
+        '      for (const update of updates) {',
+        '        process.stdout.write(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { update } }) + "\\n");',
+        '      }',
+        '    }',
+        '  }',
+        '});',
+        'process.stdin.on("end", () => process.exit(0));',
+      ].join('\n'),
+    );
+
+    const metadataCalls: Array<{
+      title?: string;
+      metadata?: Record<string, unknown>;
+    }> = [];
+    const tool = createAcpRunTool({
+      cursor: {
+        command: process.execPath,
+        args: [serverPath],
+        permissionMode: 'allow',
+      },
+    });
+    const result = await tool.execute(
+      { agent: 'cursor', prompt: 'hi' } as never,
+      {
+        sessionID: 's',
+        messageID: 'm',
+        agent: 'cursor',
+        directory: dir,
+        worktree: dir,
+        abort: new AbortController().signal,
+        metadata: (input: {
+          title?: string;
+          metadata?: Record<string, unknown>;
+        }) => {
+          metadataCalls.push(input);
+        },
+        ask: async () => {},
+      } as never,
+    );
+
+    expect(result).toBe('done');
+    expect(metadataCalls.length).toBe(2);
+    expect(metadataCalls[0]?.title).toBe('▸ Read src/server.js');
+    expect(metadataCalls[1]?.title).toBe('✓ Read src/server.js');
+    expect(metadataCalls[1]?.metadata?.progress).toBe('✓ Read src/server.js');
+  }, 15_000);
 });
