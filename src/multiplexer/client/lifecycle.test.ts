@@ -840,6 +840,32 @@ describe('rebuild and reconnect backfill (2.4)', () => {
     expect(h.lifecycle.getPane('child-2')).toBeDefined();
   });
 
+  test('dispose closes tracked panes and a spawn that finishes later', async () => {
+    const h = createHarness();
+    await activatePane(h); // pane-1 is tracked
+
+    // A second spawn is in flight while the client disposes.
+    const deferred = createDeferred();
+    h.adapter.spawnBarrier = deferred.promise;
+    h.reader.statuses.set('child-2', 'busy');
+    const spawnPromise = h.lifecycle.handleEvent(
+      createdEvent({ sessionId: 'child-2' }),
+    );
+    await flushAsync();
+
+    await h.lifecycle.dispose();
+    expect(h.adapter.closeCalls).toEqual(['pane-1']);
+    expect(h.lifecycle.getPanes().size).toBe(0);
+
+    // The late spawn must close its own pane instead of registering it.
+    deferred.resolve();
+    h.adapter.spawnBarrier = null;
+    await spawnPromise;
+
+    expect(h.adapter.closeCalls).toEqual(['pane-1', 'pane-1']);
+    expect(h.lifecycle.getPanes().size).toBe(0);
+  });
+
   test('skips already-held children and records backfill-skipped', async () => {
     const h = createHarness();
     await activatePane(h);

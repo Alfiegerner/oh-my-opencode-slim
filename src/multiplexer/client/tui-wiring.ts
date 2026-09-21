@@ -688,17 +688,9 @@ export async function createTuiPaneWiring(
       reconcileHandle = null;
     }
     clearAll();
-    const records = [...lifecycle.getPanes().values()];
-    await Promise.allSettled(
-      records.map(async (record) => {
-        try {
-          const adapter = adapterFactory.create(record.adapter);
-          await adapter?.closePane(record.paneId);
-        } catch {
-          // Fail-soft: a leftover pane is handled by the FR-8 sweep.
-        }
-      }),
-    );
+    // The lifecycle closes tracked panes and self-closes any spawn that is
+    // still in flight, so nothing can register a pane after this point.
+    await lifecycle.dispose();
   };
 
   return {

@@ -85,6 +85,8 @@ export class PaneLifecycle {
    */
   private readonly activityEpoch = new Map<string, number>();
   private displayedSessionId: string | null;
+  /** Set by `dispose()`: no pane is registered after this point. */
+  private disposed = false;
 
   constructor(
     private readonly ports: ClientPorts,
@@ -104,6 +106,31 @@ export class PaneLifecycle {
     this.activityEpoch.set(
       childSessionId,
       (this.activityEpoch.get(childSessionId) ?? 0) + 1,
+    );
+  }
+
+  /**
+   * Stops the lifecycle. Tracked panes are closed best-effort and a spawn
+   * already in flight closes its pane as soon as it completes instead of
+   * registering it, so disposal can never leave a late pane behind.
+   */
+  async dispose(): Promise<void> {
+    this.disposed = true;
+    for (const handle of this.idleTimers.values()) {
+      this.ports.clock.clearTimeout(handle);
+    }
+    this.idleTimers.clear();
+    const records = [...this.panes.values()];
+    this.panes.clear();
+    await Promise.allSettled(
+      records.map(async (record) => {
+        try {
+          const adapter = this.ports.adapterFactory.create(record.adapter);
+          await adapter?.closePane(record.paneId);
+        } catch {
+          // Fail-soft: a leftover pane is handled by the FR-8 sweep.
+        }
+      }),
     );
   }
 
@@ -346,6 +373,9 @@ export class PaneLifecycle {
         return;
       }
 
+      // The client may have been disposed while readiness was pending.
+      if (this.disposed) return;
+
       // Deleted while waiting for readiness: never create the pane (FR-10).
       if (this.deletedWhileSpawning.has(childSessionId)) return;
 
@@ -361,6 +391,17 @@ export class PaneLifecycle {
           parentSessionId,
           adapter: adapterType,
         });
+        return;
+      }
+
+      // Disposed during the spawn: close the pane immediately instead of
+      // registering it, so disposal cannot leak a late pane.
+      if (this.disposed) {
+        try {
+          await adapter.closePane(result.paneId);
+        } catch {
+          // Fail-soft: the FR-8 sweep is the documented fallback.
+        }
         return;
       }
 
