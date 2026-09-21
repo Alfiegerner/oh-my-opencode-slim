@@ -196,7 +196,11 @@ export class PaneLifecycle {
     const serverChildIds = new Set(list.sessionIds);
 
     // Local panes whose child is gone from the server are terminal: close.
+    // Only records belonging to the parent being reconciled are judged here:
+    // a pane for a previously displayed session stays tracked (FR-3) and must
+    // not be closed just because this parent's child list does not name it.
     for (const [childSessionId, record] of [...this.panes]) {
+      if (record.parentSessionId !== parentSessionId) continue;
       if (!serverChildIds.has(childSessionId)) {
         await this.closePane(childSessionId, record, 'backfill-gone');
       }

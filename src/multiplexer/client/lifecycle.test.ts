@@ -817,6 +817,29 @@ describe('rebuild and reconnect backfill (2.4)', () => {
     expect(h.lifecycle.getPane(CHILD)).toBeUndefined();
   });
 
+  test('reconcile keeps live panes that belong to another parent', async () => {
+    const h = createHarness();
+    await activatePane(h); // CHILD under PARENT
+
+    // A second conversation gets its own pane while it is displayed.
+    h.lifecycle.setDisplayedSession('parent-2');
+    h.reader.statuses.set('child-2', 'busy');
+    await h.lifecycle.handleEvent(
+      createdEvent({ sessionId: 'child-2', parentSessionId: 'parent-2' }),
+    );
+    expect(h.lifecycle.getPane('child-2')).toBeDefined();
+
+    // The user switches back; the server list only knows PARENT's child.
+    h.lifecycle.setDisplayedSession(PARENT);
+    h.list.sessionIds = [CHILD];
+    await h.lifecycle.onReconnect();
+
+    // The other conversation's pane is still live: it must not be closed as
+    // backfill-gone just because this parent's list does not name it.
+    expect(h.adapter.closeCalls).toHaveLength(0);
+    expect(h.lifecycle.getPane('child-2')).toBeDefined();
+  });
+
   test('skips already-held children and records backfill-skipped', async () => {
     const h = createHarness();
     await activatePane(h);
