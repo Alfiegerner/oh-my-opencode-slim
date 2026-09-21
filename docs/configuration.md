@@ -254,7 +254,8 @@ OpenCode after changing the active preset.
 Use `acpAgents` to expose external Agent Client Protocol servers as optional
 OpenCode subagents. The plugin creates a lightweight wrapper agent for each
 entry. The wrapper calls the built-in `acp_run` tool, which starts the ACP
-process, creates a session, sends the task, and returns the streamed result.
+process, creates a session, sends the task, streams tool and plan progress to
+the TUI while the agent works, and returns the final result.
 `command` is only the executable; put flags and subcommands in `args`.
 
 See **[ACP Agents](acp-agents.md)** for the dedicated setup guide, auth notes,
