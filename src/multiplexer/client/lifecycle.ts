@@ -74,6 +74,8 @@ export class PaneLifecycle {
   private readonly idleWhileSpawning = new Set<string>();
   /** Pending `delay()` resolvers, released early by `dispose()`. */
   private readonly pendingDelays = new Set<() => void>();
+  /** Children that turned busy while their close was in flight. */
+  private readonly busyWhileClosing = new Set<string>();
   /** Pending stable-idle debounce timers, keyed by child session id. */
   private readonly idleTimers = new Map<string, ClockTimerHandle>();
   /**
@@ -323,6 +325,11 @@ export class PaneLifecycle {
     if (event.status === 'busy' || event.status === 'retry') {
       this.bumpActivity(event.sessionId);
       this.cancelIdleClose(event.sessionId);
+      // A close already in flight consumed this edge; remember it so the pane
+      // is rebuilt as soon as the close settles (FR-11).
+      if (record.status === 'closing') {
+        this.busyWhileClosing.add(event.sessionId);
+      }
     }
   }
 
@@ -338,11 +345,19 @@ export class PaneLifecycle {
     if (event.status !== 'busy') return;
     const watched = this.closedWatch.get(event.sessionId);
     if (watched === undefined) return;
-    if (watched.parentSessionId !== this.displayedSessionId) return;
-    if (this.config.adapter === null) return;
-    if (this.spawnsInFlight.has(event.sessionId)) return;
 
-    await this.createPane(event.sessionId, watched.parentSessionId);
+    await this.rebuildWatched(event.sessionId, watched.parentSessionId);
+  }
+
+  private async rebuildWatched(
+    childSessionId: string,
+    parentSessionId: string,
+  ): Promise<void> {
+    if (parentSessionId !== this.displayedSessionId) return;
+    if (this.config.adapter === null) return;
+    if (this.spawnsInFlight.has(childSessionId)) return;
+
+    await this.createPane(childSessionId, parentSessionId);
   }
 
   private isOurDirectory(event: SessionLifecycleEvent): boolean {
@@ -644,6 +659,12 @@ export class PaneLifecycle {
       // Only idle closes are rebuildable; deleted/gone children are terminal.
       if (reason === 'idle') {
         this.rememberClosed(childSessionId, record.parentSessionId);
+        // The child turned busy while this close was in flight; that edge was
+        // consumed by the close, so rebuild right away instead of waiting for
+        // the next event or the reconcile tick.
+        if (this.busyWhileClosing.delete(childSessionId)) {
+          await this.rebuildWatched(childSessionId, record.parentSessionId);
+        }
       }
       return;
     }

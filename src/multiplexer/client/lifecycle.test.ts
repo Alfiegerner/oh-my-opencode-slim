@@ -135,6 +135,7 @@ class FakeAdapter implements Multiplexer {
   spawnResult: PaneResult = { success: true, paneId: 'pane-1' };
   spawnError: Error | null = null;
   spawnBarrier: Promise<void> | null = null;
+  closeBarrier: Promise<void> | null = null;
   closeResult = true;
 
   constructor(type: AdapterType = 'tmux') {
@@ -170,6 +171,7 @@ class FakeAdapter implements Multiplexer {
 
   async closePane(paneId: string): Promise<boolean> {
     this.closeCalls.push(paneId);
+    if (this.closeBarrier) await this.closeBarrier;
     return this.closeResult;
   }
 
@@ -925,6 +927,30 @@ describe('rebuild and reconnect backfill (2.4)', () => {
 
     expect(h.adapter.spawnCalls).toHaveLength(0);
     expect(h.lifecycle.getPanes().size).toBe(0);
+  });
+
+  test('a busy edge during an in-flight close rebuilds the pane', async () => {
+    const h = createHarness();
+    await activatePane(h);
+    h.reader.statuses.set(CHILD, 'idle');
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+
+    const deferred = createDeferred();
+    h.adapter.closeBarrier = deferred.promise;
+    h.clock.advance(STABLE_IDLE_MS); // the close starts and blocks
+    await flushAsync();
+
+    // The child turns busy while the close is still in flight.
+    h.reader.statuses.set(CHILD, 'busy');
+    await h.lifecycle.handleEvent(lifecycleEvent('status', { status: 'busy' }));
+
+    deferred.resolve();
+    h.adapter.closeBarrier = null;
+    await flushAsync();
+
+    // The edge was consumed by the close, so the pane is rebuilt right away.
+    expect(h.adapter.spawnCalls).toHaveLength(2);
+    expect(h.lifecycle.getPane(CHILD)).toBeDefined();
   });
 
   test('dispose closes tracked panes and a spawn that finishes later', async () => {
