@@ -840,6 +840,29 @@ describe('rebuild and reconnect backfill (2.4)', () => {
     expect(h.lifecycle.getPane('child-2')).toBeDefined();
   });
 
+  test('reconcile keeps rebuild watches that belong to another parent', async () => {
+    const h = createHarness();
+    await activatePane(h);
+    h.reader.statuses.set(CHILD, 'idle');
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+    expect(h.lifecycle.getPane(CHILD)).toBeUndefined(); // now watched
+
+    // Another conversation is displayed while its reconcile runs.
+    h.lifecycle.setDisplayedSession('parent-2');
+    h.list.sessionIds = [];
+    await h.lifecycle.onReconnect();
+
+    // Back on PARENT, a busy edge must still rebuild the watched child.
+    h.lifecycle.setDisplayedSession(PARENT);
+    h.reader.statuses.set(CHILD, 'busy');
+    await h.lifecycle.handleEvent(lifecycleEvent('status', { status: 'busy' }));
+
+    expect(h.adapter.spawnCalls).toHaveLength(2);
+    expect(h.lifecycle.getPane(CHILD)).toBeDefined();
+  });
+
   test('dispose closes tracked panes and a spawn that finishes later', async () => {
     const h = createHarness();
     await activatePane(h); // pane-1 is tracked

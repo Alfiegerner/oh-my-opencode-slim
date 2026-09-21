@@ -250,11 +250,14 @@ export class PaneLifecycle {
       const read = await this.readStatus(this.config.directory);
       const statuses = read.error ? null : read.statuses;
       for (const [childSessionId, watched] of [...this.closedWatch]) {
+        // Foreign-parent watches are not judged here: their child cannot
+        // appear in this parent's list, and deleting them would permanently
+        // lose the FR-11 rebuild (same rule as the removal pass above).
+        if (watched.parentSessionId !== parentSessionId) continue;
         if (!serverChildIds.has(childSessionId)) {
           this.closedWatch.delete(childSessionId);
           continue;
         }
-        if (watched.parentSessionId !== parentSessionId) continue;
         if (statuses?.get(childSessionId) !== 'busy') continue;
         if (this.spawnsInFlight.has(childSessionId)) continue;
         await this.createPane(childSessionId, watched.parentSessionId);
