@@ -392,7 +392,7 @@ describe('task_message', () => {
         { task_id: 'ses_child1', message: 'Do not send.' },
         { sessionID: 'parent-1' } as any,
       ),
-    ).rejects.toThrow('not running');
+    ).rejects.toThrow('task_result');
     expect(prompt).not.toHaveBeenCalled();
 
     const job = board.get('ses_child1');
@@ -603,7 +603,15 @@ describe('task_message', () => {
         { task_id: 'ses_child1', message: 'Too late' },
         { sessionID: 'parent-1' } as any,
       ),
-    ).rejects.toThrow('not running');
+    ).rejects.toThrow('task_result');
+    await expect(
+      createTool(terminalBoard).execute(
+        { task_id: 'ses_child1', message: 'Too late' },
+        { sessionID: 'parent-1' } as any,
+      ),
+    ).rejects.toThrow(
+      'resume it with task by passing task_id: "ses_child1", its existing fixer specialist, a new prompt, and background: true',
+    );
     expect(terminalPrompt).not.toHaveBeenCalled();
 
     const cancellingBoard = new BackgroundJobBoard();
