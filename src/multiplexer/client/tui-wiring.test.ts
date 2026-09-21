@@ -23,6 +23,7 @@ import type { Clock, ClockTimerHandle } from './ports';
 import type { SweepAdapter, SweepPane } from './sweep';
 import {
   type ClientEventBus,
+  createReusingAdapterFactory,
   createTuiPaneWiring,
   decideAdmission,
   detectClientAdapter,
@@ -917,6 +918,20 @@ describe('pane title encoding at spawn (FR-8)', () => {
     const adapter = h.adapters.get('tmux');
     expect(adapter?.spawns).toHaveLength(1);
     expect(adapter?.spawns[0]?.description).toBe(`omosc:4242:${CHILD}`);
+  });
+});
+
+describe('default adapter factory', () => {
+  test('reuses one adapter instance per type', () => {
+    const factory = createReusingAdapterFactory(
+      defaultConfig('tmux').multiplexer,
+    );
+
+    const first = factory.create('tmux');
+    const second = factory.create('tmux');
+
+    expect(first).not.toBeNull();
+    expect(second).toBe(first);
   });
 });
 

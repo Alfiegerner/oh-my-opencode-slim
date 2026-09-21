@@ -529,9 +529,8 @@ export async function createTuiPaneWiring(
     logHostUnreachable(logger, onceGate, admission.adapter);
   }
 
-  const adapterFactory: AdapterFactory = options.adapterFactory ?? {
-    create: (type) => createAdapterFromFactory(type, loaded.multiplexer),
-  };
+  const adapterFactory: AdapterFactory =
+    options.adapterFactory ?? createReusingAdapterFactory(loaded.multiplexer);
   const ownerPid = options.ownerPid ?? process.pid;
   const ports: ClientPorts = {
     clock,
@@ -816,6 +815,29 @@ function createAdapterFromFactory(
   } catch {
     return null;
   }
+}
+
+/**
+ * Default adapter factory: one instance per adapter type for the lifetime of
+ * the wiring. Adapters retain placement state (herdr's agent-area pane and
+ * spawn mutex, tmux's pane-to-anchor map and layout debounce, kitty's applied
+ * layout), so building a fresh instance per spawn/close would silently lose
+ * it. A `null` (unavailable) result is not cached, so a temporarily
+ * unavailable adapter can recover on a later call.
+ */
+export function createReusingAdapterFactory(
+  config: MultiplexerConfig,
+): AdapterFactory {
+  const instances = new Map<AdapterType, Multiplexer>();
+  return {
+    create: (type) => {
+      const existing = instances.get(type);
+      if (existing) return existing;
+      const created = createAdapterFromFactory(type, config);
+      if (created) instances.set(type, created);
+      return created;
+    },
+  };
 }
 
 /** Wraps a clock so every pending core timer can be cleared on dispose. */
