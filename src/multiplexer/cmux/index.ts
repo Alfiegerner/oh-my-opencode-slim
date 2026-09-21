@@ -389,10 +389,16 @@ export class SpawnCommandRunner implements CommandRunner {
     const proc = this.spawn(argv, { stdout: 'pipe', stderr: 'pipe' });
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
+      const settled = Promise.all([
+        proc.exited,
+        proc.stdout(),
+        proc.stderr(),
+      ]).then(([exitCode, stdout, stderr]) => ({ exitCode, stdout, stderr }));
+      // The timeout can win the race; a rejection on the losing chain (for
+      // example EPIPE after SIGTERM) must not surface as an unhandled one.
+      settled.catch(() => {});
       return await Promise.race([
-        Promise.all([proc.exited, proc.stdout(), proc.stderr()]).then(
-          ([exitCode, stdout, stderr]) => ({ exitCode, stdout, stderr }),
-        ),
+        settled,
         new Promise<CommandResult>((resolve) => {
           timeout = setTimeout(() => {
             proc.kill('SIGTERM');
