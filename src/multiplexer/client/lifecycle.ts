@@ -350,8 +350,9 @@ export class PaneLifecycle {
     const adapterType = this.config.adapter;
     if (adapterType === null) return;
 
-    // Creation supersedes any pending rebuild watch for this child.
-    this.closedWatch.delete(childSessionId);
+    // Creation supersedes any pending rebuild watch for this child; the watch
+    // is dropped only once the pane exists, so a failed attempt (readiness
+    // timeout, adapter failure) stays eligible for a later busy edge.
     this.spawnsInFlight.add(childSessionId);
     try {
       // Host reachability first: embedded mode (no listener) must stay
@@ -430,6 +431,7 @@ export class PaneLifecycle {
         status: 'active',
       };
       this.panes.set(childSessionId, record);
+      this.closedWatch.delete(childSessionId);
       logPaneCreated(this.logger, record);
 
       // Deleted during the spawn itself: register, then close right away.

@@ -890,6 +890,30 @@ describe('rebuild and reconnect backfill (2.4)', () => {
     expect(h.lifecycle.getPane(CHILD)).toBeUndefined();
   });
 
+  test('a failed rebuild keeps the watch for a later busy edge', async () => {
+    const h = createHarness();
+    await activatePane(h);
+    h.reader.statuses.set(CHILD, 'idle');
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+    expect(h.lifecycle.getPane(CHILD)).toBeUndefined(); // now watched
+
+    // The rebuild attempt fails in the adapter.
+    h.adapter.spawnError = new Error('boom');
+    await h.lifecycle.handleEvent(lifecycleEvent('status', { status: 'busy' }));
+    expect(h.adapter.spawnCalls).toHaveLength(2);
+    expect(h.lifecycle.getPane(CHILD)).toBeUndefined();
+
+    // A later busy edge still rebuilds: the watch survived the failure.
+    h.adapter.spawnError = null;
+    h.reader.statuses.set(CHILD, 'busy');
+    await h.lifecycle.handleEvent(lifecycleEvent('status', { status: 'busy' }));
+
+    expect(h.adapter.spawnCalls).toHaveLength(3);
+    expect(h.lifecycle.getPane(CHILD)).toBeDefined();
+  });
+
   test('dispose closes tracked panes and a spawn that finishes later', async () => {
     const h = createHarness();
     await activatePane(h); // pane-1 is tracked
