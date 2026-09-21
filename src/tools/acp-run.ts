@@ -484,7 +484,13 @@ export function trackProgress(
     key = update.toolCallId;
     const status = typeof update.status === 'string' ? update.status : '';
     const glyph = PROGRESS_GLYPHS[status] ?? '·';
-    const title = typeof update.title === 'string' ? update.title : key;
+    // tool_call_update may omit title (status-only): keep the human-readable
+    // label already rendered for this toolCallId instead of degrading to the
+    // opaque id.
+    const previousLine = progress.get(key);
+    const previousTitle = previousLine?.slice(previousLine.indexOf(' ') + 1);
+    const title =
+      typeof update.title === 'string' ? update.title : (previousTitle ?? key);
     line = `${glyph} ${title}`;
   } else if (kind === 'plan') {
     const entries = Array.isArray(update.entries) ? update.entries : [];
@@ -509,8 +515,15 @@ export function trackProgress(
     const oldest = progress.keys().next().value;
     if (oldest !== undefined) progress.delete(oldest);
   }
+  // Re-set so an updated call lands at the newest tail position; otherwise
+  // a late completion of an old call stays outside the visible tail.
+  progress.delete(key);
   progress.set(key, line);
-  const tail = [...progress.values()].slice(-PROGRESS_TAIL).join('\n');
+  const tail = [...progress.values()]
+    .join('\n')
+    .split('\n')
+    .slice(-PROGRESS_TAIL)
+    .join('\n');
   const lastBreak = tail.lastIndexOf('\n');
   const title = lastBreak === -1 ? tail : tail.slice(lastBreak + 1);
   return { title, progress: tail };
