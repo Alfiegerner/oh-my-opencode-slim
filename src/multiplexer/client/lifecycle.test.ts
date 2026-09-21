@@ -914,6 +914,19 @@ describe('rebuild and reconnect backfill (2.4)', () => {
     expect(h.lifecycle.getPane(CHILD)).toBeDefined();
   });
 
+  test('dispose releases a spawn waiting on a readiness retry delay', async () => {
+    const h = createHarness();
+    h.reader.statuses.delete(CHILD); // never ready: the probe retries
+    const spawnPromise = h.lifecycle.handleEvent(createdEvent());
+    await flushAsync(); // first read done; now parked on the retry delay
+
+    await h.lifecycle.dispose();
+    await spawnPromise; // must settle instead of hanging on a cleared timer
+
+    expect(h.adapter.spawnCalls).toHaveLength(0);
+    expect(h.lifecycle.getPanes().size).toBe(0);
+  });
+
   test('dispose closes tracked panes and a spawn that finishes later', async () => {
     const h = createHarness();
     await activatePane(h); // pane-1 is tracked

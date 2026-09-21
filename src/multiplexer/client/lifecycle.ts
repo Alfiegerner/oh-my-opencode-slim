@@ -72,6 +72,8 @@ export class PaneLifecycle {
   private readonly deletedWhileSpawning = new Set<string>();
   /** Children whose idle edge arrived while their spawn was in flight. */
   private readonly idleWhileSpawning = new Set<string>();
+  /** Pending `delay()` resolvers, released early by `dispose()`. */
+  private readonly pendingDelays = new Set<() => void>();
   /** Pending stable-idle debounce timers, keyed by child session id. */
   private readonly idleTimers = new Map<string, ClockTimerHandle>();
   /**
@@ -122,6 +124,10 @@ export class PaneLifecycle {
       this.ports.clock.clearTimeout(handle);
     }
     this.idleTimers.clear();
+    // Release readiness retry delays: the wiring clears its tracked clock on
+    // dispose, so a suspended spawn would otherwise never settle.
+    for (const settle of [...this.pendingDelays]) settle();
+    this.pendingDelays.clear();
     const records = [...this.panes.values()];
     this.panes.clear();
     await Promise.allSettled(
@@ -521,6 +527,7 @@ export class PaneLifecycle {
   ): Promise<SessionRuntimeStatus | null> {
     const { maxAttempts, retryDelayMs } = this.config.readiness;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      if (this.disposed) return null;
       const read = await this.readStatus(directory);
       const status = read.error ? undefined : read.statuses.get(childSessionId);
       if (status !== undefined) return status;
@@ -553,7 +560,12 @@ export class PaneLifecycle {
 
   private delay(milliseconds: number): Promise<void> {
     return new Promise<void>((resolve) => {
-      this.ports.clock.setTimeout(resolve, milliseconds);
+      const settle = (): void => {
+        this.pendingDelays.delete(settle);
+        resolve();
+      };
+      this.pendingDelays.add(settle);
+      this.ports.clock.setTimeout(settle, milliseconds);
     });
   }
 
