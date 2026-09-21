@@ -185,7 +185,6 @@ bun run build
   <li><strong><a href="docs/opencode-go-preset.md">OpenCode Go Preset</a></strong> — Agentها را با مدل‌های OpenCode Go اجرا می‌کند و چون مدل Orchestrator آن multimodal نیست، Agent مربوط به Observer را برای تحلیل تصویری فعال می‌کند.</li>
   <li><strong><a href="docs/authors-preset.md">Author's Preset</a></strong> — همان تنظیماتی است که نویسنده در استفاده روزمره به کار می‌برد و شامل Skillهای شخص ثالث نیز می‌شود.</li>
   <li><strong><a href="docs/thirty-dollars-preset.md">$30 Preset</a></strong> — یک setup چند-Provider مبتنی بر Codex Plus و GitHub Copilot Pro با هزینه تقریبی ۳۰ دلار در ماه است.</li>
-  <li><strong><a href="docs/opencode-zen-free-preset.md">OpenCode Zen Free Preset</a></strong> — همه Agentها را با مدل‌های رایگان OpenCode اجرا می‌کند و هزینه‌ای بابت مصرف مدل ندارد.</li>
 </ul>
 
 ### برای Providerهای جایگزین

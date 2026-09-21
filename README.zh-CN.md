@@ -172,7 +172,6 @@ bun run build
 - **[OpenCode Go 预设](docs/opencode-go-preset.md)** —— 智能体使用 OpenCode Go 模型；由于其 Orchestrator 模型不支持多模态，因此启用 Observer 进行视觉分析。
 - **[作者的预设](docs/authors-preset.md)** —— 作者日常使用的精确配置，包含第三方 Skills。
 - **[$30 预设](docs/thirty-dollars-preset.md)** —— 围绕 Codex Plus 和 GitHub Copilot Pro 构建的混合服务商方案，每月约 30 美元。
-- **[OpenCode Zen 免费预设](docs/opencode-zen-free-preset.md)** —— 所有智能体均使用 opencode 免费模型；无需使用费用。
 
 ### 针对其他服务商
 
