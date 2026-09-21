@@ -179,7 +179,6 @@ bun run build
 - **[OpenCode Go プリセット](docs/opencode-go-preset.md)** — エージェントを OpenCode Go モデルで実行します。Orchestrator モデルがマルチモーダルでないため、視覚分析用に Observer エージェントを有効化します。
 - **[作者のプリセット](docs/authors-preset.md)** — 作者が日常的に使う、サードパーティスキルを含む正確な設定です。
 - **[$30 プリセット](docs/thirty-dollars-preset.md)** — Codex Plus と GitHub Copilot Pro を中心とした、月額約 $30 の混合プロバイダー構成です。
-- **[OpenCode Zen Free プリセット](docs/opencode-zen-free-preset.md)** — すべてのエージェントを opencode の無料モデルで実行し、利用コストはかかりません。
 
 ### 他のプロバイダーを利用する場合
 
