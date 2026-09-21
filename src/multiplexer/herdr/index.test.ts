@@ -792,6 +792,29 @@ describe('HerdrMultiplexer', () => {
     expect(herdr.agentAreaPaneId).toBeNull();
   });
 
+  test('applyLayout keeps the agent area anchor for the same layout', async () => {
+    const { HerdrMultiplexer } = await importFreshHerdr();
+    const herdr = new HerdrMultiplexer('main-vertical', 60);
+
+    await herdr.spawnPane('s1', 'A1', 'http://localhost:4096', '/repo');
+    await herdr.applyLayout('main-vertical', 60);
+    await herdr.spawnPane('s2', 'A2', 'http://localhost:4096', '/repo');
+
+    // The second child stacks in the agent column instead of splitting the
+    // parent pane again.
+    expect(commands()).toContainEqual([
+      '/usr/bin/herdr',
+      'pane',
+      'split',
+      'w1:p2',
+      '--direction',
+      'down',
+      '--cwd',
+      '/repo',
+      '--no-focus',
+    ]);
+  });
+
   test('applyLayout issues no CLI commands', async () => {
     const { HerdrMultiplexer } = await importFreshHerdr();
     const herdr = new HerdrMultiplexer('main-vertical', 60);

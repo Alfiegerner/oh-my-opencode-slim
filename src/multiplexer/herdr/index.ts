@@ -273,9 +273,12 @@ export class HerdrMultiplexer implements Multiplexer {
     layout: MultiplexerLayout,
     _mainPaneSize: number,
   ): Promise<void> {
-    // ponytail: herdr has no rebalancing API; clear agent area so a layout
-    // switch starts fresh from the parent pane.
-    this.agentAreaPaneId = null;
+    // ponytail: herdr has no rebalancing API; a layout *switch* starts fresh
+    // from the parent pane, but re-applying the same layout must keep the
+    // agent-column anchor so later children stack below the first one.
+    if (this.layout !== layout) {
+      this.agentAreaPaneId = null;
+    }
     this.layout = layout;
     this.paneDirection = getPaneDirection(layout);
   }
