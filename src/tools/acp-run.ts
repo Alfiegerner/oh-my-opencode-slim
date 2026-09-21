@@ -51,6 +51,7 @@ class AcpClient {
   private pending = new Map<number, Pending>();
   private chunks: string[] = [];
   private errors: string[] = [];
+  private progress = new Map<string, string>();
   private sessionId: string | undefined;
   private lastUpdate = Date.now();
   private authMethods: Array<Record<string, unknown>> = [];
@@ -65,6 +66,12 @@ class AcpClient {
       title: string,
       metadata: Record<string, unknown>,
     ) => Promise<void>,
+    /**
+     * Live progress sink (tool part metadata). Called on every tool_call,
+     * tool_call_update, and plan session/update so the parent TUI can show
+     * what the external agent is doing while it works.
+     */
+    private report?: (title: string, metadata: Record<string, unknown>) => void,
   ) {
     this.child = spawn(config.command, config.args, {
       cwd,
@@ -250,6 +257,9 @@ class AcpClient {
     const update = message.params?.update;
     if (!isRecord(update)) return;
     collectText(update, this.chunks);
+    const rendered = trackProgress(update, this.progress);
+    if (rendered)
+      this.report?.(rendered.title, { progress: rendered.progress });
   }
 
   private reply(id: number, result: Json): void {
@@ -335,6 +345,7 @@ export function createAcpRunTool(agents: AcpAgentsConfig = {}): ToolDefinition {
             metadata,
           });
         },
+        (title, metadata) => ctx.metadata({ title, metadata }),
       );
       const timeoutMs = args.timeout_ms ?? config.timeoutMs;
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -437,6 +448,63 @@ function collectText(update: Record<string, unknown>, chunks: string[]): void {
   if (update.sessionUpdate !== 'agent_message_chunk') return;
   const text = readText(update.delta) ?? readText(update.content);
   if (text) chunks.push(text);
+}
+
+const PROGRESS_GLYPHS: Record<string, string> = {
+  pending: '○',
+  in_progress: '▸',
+  completed: '✓',
+  failed: '✗',
+};
+/** Rolling progress cap: drop the oldest tracked call beyond this. */
+const PROGRESS_CAP = 40;
+/** How many recent progress lines the TUI metadata carries. */
+const PROGRESS_TAIL = 20;
+
+/**
+ * Fold one ACP session/update into the rolling progress log and render the
+ * latest view. tool_call/tool_call_update are keyed by toolCallId (later
+ * updates replace earlier state); plan replaces as a block. Returns the
+ * tail for the TUI plus its last line as a compact title.
+ */
+export function trackProgress(
+  update: Record<string, unknown>,
+  progress: Map<string, string>,
+): { title: string; progress: string } | undefined {
+  const kind = update.sessionUpdate;
+  let key: string | undefined;
+  let line: string | undefined;
+  if (kind === 'tool_call' || kind === 'tool_call_update') {
+    if (typeof update.toolCallId !== 'string') return undefined;
+    key = update.toolCallId;
+    const status = typeof update.status === 'string' ? update.status : '';
+    const glyph = PROGRESS_GLYPHS[status] ?? '·';
+    const title = typeof update.title === 'string' ? update.title : key;
+    line = `${glyph} ${title}`;
+  } else if (kind === 'plan') {
+    const entries = Array.isArray(update.entries) ? update.entries : [];
+    const lines = entries
+      .filter(isRecord)
+      .map((entry) => {
+        const status = typeof entry.status === 'string' ? entry.status : '';
+        const glyph = PROGRESS_GLYPHS[status] ?? '·';
+        const content = typeof entry.content === 'string' ? entry.content : '';
+        return `${glyph} ${content}`.trimEnd();
+      })
+      .filter((entry) => entry.length > 1);
+    if (lines.length === 0) return undefined;
+    key = 'plan';
+    line = lines.join('\n');
+  }
+  if (!key || !line) return undefined;
+  if (!progress.has(key) && progress.size >= PROGRESS_CAP) {
+    const oldest = progress.keys().next().value;
+    if (oldest !== undefined) progress.delete(oldest);
+  }
+  progress.set(key, line);
+  const tail = [...progress.values()].slice(-PROGRESS_TAIL).join('\n');
+  const title = tail.slice(tail.lastIndexOf('\n') + 1);
+  return { title, progress: tail };
 }
 
 function readText(value: unknown): string | undefined {
