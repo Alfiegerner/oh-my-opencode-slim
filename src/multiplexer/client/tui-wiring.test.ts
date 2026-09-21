@@ -1028,6 +1028,31 @@ describe('FR-7 reconcile trigger', () => {
     expect(h.wiring.lifecycle.getPane(CHILD)).toBeDefined();
   });
 
+  test('a backfilled child is remembered for a later rebuild', async () => {
+    const state = createClientState({
+      sessions: [{ id: CHILD, parentID: PARENT }],
+    });
+    const h = await createHarness({ state, reconcileIntervalMs: 30_000 });
+    await flush();
+    // No created event ever announced the child; reconcile backfilled it.
+    expect(h.adapters.get('tmux')?.spawns).toHaveLength(1);
+
+    // Idle-close the backfilled pane through a directory-less idle event.
+    state.statuses[CHILD] = { type: 'idle' };
+    h.bus.emit('session.idle', idleEvent());
+    await flush();
+    h.clock.advance(40);
+    await flush();
+    expect(h.adapters.get('tmux')?.closes).toHaveLength(1);
+
+    // A later directory-less busy status must still find the child and rebuild.
+    state.statuses[CHILD] = { type: 'busy' };
+    h.bus.emit('session.status', statusEvent(CHILD, 'busy'));
+    await flush();
+
+    expect(h.adapters.get('tmux')?.spawns).toHaveLength(2);
+  });
+
   test('dispose stops the reconcile chain', async () => {
     const h = await createHarness({ reconcileIntervalMs: 30_000 });
     await flush();

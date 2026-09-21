@@ -453,6 +453,7 @@ export class PaneLifecycle {
       };
       this.panes.set(childSessionId, record);
       this.closedWatch.delete(childSessionId);
+      this.ports.onChildTracked?.(childSessionId, this.config.directory);
       logPaneCreated(this.logger, record);
 
       // Deleted during the spawn itself: register, then close right away.

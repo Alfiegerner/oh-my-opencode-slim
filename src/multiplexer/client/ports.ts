@@ -85,4 +85,11 @@ export interface ClientPorts {
    * session id remains the description.
    */
   readonly resolvePaneTitle?: (childSessionId: string) => string;
+  /**
+   * Optional: called when a child pane is registered, so the wiring can
+   * remember the child's project directory. Directory-less status/idle events
+   * (stage A evidence 1.1) need that mapping for children no created event
+   * ever announced (reconcile backfill).
+   */
+  readonly onChildTracked?: (childSessionId: string, directory: string) => void;
 }

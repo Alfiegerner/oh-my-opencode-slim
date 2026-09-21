@@ -555,6 +555,8 @@ export async function createTuiPaneWiring(
         : resolveAnchoredTarget(admission.adapter, env),
     resolvePaneTitle: (childSessionId) =>
       encodePaneTitle(ownerPid, childSessionId),
+    onChildTracked: (childSessionId, childDirectory) =>
+      rememberDirectory(knownDirectories, childSessionId, childDirectory),
   };
 
   const lifecycle = new PaneLifecycle(
