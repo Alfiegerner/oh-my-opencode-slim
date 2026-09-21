@@ -241,6 +241,9 @@ export class PaneLifecycle {
       parentSessionId,
     );
     if (list.error) return; // unverifiable: keep local state (fail-closed)
+    // The route can move while the read is in flight; acting on the previous
+    // parent would backfill panes for a conversation the user already left.
+    if (this.displayedSessionId !== parentSessionId) return;
     const serverChildIds = new Set(list.sessionIds);
 
     // Local panes whose child is gone from the server are terminal: close.

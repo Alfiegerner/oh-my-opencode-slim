@@ -106,12 +106,14 @@ class FakeSessionListReader implements SessionListReader {
   readonly calls: Array<{ directory: string; parentID: string }> = [];
   sessionIds: string[] = [];
   error?: string;
+  listBarrier: Promise<void> | null = null;
 
   async listSessions(
     directory: string,
     parentID: string,
   ): Promise<SessionListRead> {
     this.calls.push({ directory, parentID });
+    if (this.listBarrier) await this.listBarrier;
     return { sessionIds: [...this.sessionIds], error: this.error };
   }
 }
@@ -840,6 +842,23 @@ describe('rebuild and reconnect backfill (2.4)', () => {
     // backfill-gone just because this parent's list does not name it.
     expect(h.adapter.closeCalls).toHaveLength(0);
     expect(h.lifecycle.getPane('child-2')).toBeDefined();
+  });
+
+  test('reconcile skips a parent that changed during the list read', async () => {
+    const h = createHarness();
+    const deferred = createDeferred();
+    h.list.listBarrier = deferred.promise;
+    h.list.sessionIds = [CHILD];
+    h.reader.statuses.set(CHILD, 'busy');
+
+    const reconnect = h.lifecycle.onReconnect();
+    await flushAsync();
+    h.lifecycle.setDisplayedSession('parent-2'); // the user navigates away
+    deferred.resolve();
+    h.list.listBarrier = null;
+    await reconnect;
+
+    expect(h.adapter.spawnCalls).toHaveLength(0); // no stale backfill
   });
 
   test('reconcile keeps rebuild watches that belong to another parent', async () => {
