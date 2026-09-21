@@ -57,6 +57,8 @@ class AcpClient {
   private authMethods: Array<Record<string, unknown>> = [];
   private active = false;
   private activeRequests = 0;
+  /** True once run() returned or the client was closed: late session/update arrivals are ignored. */
+  private settled = false;
 
   constructor(
     private name: string,
@@ -117,9 +119,9 @@ class AcpClient {
     });
     await this.drain();
     this.active = false;
+    this.settled = true;
     return this.output();
   }
-
   private async newSession(): Promise<Json | undefined> {
     try {
       return await this.request('session/new', {
@@ -137,8 +139,8 @@ class AcpClient {
       });
     }
   }
-
   close(): void {
+    this.settled = true;
     if (this.active && this.sessionId && !this.child.killed) {
       this.notify('session/cancel', { sessionId: this.sessionId });
     }
@@ -250,16 +252,19 @@ class AcpClient {
       `Unsupported ACP client method: ${message.method}`,
     );
   }
-
   private handleNotification(message: RpcNotification): void {
-    if (message.method !== 'session/update') return;
+    if (message.method !== 'session/update' || this.settled) return;
     this.lastUpdate = Date.now();
     const update = message.params?.update;
     if (!isRecord(update)) return;
     collectText(update, this.chunks);
     const rendered = trackProgress(update, this.progress);
-    if (rendered)
+    if (!rendered) return;
+    try {
       this.report?.(rendered.title, { progress: rendered.progress });
+    } catch {
+      // A host-side metadata failure must not poison the ACP loop.
+    }
   }
 
   private reply(id: number, result: Json): void {
@@ -484,14 +489,17 @@ export function trackProgress(
   } else if (kind === 'plan') {
     const entries = Array.isArray(update.entries) ? update.entries : [];
     const lines = entries
-      .filter(isRecord)
+      .filter(
+        (entry): entry is Record<string, unknown> & { content: string } =>
+          isRecord(entry) &&
+          typeof entry.content === 'string' &&
+          entry.content.length > 0,
+      )
       .map((entry) => {
         const status = typeof entry.status === 'string' ? entry.status : '';
         const glyph = PROGRESS_GLYPHS[status] ?? '·';
-        const content = typeof entry.content === 'string' ? entry.content : '';
-        return `${glyph} ${content}`.trimEnd();
-      })
-      .filter((entry) => entry.length > 1);
+        return `${glyph} ${entry.content}`.trimEnd();
+      });
     if (lines.length === 0) return undefined;
     key = 'plan';
     line = lines.join('\n');
@@ -503,7 +511,8 @@ export function trackProgress(
   }
   progress.set(key, line);
   const tail = [...progress.values()].slice(-PROGRESS_TAIL).join('\n');
-  const title = tail.slice(tail.lastIndexOf('\n') + 1);
+  const lastBreak = tail.lastIndexOf('\n');
+  const title = lastBreak === -1 ? tail : tail.slice(lastBreak + 1);
   return { title, progress: tail };
 }
 

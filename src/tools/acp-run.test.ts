@@ -86,7 +86,7 @@ describe('trackProgress', () => {
 
   test('caps the rolling log and reports only the tail', () => {
     const progress = new Map<string, string>();
-    let rendered;
+    let rendered: { title: string; progress: string } | undefined;
     for (let i = 0; i < 45; i++) {
       rendered = trackProgress(
         {
