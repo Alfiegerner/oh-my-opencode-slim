@@ -268,8 +268,9 @@ export class PaneLifecycle {
     }
 
     // Closed-but-watched children: drop the ones the server no longer has,
-    // and rebuild the ones that turned busy while the stream was down (their
-    // busy event was lost, so it is recovered from the live status map).
+    // and rebuild the ones that turned active (busy or retry) while the
+    // stream was down (their event was lost, so it is recovered from the
+    // live status map).
     if (this.closedWatch.size > 0) {
       const read = await this.readStatus(this.config.directory);
       const statuses = read.error ? null : read.statuses;
@@ -282,7 +283,8 @@ export class PaneLifecycle {
           this.closedWatch.delete(childSessionId);
           continue;
         }
-        if (statuses?.get(childSessionId) !== 'busy') continue;
+        const live = statuses?.get(childSessionId);
+        if (live !== 'busy' && live !== 'retry') continue;
         if (this.spawnsInFlight.has(childSessionId)) continue;
         await this.createPane(childSessionId, watched.parentSessionId);
       }
@@ -337,15 +339,15 @@ export class PaneLifecycle {
   }
 
   /**
-   * FR-11: a child this client closed on stable idle that turns busy again is
-   * rebuilt, but only while its parent is still the displayed session. The
-   * rebuild goes through the normal creation path, so the anchor is
-   * re-resolved rather than replayed from memory.
+   * FR-11: a child this client closed on stable idle that turns active again
+   * (busy or retry) is rebuilt, but only while its parent is still the
+   * displayed session. The rebuild goes through the normal creation path, so
+   * the anchor is re-resolved rather than replayed from memory.
    */
   private async handleClosedChildBusy(
     event: SessionLifecycleEvent,
   ): Promise<void> {
-    if (event.status !== 'busy') return;
+    if (event.status !== 'busy' && event.status !== 'retry') return;
     const watched = this.closedWatch.get(event.sessionId);
     if (watched === undefined) return;
 

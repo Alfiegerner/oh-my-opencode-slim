@@ -935,6 +935,41 @@ describe('rebuild and reconnect backfill (2.4)', () => {
     expect(h.lifecycle.getPane(CHILD)).toBeDefined();
   });
 
+  test('a watched child that resumes in retry is rebuilt', async () => {
+    const h = createHarness();
+    await activatePane(h);
+    h.reader.statuses.set(CHILD, 'idle');
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+    expect(h.lifecycle.getPane(CHILD)).toBeUndefined(); // now watched
+
+    h.reader.statuses.set(CHILD, 'retry');
+    await h.lifecycle.handleEvent(
+      lifecycleEvent('status', { status: 'retry' }),
+    );
+
+    expect(h.adapter.spawnCalls).toHaveLength(2);
+    expect(h.lifecycle.getPane(CHILD)).toBeDefined();
+  });
+
+  test('reconcile rebuilds a watched child whose live status is retry', async () => {
+    const h = createHarness();
+    await activatePane(h);
+    h.reader.statuses.set(CHILD, 'idle');
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+    expect(h.lifecycle.getPane(CHILD)).toBeUndefined(); // now watched
+
+    h.reader.statuses.set(CHILD, 'retry');
+    h.list.sessionIds = [CHILD];
+    await h.lifecycle.onReconnect();
+
+    expect(h.adapter.spawnCalls).toHaveLength(2);
+    expect(h.lifecycle.getPane(CHILD)).toBeDefined();
+  });
+
   test('dispose releases a spawn waiting on a readiness retry delay', async () => {
     const h = createHarness();
     h.reader.statuses.delete(CHILD); // never ready: the probe retries
