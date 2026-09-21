@@ -197,7 +197,7 @@ coverage failure, and assistant/provider errors all invalidate a session.
 ### Zen free example
 
 For OpenCode Zen free routing, use provider `opencode` and model
-`nemotron-3.5-lightning-free`.
+`nemotron-3.5-lightning-free` (or check `opencode models` for the current free model).
 Keep credentials outside the repository, in the environment of an isolated
 server process. In the isolated OpenCode configuration, make model selection
 explicit and disable title generation so its separate small-model request does
