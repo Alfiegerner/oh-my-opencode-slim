@@ -70,6 +70,8 @@ export class PaneLifecycle {
   private readonly spawnsInFlight = new Set<string>();
   /** Children deleted while their spawn was in flight. */
   private readonly deletedWhileSpawning = new Set<string>();
+  /** Children whose idle edge arrived while their spawn was in flight. */
+  private readonly idleWhileSpawning = new Set<string>();
   /** Pending stable-idle debounce timers, keyed by child session id. */
   private readonly idleTimers = new Map<string, ClockTimerHandle>();
   /**
@@ -165,6 +167,17 @@ export class PaneLifecycle {
     // Events outside this client's directory are not ours to act on; the
     // global event bus broadcasts every project's events (stage A evidence).
     if (!this.isOurDirectory(event)) return;
+
+    // An idle edge observed while this child's spawn is in flight would be
+    // consumed with no pane to act on; remember it so the pane still follows
+    // the FR-10 close rule once it is registered.
+    if (
+      this.spawnsInFlight.has(event.sessionId) &&
+      (event.kind === 'idle' ||
+        (event.kind === 'status' && event.status === 'idle'))
+    ) {
+      this.idleWhileSpawning.add(event.sessionId);
+    }
 
     if (event.kind === 'deleted') {
       // A deletion racing the spawn is remembered and applied on completion.
@@ -426,8 +439,10 @@ export class PaneLifecycle {
       }
 
       // A child that is already idle when its pane appears (e.g. backfilled
-      // after the stream was down) must still follow the FR-10 close rule.
-      if (readyStatus === 'idle') {
+      // after the stream was down), or whose idle edge arrived while the
+      // spawn was in flight, must still follow the FR-10 close rule.
+      const idleDuringSpawn = this.idleWhileSpawning.delete(childSessionId);
+      if (readyStatus === 'idle' || idleDuringSpawn) {
         this.scheduleStableIdleClose(childSessionId, record);
       }
 
@@ -435,6 +450,7 @@ export class PaneLifecycle {
     } finally {
       this.spawnsInFlight.delete(childSessionId);
       this.deletedWhileSpawning.delete(childSessionId);
+      this.idleWhileSpawning.delete(childSessionId);
     }
   }
 

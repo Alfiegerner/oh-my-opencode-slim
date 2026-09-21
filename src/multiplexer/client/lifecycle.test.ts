@@ -863,6 +863,33 @@ describe('rebuild and reconnect backfill (2.4)', () => {
     expect(h.lifecycle.getPane(CHILD)).toBeDefined();
   });
 
+  test('an idle edge during an in-flight spawn still closes the pane', async () => {
+    const h = createHarness();
+    const deferred = createDeferred();
+    h.adapter.spawnBarrier = deferred.promise;
+    h.reader.statuses.set(CHILD, 'busy');
+
+    const spawnPromise = h.lifecycle.handleEvent(createdEvent());
+    await flushAsync();
+
+    // The child finishes its only turn while the spawn is still in flight.
+    await h.lifecycle.handleEvent(lifecycleEvent('status', { status: 'idle' }));
+
+    deferred.resolve();
+    h.adapter.spawnBarrier = null;
+    await spawnPromise;
+
+    expect(h.lifecycle.getPane(CHILD)).toBeDefined();
+    expect(h.clock.pendingTimers).toBe(1); // the stable-idle debounce is armed
+
+    h.reader.statuses.set(CHILD, 'idle');
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+
+    expect(h.adapter.closeCalls).toEqual(['pane-1']);
+    expect(h.lifecycle.getPane(CHILD)).toBeUndefined();
+  });
+
   test('dispose closes tracked panes and a spawn that finishes later', async () => {
     const h = createHarness();
     await activatePane(h); // pane-1 is tracked
