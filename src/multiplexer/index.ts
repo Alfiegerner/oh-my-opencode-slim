@@ -7,10 +7,7 @@
 
 export type { CmuxClient, CommandRunner } from './cmux';
 export { CliCmuxClient, CmuxMultiplexer } from './cmux';
-export {
-  getMultiplexer,
-  startAvailabilityCheck,
-} from './factory';
+export { getMultiplexer } from './factory';
 export { HerdrMultiplexer } from './herdr';
 export { KittyMultiplexer } from './kitty';
 export { TmuxMultiplexer } from './tmux';

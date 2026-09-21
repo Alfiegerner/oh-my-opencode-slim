@@ -618,18 +618,15 @@ export async function createTuiPaneWiring(
 
   // FR-8 sweep capability: narrow the admitted adapter at first use (the
   // adapter is also created per operation by the core; this instance is only
-  // used for pane scanning/closing).
+  // used for pane scanning/closing). An unavailable adapter is not cached, so
+  // a later sweep can recover, matching the factory's policy.
   let sweepAdapterCache: SweepAdapter | null | undefined = options.sweepAdapter;
   const resolveSweepAdapter = (): SweepAdapter | null => {
     if (sweepAdapterCache !== undefined) return sweepAdapterCache;
-    if (admission.adapter === null) {
-      sweepAdapterCache = null;
-      return sweepAdapterCache;
-    }
-    sweepAdapterCache = asSweepAdapter(
-      adapterFactory.create(admission.adapter),
-    );
-    return sweepAdapterCache;
+    if (admission.adapter === null) return null;
+    const adapter = asSweepAdapter(adapterFactory.create(admission.adapter));
+    if (adapter) sweepAdapterCache = adapter;
+    return adapter;
   };
 
   const isProcessAlive = options.isProcessAlive ?? defaultIsProcessAlive;
@@ -822,6 +819,11 @@ function createAdapterFromFactory(
  * layout), so building a fresh instance per spawn/close would silently lose
  * it. A `null` (unavailable) result is not cached, so a temporarily
  * unavailable adapter can recover on a later call.
+ *
+ * The memoized instance is shared by the lifecycle core and the FR-8 sweep,
+ * so a sweep close can run concurrently with a core spawn on one instance;
+ * the adapters tolerate that (worst case a placement glitch), and serializing
+ * them further would stall pane creation behind sweep scans.
  */
 export function createReusingAdapterFactory(
   config: MultiplexerConfig,

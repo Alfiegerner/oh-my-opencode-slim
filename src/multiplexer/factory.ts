@@ -14,10 +14,13 @@ import { ZellijMultiplexer } from './zellij';
 /**
  * Create a multiplexer instance based on config.
  *
- * Do not cache instances: the adapters depend on pane-scoped per-process
- * environment (TMUX_PANE, ZELLIJ_PANE_ID, HERDR_PANE_ID, KITTY_WINDOW_ID,
- * CMUX_TUI_SOCKET/CMUX_MUX_SOCKET), which should be captured fresh for each
- * plugin context.
+ * Adapters capture pane-scoped state as they run (herdr's agent-area pane id
+ * and spawn mutex, tmux's pane targets and layout debounce, kitty's applied
+ * layout), so a caller that performs more than one operation on one plugin
+ * context must reuse a single instance per type - the TUI client wiring
+ * memoizes one for its lifetime (`createReusingAdapterFactory`). Callers that
+ * only need a short-lived adapter may create a new one; construction itself
+ * captures no pane-scoped environment.
  */
 export function getMultiplexer(config: MultiplexerConfig): Multiplexer | null {
   const { type } = config;
@@ -95,15 +98,4 @@ export function getMultiplexer(config: MultiplexerConfig): Multiplexer | null {
   log(`[multiplexer] Created ${actualType} instance`);
 
   return multiplexer;
-}
-
-/**
- * Start background availability check for a multiplexer
- */
-export function startAvailabilityCheck(config: MultiplexerConfig): void {
-  const multiplexer = getMultiplexer(config);
-  if (multiplexer) {
-    // Fire and forget - don't await
-    multiplexer.isAvailable().catch(() => {});
-  }
 }
