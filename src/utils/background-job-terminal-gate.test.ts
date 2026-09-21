@@ -384,6 +384,54 @@ describe('terminal gate', () => {
       resultSummary: 'Host reported outcome: succeeded.',
     });
   });
+  test('accepts OpenCode V2 idleOutcome for a successful child', async () => {
+    const h = harness({
+      hostOutcomeClock: 'shared-unix-ms',
+      baselineFor: () => undefined,
+      readTerminalEvidence: async () => undefined,
+      input: {
+        client: {
+          session: {
+            get: async () => ({
+              data: { idleOutcome: 'succeeded', time: { idle: 50 } },
+            }),
+          },
+        },
+      } as never,
+    });
+    h.observe('quiescent');
+    h.advance(61);
+    await h.gate.reconcile(h.run);
+    expect(h.board.get(h.run.taskID)).toMatchObject({
+      state: 'completed',
+      terminalRevision: 1,
+      resultSummary: 'Host reported outcome: succeeded.',
+    });
+  });
+  test('accepts OpenCode V2 idle_outcome for a successful child', async () => {
+    const h = harness({
+      hostOutcomeClock: 'shared-unix-ms',
+      baselineFor: () => undefined,
+      readTerminalEvidence: async () => undefined,
+      input: {
+        client: {
+          session: {
+            get: async () => ({
+              data: { idle_outcome: 'succeeded', time: { idle: 50 } },
+            }),
+          },
+        },
+      } as never,
+    });
+    h.observe('quiescent');
+    h.advance(61);
+    await h.gate.reconcile(h.run);
+    expect(h.board.get(h.run.taskID)).toMatchObject({
+      state: 'completed',
+      terminalRevision: 1,
+      resultSummary: 'Host reported outcome: succeeded.',
+    });
+  });
   test('an attributable interrupted publishes stopped, never error, when the transcript source is absent', async () => {
     const h = harness({
       hostOutcomeClock: 'shared-unix-ms',

@@ -354,6 +354,20 @@ function getCurrentTaskMessageJob(
     );
   }
   if (current.state !== 'running') {
+    if (current.state === 'stopped') {
+      throw new Error(
+        `Task ${requested} stopped without a terminal result. task_message only queues messages for running tasks and does not continue it. Use task_revive with task_id: "${requested}" to continue the retained session.`,
+      );
+    }
+    const terminalState =
+      current.state === 'reconciled'
+        ? (current.terminalState ?? 'completed')
+        : current.state;
+    if (['completed', 'error', 'cancelled'].includes(terminalState)) {
+      throw new Error(
+        `Task ${requested} is terminal (${terminalState}). task_message only queues messages for running tasks and does not continue it. Call task_result first if its terminal result is not yet acknowledged; once it appears under Reusable Sessions, resume it with task by passing task_id: "${requested}", its existing ${current.agent} specialist, a new prompt, and background: true.`,
+      );
+    }
     throw new Error(
       `Task ${requested} cannot queue a message: board state is ${current.state}, not running`,
     );

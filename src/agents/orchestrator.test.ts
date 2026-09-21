@@ -22,6 +22,14 @@ describe('orchestrator prompt', () => {
     expect(prompt).toContain('Do not rely on ordinary text alone');
   });
 
+  test('shows the host-specific task continuation call without nested code spans', () => {
+    const prompt = buildOrchestratorPrompt();
+
+    expect(prompt).toContain(
+      '`task(subagent_type: "<agent>", task_id: "<task-id>", prompt: "...", background: true)`',
+    );
+  });
+
   test('falls back to question when wait_for_user is disabled', () => {
     const prompt = buildOrchestratorPrompt(undefined, undefined, false);
 
