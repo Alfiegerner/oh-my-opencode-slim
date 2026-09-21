@@ -125,11 +125,11 @@ export interface AdmissionDecision {
   configInvalid: boolean;
 }
 
-/** Injected fetch surface for the reachability probe. */
+/** Injected fetch surface for the reachability probe and directory reads. */
 export type FetchLike = (
   input: string,
   init?: { signal?: AbortSignal; headers?: Record<string, string> },
-) => Promise<{ ok?: boolean }>;
+) => Promise<{ ok?: boolean; json?: () => Promise<unknown> }>;
 
 export interface TuiPaneWiringOptions {
   /** Project directory this client serves. */
@@ -532,14 +532,18 @@ export async function createTuiPaneWiring(
   const adapterFactory: AdapterFactory =
     options.adapterFactory ?? createReusingAdapterFactory(loaded.multiplexer);
   const ownerPid = options.ownerPid ?? process.pid;
+  const readerFetch =
+    options.fetchFn ?? (globalThis.fetch as FetchLike | undefined);
   const ports: ClientPorts = {
     clock,
     statusReader: createSessionStatusReader(
-      options.client,
+      baseUrl,
+      readerFetch,
       options.statusTimeoutMs,
     ),
     sessionListReader: createSessionListReader(
-      options.client,
+      baseUrl,
+      readerFetch,
       options.listTimeoutMs,
     ),
     adapterFactory,
@@ -867,38 +871,41 @@ function createTrackedClock(base?: Clock): {
   };
 }
 
+/**
+ * Directory routing header for client-side reads. The value is pre-encoded
+ * exactly once: the server reads the header raw and decodes it once
+ * (instance-context middleware), while a `?directory=` query parameter is
+ * decoded twice and corrupts paths containing literal `%XX` sequences (the
+ * same reason the reachability probe above uses the header).
+ */
+function directoryHeaders(directory: string): Record<string, string> {
+  return { 'x-opencode-directory': encodeURIComponent(directory) };
+}
+
 function createSessionStatusReader(
-  client: unknown,
+  baseUrl: string,
+  fetchFn: FetchLike | undefined,
   timeoutMs = DEFAULT_STATUS_TIMEOUT_MS,
 ): SessionStatusReader {
   return {
     async readStatus(directory: string): Promise<SessionStatusRead> {
-      const session = (client as { session?: { status?: unknown } } | null)
-        ?.session;
-      const status = session?.status;
-      if (typeof status !== 'function') {
-        return { statuses: new Map(), error: 'session.status unavailable' };
+      if (typeof fetchFn !== 'function') {
+        return { statuses: new Map(), error: 'fetch unavailable' };
       }
       try {
         const response = await withTimeout(
-          Promise.resolve(
-            (status as (input: { directory: string }) => unknown).call(
-              session,
-              { directory },
-            ),
-          ),
+          fetchFn(new URL('/session/status', baseUrl).toString(), {
+            headers: directoryHeaders(directory),
+          }),
           timeoutMs,
         );
-        if (!isRecord(response)) {
-          return {
-            statuses: new Map(),
-            error: 'invalid session-status response',
-          };
-        }
-        if (response.error !== undefined && response.error !== null) {
+        if (response.ok !== true) {
           return { statuses: new Map(), error: 'session.status failed' };
         }
-        const data = response.data;
+        const data = await withTimeout(
+          Promise.resolve(response.json?.()),
+          timeoutMs,
+        );
         if (!isRecord(data) || Array.isArray(data)) {
           return {
             statuses: new Map(),
@@ -924,33 +931,29 @@ function createSessionStatusReader(
 }
 
 function createSessionListReader(
-  client: unknown,
+  baseUrl: string,
+  fetchFn: FetchLike | undefined,
   timeoutMs = DEFAULT_LIST_TIMEOUT_MS,
 ): SessionListReader {
   return {
     async listSessions(directory, parentID) {
-      const session = (client as { session?: { list?: unknown } } | null)
-        ?.session;
-      const list = session?.list;
-      if (typeof list !== 'function') {
-        return { sessionIds: [], error: 'session.list unavailable' };
+      if (typeof fetchFn !== 'function') {
+        return { sessionIds: [], error: 'fetch unavailable' };
       }
       try {
         const response = await withTimeout(
-          Promise.resolve(
-            (list as (input: { directory: string }) => unknown).call(session, {
-              directory,
-            }),
-          ),
+          fetchFn(new URL('/session', baseUrl).toString(), {
+            headers: directoryHeaders(directory),
+          }),
           timeoutMs,
         );
-        if (!isRecord(response)) {
-          return { sessionIds: [], error: 'invalid session-list response' };
-        }
-        if (response.error !== undefined && response.error !== null) {
+        if (response.ok !== true) {
           return { sessionIds: [], error: 'session.list failed' };
         }
-        const data = response.data;
+        const data = await withTimeout(
+          Promise.resolve(response.json?.()),
+          timeoutMs,
+        );
         if (!Array.isArray(data)) {
           return { sessionIds: [], error: 'invalid session-list response' };
         }

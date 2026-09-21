@@ -187,8 +187,10 @@ interface FakeClientState {
   baseUrl?: string;
   statuses: Record<string, { type: string }>;
   statusCalls: string[];
+  statusHeaders: Array<Record<string, string> | undefined>;
   sessions: Array<{ id: string; parentID?: string }>;
   listCalls: string[];
+  listHeaders: Array<Record<string, string> | undefined>;
   /** `session.get` outcomes for the FR-8 terminal probe. */
   getResults: Record<string, FakeSessionGetResult>;
   getCalls: string[];
@@ -201,11 +203,48 @@ function createClientState(
     baseUrl: SERVER_URL,
     statuses: { [CHILD]: { type: 'busy' } },
     statusCalls: [],
+    statusHeaders: [],
     sessions: [],
     listCalls: [],
+    listHeaders: [],
     getResults: {},
     getCalls: [],
     ...overrides,
+  };
+}
+
+/** Decodes the pre-encoded directory routing header back to a path. */
+function decodeDirectoryHeader(
+  headers: Record<string, string> | undefined,
+): string {
+  const value = headers?.['x-opencode-directory'];
+  if (typeof value !== 'string') return '';
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * Fake fetch surface for `/session/status` and `/session` reads. The wiring
+ * routes directory reads by the pre-encoded `x-opencode-directory` header, so
+ * the fake records both the raw header and the decoded directory.
+ */
+function fakeFetch(state: FakeClientState): FetchLike {
+  return async (url, init) => {
+    const path = new URL(url).pathname;
+    if (path === '/session/status') {
+      state.statusCalls.push(decodeDirectoryHeader(init?.headers));
+      state.statusHeaders.push(init?.headers);
+      return { ok: true, json: async () => state.statuses };
+    }
+    if (path === '/session') {
+      state.listCalls.push(decodeDirectoryHeader(init?.headers));
+      state.listHeaders.push(init?.headers);
+      return { ok: true, json: async () => state.sessions };
+    }
+    return { ok: false };
   };
 }
 
@@ -213,14 +252,6 @@ function fakeHostClient(state: FakeClientState): unknown {
   return {
     client: { getConfig: () => ({ baseUrl: state.baseUrl }) },
     session: {
-      status: async (input: { directory?: string }) => {
-        state.statusCalls.push(input?.directory ?? '');
-        return { data: state.statuses };
-      },
-      list: async (input: { directory?: string }) => {
-        state.listCalls.push(input?.directory ?? '');
-        return { data: state.sessions };
-      },
       get: async (input: { sessionID?: string }) => {
         const sessionID = input?.sessionID ?? '';
         state.getCalls.push(sessionID);
@@ -364,7 +395,7 @@ async function createHarness(
     adapterFactory,
     logger,
     onceGate: options.onceGate ?? createOnceGate(),
-    fetchFn: options.fetchFn ?? (async () => ({ ok: true })),
+    fetchFn: options.fetchFn ?? fakeFetch(state),
     clock,
     initLogging: () => {},
     stableIdleMs: 40,
@@ -726,8 +757,12 @@ describe('embedded host fail-closed (D3)', () => {
 
   test('probe failure disables panes but recovers on a later event', async () => {
     let reachable = false;
+    const state = createClientState();
+    const serve = fakeFetch(state);
     const h = await createHarness({
-      fetchFn: async () => ({ ok: reachable }),
+      state,
+      fetchFn: async (url, init) =>
+        reachable ? serve(url, init) : { ok: false },
     });
 
     expect(h.wiring.lifecycle).not.toBeNull();
@@ -878,6 +913,25 @@ describe('serverUrl reflection and probe (D3)', () => {
     ]);
   });
 
+  test('status and list reads carry the pre-encoded directory header', async () => {
+    const state = createClientState();
+    const h = await createHarness({ state });
+    state.statusHeaders.length = 0;
+    state.listHeaders.length = 0;
+
+    h.bus.emit('session.created', createdEvent());
+    await flush();
+    h.clock.advance(30_000);
+    await flush();
+
+    expect(state.statusHeaders.at(-1)?.['x-opencode-directory']).toBe(
+      '%2Fproject',
+    );
+    expect(state.listHeaders.at(-1)?.['x-opencode-directory']).toBe(
+      '%2Fproject',
+    );
+  });
+
   test('probe failures and non-ok responses are unreachable', async () => {
     expect(
       await probeServerReachable(SERVER_URL, {
@@ -988,8 +1042,12 @@ describe('FR-7 reconcile trigger', () => {
 
   test('reconcile is skipped while the host is unreachable', async () => {
     let reachable = false;
+    const state = createClientState();
+    const serve = fakeFetch(state);
     const h = await createHarness({
-      fetchFn: async () => ({ ok: reachable }),
+      state,
+      fetchFn: async (url, init) =>
+        reachable ? serve(url, init) : { ok: false },
       reconcileIntervalMs: 30_000,
     });
     await flush();
