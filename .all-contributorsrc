@@ -1064,6 +1064,15 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "guanbear",
+      "name": "GuanBear",
+      "avatar_url": "https://avatars.githubusercontent.com/u/11829005?v=4",
+      "profile": "https://guanbear.com/",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "commitConvention": "angular"

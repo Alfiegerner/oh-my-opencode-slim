@@ -670,7 +670,7 @@ Use this section as a map: start with installation, then jump to features, confi
   <p><sub>Every merged contribution leaves a mark on the realm.</sub></p>
 
   <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
-[![All Contributors](https://img.shields.io/badge/all_contributors-117-orange.svg?style=flat-square)](#contributors-)
+[![All Contributors](https://img.shields.io/badge/all_contributors-118-orange.svg?style=flat-square)](#contributors-)
 <!-- ALL-CONTRIBUTORS-BADGE:END -->
 </div>
 
@@ -837,6 +837,7 @@ Use this section as a map: start with installation, then jump to features, confi
       <td align="center" valign="top" width="16.66%"><a href="https://github.com/kumar-shivang"><img src="https://avatars.githubusercontent.com/u/89011717?v=4?s=100" width="100px;" alt="Shivang Kumar"/><br /><sub><b>Shivang Kumar</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=kumar-shivang" title="Code">💻</a></td>
       <td align="center" valign="top" width="16.66%"><a href="https://github.com/ScoFan-official"><img src="https://avatars.githubusercontent.com/u/137064417?v=4?s=100" width="100px;" alt="ScoFan-official"/><br /><sub><b>ScoFan-official</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=ScoFan-official" title="Code">💻</a></td>
       <td align="center" valign="top" width="16.66%"><a href="https://www.littlelyon.com/"><img src="https://avatars.githubusercontent.com/u/6328186?v=4?s=100" width="100px;" alt="Haoliang Wu"/><br /><sub><b>Haoliang Wu</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=haoliangwu" title="Code">💻</a></td>
+      <td align="center" valign="top" width="16.66%"><a href="https://guanbear.com/"><img src="https://avatars.githubusercontent.com/u/11829005?v=4?s=100" width="100px;" alt="GuanBear"/><br /><sub><b>GuanBear</b></sub></a><br /><a href="https://github.com/alvinunreal/oh-my-opencode-slim/commits?author=guanbear" title="Code">💻</a></td>
     </tr>
   </tbody>
 </table>
