@@ -11,7 +11,6 @@ function activationPrompt(task: string): string {
     '- before planning, delegation, or creating state, inspect existing `.gitignore` and `.ignore`; add only missing entries without duplicates: `.gitignore` must contain `.slim/deepwork/`, and `.ignore` must contain `!.slim/deepwork/` and `!.slim/deepwork/**`; this keeps state git-local yet OpenCode-readable;',
     '- create/update a `.slim/deepwork/` progress file;',
     '- save code/doc deliverables to project paths (e.g. `src/`, `docs/`); reserve `.slim/deepwork/` strictly for progress files;',
-    '- keep OpenCode todos synced with the current phase;',
     '- draft a phased implementation/delegation plan with a small number of coherent phases based on dependencies and natural delivery boundaries; do not split work merely to reduce review scope;',
     '- before execution, show the user a compact overview with phase titles/order, delegated specialists and ownership/scope, plus the Oracle review total, gate after each phase, and a short reason for each;',
     '- execute phase by phase with background specialists where useful;',
