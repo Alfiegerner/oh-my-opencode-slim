@@ -16,6 +16,9 @@ the built-in `/models`, so it triggers no LLM turn.
 > `/preset` is a TUI-only slash command (like `/models`). Invoke it via
 > autocomplete selection or a keybind. Typing `/preset` + Enter does not open
 > the manager (same design as `/models`).
+>
+> On v2 hosts, `/preset <name>` applies the named preset directly (reload
+> still required). On v1 hosts, use the picker.
 
 ## How It Works
 
