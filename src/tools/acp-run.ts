@@ -10,6 +10,11 @@ import {
 
 const z = tool.schema;
 
+const ACP_CANCEL_FLUSH_MS = 250;
+const ACP_GRACEFUL_EXIT_MS = 1_000;
+const ACP_TERMINATE_EXIT_MS = 1_000;
+const ACP_KILL_EXIT_MS = 500;
+
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
 interface RpcResponse {
@@ -47,6 +52,8 @@ export function createAcpInitializeParams() {
 
 class AcpClient {
   private child: ChildProcessWithoutNullStreams;
+  private exitPromise: Promise<void>;
+  private closePromise: Promise<void> | undefined;
   private next = 1;
   private pending = new Map<number, Pending>();
   private chunks: string[] = [];
@@ -79,6 +86,9 @@ class AcpClient {
       cwd,
       env: { ...process.env, ...config.env },
       stdio: 'pipe',
+    });
+    this.exitPromise = new Promise((resolve) => {
+      this.child.once('exit', () => resolve());
     });
     this.child.stderr.on('data', (chunk) => {
       this.errors.push(String(chunk));
@@ -139,12 +149,58 @@ class AcpClient {
       });
     }
   }
-  close(): void {
+  close(): Promise<void> {
     this.settled = true;
-    if (this.active && this.sessionId && !this.child.killed) {
-      this.notify('session/cancel', { sessionId: this.sessionId });
+    this.closePromise ??= this.shutdown();
+    return this.closePromise;
+  }
+
+  private async shutdown(): Promise<void> {
+    if (this.hasExited()) return;
+
+    if (this.active && this.sessionId) {
+      await this.withTimeout(
+        this.notify('session/cancel', { sessionId: this.sessionId }),
+        ACP_CANCEL_FLUSH_MS,
+      );
     }
-    if (!this.child.killed) this.child.kill('SIGTERM');
+
+    if (!this.hasExited()) this.child.stdin.end();
+    if (await this.waitForExit(ACP_GRACEFUL_EXIT_MS)) return;
+
+    this.child.kill('SIGTERM');
+    if (await this.waitForExit(ACP_TERMINATE_EXIT_MS)) return;
+
+    this.child.kill('SIGKILL');
+    await this.waitForExit(ACP_KILL_EXIT_MS);
+  }
+
+  private hasExited(): boolean {
+    return this.child.exitCode !== null || this.child.signalCode !== null;
+  }
+
+  private async waitForExit(timeoutMs: number): Promise<boolean> {
+    if (this.hasExited()) return true;
+    return await this.withTimeout(this.exitPromise, timeoutMs);
+  }
+
+  private async withTimeout(
+    promise: Promise<void>,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        promise.then(() => true),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), timeoutMs);
+        }),
+      ]);
+    } catch {
+      return false;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   private request(
@@ -163,10 +219,16 @@ class AcpClient {
     });
   }
 
-  private notify(method: string, params: Record<string, unknown>): void {
-    this.child.stdin.write(
-      `${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`,
-    );
+  private notify(
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.child.stdin.write(
+        `${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`,
+        (error) => (error ? reject(error) : resolve()),
+      );
+    });
   }
 
   private async drain(): Promise<void> {
@@ -187,7 +249,7 @@ class AcpClient {
       );
       this.errors.push(error.message);
       this.rejectPending(error);
-      this.close();
+      void this.close();
       return;
     }
     if ('id' in message && ('result' in message || 'error' in message)) {
@@ -369,7 +431,9 @@ export function createAcpRunTool(agents: AcpAgentsConfig = {}): ToolDefinition {
                 )),
             )
           : undefined;
-      const abort = () => client.close();
+      const abort = () => {
+        void client.close();
+      };
       ctx.abort.addEventListener('abort', abort, { once: true });
       try {
         const run = client.run(args.prompt);
@@ -377,7 +441,7 @@ export function createAcpRunTool(agents: AcpAgentsConfig = {}): ToolDefinition {
       } finally {
         if (timer) clearTimeout(timer);
         ctx.abort.removeEventListener('abort', abort);
-        client.close();
+        await client.close();
       }
     },
   });
