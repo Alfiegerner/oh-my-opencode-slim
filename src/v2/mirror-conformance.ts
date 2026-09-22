@@ -3,7 +3,7 @@
  *
  * Compile-time assertions binding the hand-mirrored v2 plugin context in
  * `./types.ts` to the official `@opencode/plugin` types (pinned to the
- * audited version in devDependencies; baseline `2.0.7`). Enforcement
+ * audited version in devDependencies; baseline `2.0.12`). Enforcement
  * point is `bun run typecheck`: this file must NOT carry a test suffix,
  * because tsconfig excludes test-suffixed files (`*.test.ts`) from tsc —
  * a test-suffixed guard silently checks nothing.

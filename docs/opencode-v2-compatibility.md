@@ -10,7 +10,9 @@ requires OpenCode v2.0.7+ on v2 hosts; older v2 hosts are unsupported.
 The adapter targets the v2 plugin API surface (see
 [The v2 plugin API surface](#the-v2-plugin-api-surface-this-adapter-uses)),
 and the compile-time mirror guard below is pinned to `@opencode/plugin`
-2.0.7.
+2.0.12 (revalidated: `bun run typecheck` passes against 2.0.12 with no
+official-surface drift from the audited 2.0.7 pin; live host verification
+remains the v2.0.7 baseline above).
 
 ## How it works
 
@@ -97,7 +99,7 @@ orchestrator-wake children-driven degraded mode are exercised end-to-end
 on the stable host — live mock-driven re-verification on 2026-09-09
 included a queued wake firing after 60 s of parent idle with a stalled
 background child). v2 conformance is compile-time-pinned by the
-mirror-conformance guard against the `@opencode/plugin` 2.0.7
+mirror-conformance guard against the `@opencode/plugin` 2.0.12
 devDependency and exercised by the mock-driven bridge tests. Every v2
 API the adapter touches is
 capability-probed at runtime (`typeof ctx.mcp?.transform === 'function'`,
