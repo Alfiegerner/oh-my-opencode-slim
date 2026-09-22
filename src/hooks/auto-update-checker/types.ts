@@ -18,7 +18,8 @@ export interface CompatibleVersionResult {
 }
 
 export interface OpencodeConfig {
-  plugin?: unknown[];
+  plugins?: unknown[]; // opencode2 (plural, preferred)
+  plugin?: unknown[]; // v1 (singular)
   [key: string]: unknown;
 }
 
