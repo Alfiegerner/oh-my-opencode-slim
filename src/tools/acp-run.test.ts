@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import packageJson from '../../package.json' with { type: 'json' };
@@ -270,5 +270,70 @@ describe('acp_run integration', () => {
     expect(metadataCalls[0]?.title).toBe('▸ Read src/server.js');
     expect(metadataCalls[1]?.title).toBe('✓ Read src/server.js');
     expect(metadataCalls[1]?.metadata?.progress).toBe('✓ Read src/server.js');
+  }, 15_000);
+
+  test('waits for graceful bridge shutdown after a timeout', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'acp-shutdown-'));
+    const serverPath = join(dir, 'server.js');
+    const eventsPath = join(dir, 'events.log');
+    await writeFile(
+      serverPath,
+      [
+        'const fs = require("node:fs");',
+        'let buf = "";',
+        `const eventsPath = ${JSON.stringify(eventsPath)};`,
+        'const record = (event) => fs.appendFileSync(eventsPath, event + "\\n");',
+        'process.stdin.setEncoding("utf8");',
+        'process.stdin.on("data", (chunk) => {',
+        '  buf += chunk; let idx;',
+        '  while ((idx = buf.indexOf("\\n")) >= 0) {',
+        '    const line = buf.slice(0, idx); buf = buf.slice(idx + 1);',
+        '    if (!line.trim()) continue;',
+        '    const msg = JSON.parse(line);',
+        '    if (msg.method === "initialize") {',
+        '      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: {} }) + "\\n");',
+        '    } else if (msg.method === "session/new") {',
+        '      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { sessionId: "sess-timeout" } }) + "\\n");',
+        '    } else if (msg.method === "session/prompt") {',
+        '      record("prompt");',
+        '    } else if (msg.method === "session/cancel") {',
+        '      record("cancel");',
+        '    }',
+        '  }',
+        '});',
+        'process.stdin.on("end", () => {',
+        '  record("eof");',
+        '  setTimeout(() => { record("exit"); process.exit(0); }, 100);',
+        '});',
+      ].join('\n'),
+    );
+
+    const tool = createAcpRunTool({
+      cursor: {
+        command: process.execPath,
+        args: [serverPath],
+        permissionMode: 'allow',
+      },
+    });
+
+    await expect(
+      tool.execute(
+        { agent: 'cursor', prompt: 'wait', timeout_ms: 50 } as never,
+        {
+          sessionID: 's',
+          messageID: 'm',
+          agent: 'cursor',
+          directory: dir,
+          worktree: dir,
+          abort: new AbortController().signal,
+          metadata: () => {},
+          ask: async () => {},
+        } as never,
+      ),
+    ).rejects.toThrow("ACP agent 'cursor' timed out after 50ms");
+
+    expect(await readFile(eventsPath, 'utf8')).toBe(
+      'prompt\ncancel\neof\nexit\n',
+    );
   }, 15_000);
 });
