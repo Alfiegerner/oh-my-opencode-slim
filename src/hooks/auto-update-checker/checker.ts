@@ -38,7 +38,7 @@ function isString(value: unknown): value is string {
 }
 
 function getPluginEntries(config: OpencodeConfig): unknown[] {
-  return Array.isArray(config.plugin) ? config.plugin : [];
+  return (Array.isArray(config.plugins) ? config.plugins : config.plugin) ?? [];
 }
 
 function getPluginSpec(entry: unknown): string | null {
@@ -181,7 +181,7 @@ function findManagedSpecifierRanges(content: string): Array<[number, number]> {
       objectDepth--;
     else if (
       objectDepth === 1 &&
-      value === 'plugin' &&
+      (value === 'plugin' || value === 'plugins') &&
       tokens[index + 1]?.kind === 'punctuation' &&
       tokens[index + 1]?.value === ':' &&
       tokens[index + 2]?.kind === 'punctuation' &&
