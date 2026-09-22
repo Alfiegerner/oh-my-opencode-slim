@@ -336,4 +336,166 @@ describe('acp_run integration', () => {
       'prompt\ncancel\neof\nexit\n',
     );
   }, 15_000);
+
+  test('abort settles while an ACP permission request is pending', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'acp-abort-permission-'));
+    const serverPath = join(dir, 'server.js');
+    const eventsPath = join(dir, 'events.log');
+    await writeFile(
+      serverPath,
+      [
+        'const fs = require("node:fs");',
+        'let buf = "";',
+        `const eventsPath = ${JSON.stringify(eventsPath)};`,
+        'const record = (event) => fs.appendFileSync(eventsPath, event + "\\n");',
+        'process.stdin.setEncoding("utf8");',
+        'process.stdin.on("data", (chunk) => {',
+        '  buf += chunk; let idx;',
+        '  while ((idx = buf.indexOf("\\n")) >= 0) {',
+        '    const line = buf.slice(0, idx); buf = buf.slice(idx + 1);',
+        '    if (!line.trim()) continue;',
+        '    const msg = JSON.parse(line);',
+        '    if (msg.method === "initialize") {',
+        '      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: {} }) + "\\n");',
+        '    } else if (msg.method === "session/new") {',
+        '      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { sessionId: "sess-permission" } }) + "\\n");',
+        '    } else if (msg.method === "session/prompt") {',
+        '      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: {} }) + "\\n");',
+        '      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: 99, method: "session/request_permission", params: { permission: "write" } }) + "\\n");',
+        '      record("permission");',
+        '    } else if (msg.method === "session/cancel") {',
+        '      record("cancel");',
+        '    }',
+        '  }',
+        '});',
+        'process.stdin.on("end", () => process.exit(0));',
+      ].join('\n'),
+    );
+
+    const controller = new AbortController();
+    let permissionStarted!: () => void;
+    const permissionSeen = new Promise<void>((resolve) => {
+      permissionStarted = resolve;
+    });
+    const tool = createAcpRunTool({
+      cursor: {
+        command: process.execPath,
+        args: [serverPath],
+        permissionMode: 'ask',
+      },
+    });
+    const execution = tool.execute(
+      { agent: 'cursor', prompt: 'wait', timeout_ms: 0 } as never,
+      {
+        sessionID: 's',
+        messageID: 'm',
+        agent: 'cursor',
+        directory: dir,
+        worktree: dir,
+        abort: controller.signal,
+        metadata: () => {},
+        ask: async (input: { metadata?: Record<string, unknown> }) => {
+          if (input.metadata?.permission === 'write') {
+            permissionStarted();
+            await new Promise(() => {});
+          }
+        },
+      } as never,
+    );
+
+    await permissionSeen;
+    controller.abort();
+    await expect(
+      Promise.race([
+        execution,
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('abort did not settle')), 2_000),
+        ),
+      ]),
+    ).resolves.toBeDefined();
+    expect(await readFile(eventsPath, 'utf8')).toContain('cancel\n');
+  }, 15_000);
+
+  test('a spawn failure does not wait through shutdown grace periods', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'acp-spawn-error-'));
+    const tool = createAcpRunTool({
+      cursor: {
+        command: join(dir, 'missing-acp-command'),
+        args: [],
+        permissionMode: 'allow',
+      },
+    });
+    const startedAt = Date.now();
+
+    await expect(
+      tool.execute(
+        { agent: 'cursor', prompt: 'hi' } as never,
+        {
+          sessionID: 's',
+          messageID: 'm',
+          agent: 'cursor',
+          directory: dir,
+          worktree: dir,
+          abort: new AbortController().signal,
+          metadata: () => {},
+          ask: async () => {},
+        } as never,
+      ),
+    ).rejects.toThrow();
+
+    expect(Date.now() - startedAt).toBeLessThan(1_500);
+  }, 15_000);
+
+  test('does not wait for descendant-held stdio after the bridge exits', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'acp-exit-before-close-'));
+    const serverPath = join(dir, 'server.js');
+    await writeFile(
+      serverPath,
+      [
+        'const { spawn } = require("node:child_process");',
+        'let seen = 0; let buf = "";',
+        'process.stdin.setEncoding("utf8");',
+        'process.stdin.on("data", (chunk) => {',
+        '  buf += chunk; let idx;',
+        '  while ((idx = buf.indexOf("\\n")) >= 0) {',
+        '    const line = buf.slice(0, idx); buf = buf.slice(idx + 1);',
+        '    if (!line.trim()) continue;',
+        '    const msg = JSON.parse(line); seen++;',
+        '    const result = seen === 2 ? { sessionId: "sess-exit" } : {};',
+        '    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result }) + "\\n");',
+        '  }',
+        '});',
+        'process.stdin.on("end", () => {',
+        '  spawn(process.execPath, ["-e", "setTimeout(() => {}, 1500)"], {',
+        '    stdio: ["ignore", process.stdout, process.stderr],',
+        '  });',
+        '  process.exit(0);',
+        '});',
+      ].join('\n'),
+    );
+    const tool = createAcpRunTool({
+      cursor: {
+        command: process.execPath,
+        args: [serverPath],
+        permissionMode: 'allow',
+      },
+    });
+    const startedAt = Date.now();
+
+    await tool.execute(
+      { agent: 'cursor', prompt: 'hi' } as never,
+      {
+        sessionID: 's',
+        messageID: 'm',
+        agent: 'cursor',
+        directory: dir,
+        worktree: dir,
+        abort: new AbortController().signal,
+        metadata: () => {},
+        ask: async () => {},
+      } as never,
+    );
+
+    expect(Date.now() - startedAt).toBeLessThan(750);
+  }, 15_000);
 });

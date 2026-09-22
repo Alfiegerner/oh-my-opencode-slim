@@ -54,6 +54,8 @@ class AcpClient {
   private child: ChildProcessWithoutNullStreams;
   private exitPromise: Promise<void>;
   private closePromise: Promise<void> | undefined;
+  private closing = new AbortController();
+  private childTerminated = false;
   private next = 1;
   private pending = new Map<number, Pending>();
   private chunks: string[] = [];
@@ -88,7 +90,14 @@ class AcpClient {
       stdio: 'pipe',
     });
     this.exitPromise = new Promise((resolve) => {
-      this.child.once('exit', () => resolve());
+      const settle = () => {
+        this.child.off('exit', settle);
+        this.child.off('close', settle);
+        this.childTerminated = true;
+        resolve();
+      };
+      this.child.once('exit', settle);
+      this.child.once('close', settle);
     });
     this.child.stderr.on('data', (chunk) => {
       this.errors.push(String(chunk));
@@ -151,6 +160,7 @@ class AcpClient {
   }
   close(): Promise<void> {
     this.settled = true;
+    this.closing.abort();
     this.closePromise ??= this.shutdown();
     return this.closePromise;
   }
@@ -176,7 +186,11 @@ class AcpClient {
   }
 
   private hasExited(): boolean {
-    return this.child.exitCode !== null || this.child.signalCode !== null;
+    return (
+      this.childTerminated ||
+      this.child.exitCode !== null ||
+      this.child.signalCode !== null
+    );
   }
 
   private async waitForExit(timeoutMs: number): Promise<boolean> {
@@ -286,7 +300,11 @@ class AcpClient {
       const title = readPermissionTitle(message.params);
       try {
         if (this.config.permissionMode === 'ask') {
-          await this.ask(title, message.params ?? {});
+          const answered = await this.askBeforeClose(
+            title,
+            message.params ?? {},
+          );
+          if (!answered) return;
         }
         const optionId = selectPermissionOption(
           message.params,
@@ -313,6 +331,30 @@ class AcpClient {
       message.id,
       `Unsupported ACP client method: ${message.method}`,
     );
+  }
+
+  private async askBeforeClose(
+    title: string,
+    metadata: Record<string, unknown>,
+  ): Promise<boolean> {
+    if (this.closing.signal.aborted) return false;
+    return await new Promise<boolean>((resolve, reject) => {
+      const onAbort = () => {
+        this.closing.signal.removeEventListener('abort', onAbort);
+        resolve(false);
+      };
+      this.closing.signal.addEventListener('abort', onAbort, { once: true });
+      this.ask(title, metadata).then(
+        () => {
+          this.closing.signal.removeEventListener('abort', onAbort);
+          resolve(true);
+        },
+        (error) => {
+          this.closing.signal.removeEventListener('abort', onAbort);
+          reject(error);
+        },
+      );
+    });
   }
   private handleNotification(message: RpcNotification): void {
     if (message.method !== 'session/update' || this.settled) return;
