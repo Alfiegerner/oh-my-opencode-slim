@@ -197,7 +197,6 @@ bun run build
 - **[OpenCode Go 프리셋](docs/opencode-go-preset.md)** — 에이전트를 OpenCode Go 모델에서 실행합니다. Orchestrator 모델이 멀티모달이 아니므로 시각 분석용 Observer 에이전트를 활성화합니다.
 - **[작성자 프리셋](docs/authors-preset.md)** — 작성자가 매일 사용하는 서드파티 스킬 포함 정확한 설정입니다.
 - **[$30 프리셋](docs/thirty-dollars-preset.md)** — 월 약 $30로 Codex Plus와 GitHub Copilot Pro를 중심으로 구성한 혼합 프로바이더 설정입니다.
-- **[OpenCode Zen 무료 프리셋](docs/opencode-zen-free-preset.md)** — 모든 에이전트가 opencode 무료 모델에서 실행되며 사용 비용이 없습니다.
 
 ### 대체 프로바이더 사용하기
 

@@ -1055,6 +1055,15 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "haoliangwu",
+      "name": "Haoliang Wu",
+      "avatar_url": "https://avatars.githubusercontent.com/u/6328186?v=4",
+      "profile": "https://www.littlelyon.com/",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "commitConvention": "angular"

@@ -196,7 +196,8 @@ coverage failure, and assistant/provider errors all invalidate a session.
 
 ### Zen free example
 
-For OpenCode Zen free routing, use provider `opencode` and model `hy3-free`.
+For OpenCode Zen free routing, use provider `opencode` and model
+`nemotron-3.5-lightning-free` (or check `opencode models` for the current free model).
 Keep credentials outside the repository, in the environment of an isolated
 server process. In the isolated OpenCode configuration, make model selection
 explicit and disable title generation so its separate small-model request does
@@ -204,12 +205,11 @@ not confound the run:
 
 ```json
 {
-  "preset": "opencode-zen-free",
   "default_agent": "orchestrator",
-  "model": "opencode/hy3-free",
-  "small_model": "opencode/hy3-free",
+  "model": "opencode/nemotron-3.5-lightning-free",
+  "small_model": "opencode/nemotron-3.5-lightning-free",
   "agent": {
-    "orchestrator": { "model": "opencode/hy3-free" },
+    "orchestrator": { "model": "opencode/nemotron-3.5-lightning-free" },
     "title": { "disable": true }
   }
 }
@@ -221,11 +221,11 @@ With that isolated server running, a live invocation is:
 bun scripts/benchmark-opencode-cache.ts \
   --server http://127.0.0.1:4096 \
   --provider opencode \
-  --model hy3-free \
+  --model nemotron-3.5-lightning-free \
   --runs 12 \
   --arm current \
   --plugin-build "$(git rev-parse HEAD)" \
-  --output /tmp/opencode-zen-hy3-current.json
+  --output /tmp/opencode-zen-nemotron-current.json
 ```
 
 ## Report interpretation
@@ -265,8 +265,10 @@ not a portable performance claim.
 ## Observed #784 controlled Zen HY3 result
 
 The following is an **environment-specific** controlled observation, not a
-guarantee. It used isolated OpenCode `1.18.2` hosts, preset
-`opencode-zen-free`, title generation disabled, `opencode/hy3-free` routing,
+guarantee. The `hy3-free` model it routed through has since been retired from
+the Zen free tier; the example command above uses the current free model. It
+used isolated OpenCode `1.18.2` hosts, an all-agents-on-free-model config,
+title generation disabled, `opencode/hy3-free` routing,
 the fixed tool trace, and 12 independent eligible sessions per arm.
 
 | Metric | Baseline `67e2a556` | Current `08e9fa5` |
@@ -281,7 +283,8 @@ the fixed tool trace, and 12 independent eligible sessions per arm.
 | Prompt-loop latency p50 ms (95% CI) | 3216.77 [3072.35, 3255.93] | 2267.81 [2248.48, 3012.78] |
 
 Every eligible session completed `read` and `todowrite`; observed routing was
-`orchestrator` / `opencode` / `hy3-free`. Repeat the controlled procedure
+`orchestrator` / `opencode` / `hy3-free` (now retired; the live model is
+`nemotron-3.5-lightning-free`). Repeat the controlled procedure
 before drawing conclusions under a different provider account, host, model
 revision, or cache policy.
 

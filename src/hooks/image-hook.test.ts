@@ -832,6 +832,155 @@ describe('processImageAttachments image routing', () => {
   });
 });
 
+describe('processImageAttachments v2 media parts', () => {
+  function mediaPart(base64: string, extra: Record<string, unknown> = {}) {
+    return {
+      type: 'media',
+      mediaType: 'image/png',
+      data: base64,
+      filename: 'img-test.png',
+      ...extra,
+    };
+  }
+
+  it('saves v2 media parts under .opencode/images and replaces with a nudge', () => {
+    const bytes = Buffer.from('v2-media-bytes', 'utf8');
+    const message = makeUserMsg([mediaPart(bytes.toString('base64'))]);
+    processImageAttachments({
+      messages: [message],
+      workDir: path.join(TEST_DIR, 'v2-media'),
+      imageRouting: 'auto',
+      disabledAgents: new Set<string>(),
+      log: () => {},
+    });
+    expect(imagePartCount(message)).toBe(0);
+    const textParts = message.parts.filter((part) => part.type === 'text');
+    expect(textParts).toHaveLength(1);
+    const text = textParts[0]?.text ?? '';
+    const savedPath = text.match(/(\/[^\s,]+\.png)/)?.[1];
+    expect(savedPath).toBeDefined();
+    expect(savedPath).toContain(path.join('.opencode', 'images'));
+    const hash = createHash('sha1').update(bytes).digest('hex').slice(0, 8);
+    expect(path.basename(savedPath as string)).toBe(`img-test-${hash}.png`);
+    expect(readFileSync(savedPath as string)).toEqual(bytes);
+  });
+
+  it('still saves v1 file parts with image mime (regression guard)', () => {
+    const bytes = Buffer.from('AAAA', 'base64');
+    const message = makeUserMsg([
+      {
+        type: 'file',
+        mime: 'image/png',
+        url: `data:image/png;base64,${bytes.toString('base64')}`,
+        filename: 'photo.png',
+      },
+    ]);
+    processImageAttachments({
+      messages: [message],
+      workDir: path.join(TEST_DIR, 'v2-v1-file-regression'),
+      imageRouting: 'auto',
+      disabledAgents: new Set<string>(),
+      log: () => {},
+    });
+    expect(message.parts.filter((part) => part.type === 'file')).toHaveLength(
+      0,
+    );
+    const text = nudgeText(message);
+    const savedPath = text.match(/(\/[^\s,]+\.png)/)?.[1];
+    expect(savedPath).toBeDefined();
+    const hash = createHash('sha1').update(bytes).digest('hex').slice(0, 8);
+    expect(path.basename(savedPath as string)).toBe(`photo-${hash}.png`);
+    expect(readFileSync(savedPath as string)).toEqual(bytes);
+  });
+
+  it('does not treat non-image media parts as images', () => {
+    const { workDir, saveDir } = makeTestDir('v2-media-audio');
+    const message = makeUserMsg([
+      {
+        type: 'media',
+        mediaType: 'audio/mpeg',
+        data: Buffer.from('clip', 'utf8').toString('base64'),
+        filename: 'clip.mp3',
+      },
+    ]);
+    processAuto([message], workDir);
+    expect(message.parts).toHaveLength(1);
+    expect(message.parts.filter((part) => part.type === 'text')).toHaveLength(
+      0,
+    );
+    expect(readdirSync(saveDir)).toEqual([]);
+  });
+
+  it('direct mode leaves v2 media parts untouched', () => {
+    const message = makeUserMsg([mediaPart('AAAA')]);
+    const result = processImageAttachments({
+      messages: [message],
+      workDir: path.join(TEST_DIR, 'v2-media-direct'),
+      imageRouting: 'direct',
+      disabledAgents: new Set<string>(),
+      log: () => {},
+    });
+    expect(result).toBe(false);
+    expect(message.parts).toHaveLength(1);
+    expect(message.parts[0]?.type).toBe('media');
+  });
+
+  it('v2 media part with undecodable/empty data is left in the message', () => {
+    const { workDir } = makeTestDir('v2-media-empty-data');
+    const message = makeUserMsg([mediaPart('')]);
+    processAuto([message], workDir);
+    expect(message.parts).toHaveLength(1);
+    expect(message.parts.filter((part) => part.type === 'text')).toHaveLength(
+      0,
+    );
+  });
+
+  it('v2 media with image filename extension is treated as an image', () => {
+    const bytes = Buffer.from('named-bytes', 'utf8');
+    const message = makeUserMsg([
+      mediaPart(bytes.toString('base64'), {
+        mediaType: 'application/octet-stream',
+        filename: 'shot.png',
+      }),
+    ]);
+    processImageAttachments({
+      messages: [message],
+      workDir: path.join(TEST_DIR, 'v2-media-by-filename'),
+      imageRouting: 'auto',
+      disabledAgents: new Set<string>(),
+      log: () => {},
+    });
+    expect(message.parts.filter((part) => part.type === 'media')).toHaveLength(
+      0,
+    );
+    const text = nudgeText(message);
+    const savedPath = text.match(/(\/[^\s,]+\.png)/)?.[1];
+    expect(savedPath).toBeDefined();
+    const hash = createHash('sha1').update(bytes).digest('hex').slice(0, 8);
+    expect(path.basename(savedPath as string)).toBe(`shot-${hash}.png`);
+    expect(readFileSync(savedPath as string)).toEqual(bytes);
+  });
+
+  it('v2 media attachments reuse the memoized path without re-writing', () => {
+    const { workDir, saveDir } = makeTestDir('v2-media-memo');
+    const base64 = Buffer.from('memo-bytes', 'utf8').toString('base64');
+    const first = makeUserMsg([mediaPart(base64)]);
+    processAuto([first], workDir);
+    const marker = nudgeText(first).match(/(\/[^\s,]+\.png)/)?.[1];
+    expect(marker).toBeDefined();
+    expect(readdirSync(saveDir)).toEqual(['s1']);
+    const sessionDir = path.join(saveDir, 's1');
+    const entriesBefore = readdirSync(sessionDir);
+    expect(entriesBefore).toHaveLength(1);
+
+    const second = makeUserMsg([mediaPart(base64)]);
+    processAuto([second], workDir);
+    expect(nudgeText(second)).toContain(marker as string);
+    // Same canonical file reused; no duplicate/collision write.
+    expect(readdirSync(sessionDir)).toEqual(entriesBefore);
+  });
+});
+
 describe('resolveImageRouting', () => {
   it('returns auto when omitted and observer enabled', () => {
     expect(resolveImageRouting(undefined, true)).toBe('auto');

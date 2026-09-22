@@ -200,9 +200,21 @@ interface ImagePart {
   type: string;
   url?: string;
   mime?: string;
+  mediaType?: string;
   filename?: string;
   name?: string;
+  data?: string;
   [key: string]: unknown;
+}
+
+const IMAGE_FILE_EXTENSION_RE =
+  /\.(png|jpg|jpeg|gif|bmp|webp|svg|ico|tiff?|heic)$/i;
+
+function hasImageFileExtension(p: ImagePart): boolean {
+  const filename = p.filename as string | undefined;
+  const name = p.name as string | undefined;
+  const fileName = filename ?? name;
+  return Boolean(fileName && IMAGE_FILE_EXTENSION_RE.test(fileName));
 }
 
 function isImagePart(p: ImagePart): boolean {
@@ -210,26 +222,25 @@ function isImagePart(p: ImagePart): boolean {
   if (p.type === 'file') {
     const mime = p.mime as string | undefined;
     if (mime?.startsWith('image/')) return true;
-    const filename = p.filename as string | undefined;
-    const name = p.name as string | undefined;
-    const fileName = filename ?? name;
-    if (
-      fileName &&
-      /\.(png|jpg|jpeg|gif|bmp|webp|svg|ico|tiff?|heic)$/i.test(fileName)
-    )
-      return true;
+    if (hasImageFileExtension(p)) return true;
+  }
+  if (p.type === 'media') {
+    // OpenCode v2 media parts: `{ type: 'media', mediaType, data, filename }`.
+    const mediaType = p.mediaType as string | undefined;
+    if (mediaType?.startsWith('image/')) return true;
+    if (hasImageFileExtension(p)) return true;
   }
   return false;
 }
 
-// Memo of already-materialized data-URL attachments. Key is
-// targetDir + effective filename + sha256(url) — never the raw base64.
+// Memo of already-materialized attachments. Keys are small derived strings
+// (targetDir + effective filename + content digest) — never the raw base64.
 // Suffixed collision names (`-N`) are not stored: the obstacle may be
 // gone next transform. Hits revalidate with lstat (regular file only).
 const resolvedAttachmentByKey = new Map<string, string>();
 const RESOLVED_ATTACHMENT_MAX = 256;
 
-function attachmentMemoKey(
+function urlAttachmentMemoKey(
   targetDir: string,
   dataUrl: string,
   effectiveName: string,
@@ -237,18 +248,23 @@ function attachmentMemoKey(
   return `${targetDir}\n${effectiveName}\n${createHash('sha256').update(dataUrl).digest('hex')}`;
 }
 
+// v2 media parts have no url; key on mediaType + sha1 of the decoded bytes
+// (cheap: the bytes are hashed for the filename anyway).
+function mediaAttachmentMemoKey(
+  targetDir: string,
+  effectiveName: string,
+  mediaType: string,
+  data: Buffer,
+): string {
+  return `${targetDir}\n${effectiveName}\n${mediaType}\n${createHash('sha1').update(data).digest('hex')}`;
+}
+
 function isSuffixedResolution(filePath: string): boolean {
   return /-[0-9a-f]{8}-\d+\.[^.]+$/.test(basename(filePath));
 }
 
-function rememberResolvedAttachment(
-  targetDir: string,
-  dataUrl: string,
-  effectiveName: string,
-  filePath: string,
-): void {
+function rememberResolvedAttachment(key: string, filePath: string): void {
   if (isSuffixedResolution(filePath)) return;
-  const key = attachmentMemoKey(targetDir, dataUrl, effectiveName);
   if (
     !resolvedAttachmentByKey.has(key) &&
     resolvedAttachmentByKey.size >= RESOLVED_ATTACHMENT_MAX
@@ -259,12 +275,7 @@ function rememberResolvedAttachment(
   resolvedAttachmentByKey.set(key, filePath);
 }
 
-function recalledResolvedAttachment(
-  targetDir: string,
-  dataUrl: string,
-  effectiveName: string,
-): string | null {
-  const key = attachmentMemoKey(targetDir, dataUrl, effectiveName);
+function recalledResolvedAttachment(key: string): string | null {
   const saved = resolvedAttachmentByKey.get(key);
   if (!saved) return null;
   try {
@@ -282,21 +293,39 @@ function decodeDataUrl(url: string): { mime: string; data: Buffer } | null {
   return { mime: match[1], data: Buffer.from(match[2], 'base64') };
 }
 
+const MIME_EXT_BY_TYPE: Record<string, string> = {
+  'image/png': '.png',
+  'image/jpeg': '.jpg',
+  'image/gif': '.gif',
+  'image/webp': '.webp',
+  'image/svg+xml': '.svg',
+  'image/bmp': '.bmp',
+};
+
 function extFromMime(mime: string): string {
-  const map: Record<string, string> = {
-    'image/png': '.png',
-    'image/jpeg': '.jpg',
-    'image/gif': '.gif',
-    'image/webp': '.webp',
-    'image/svg+xml': '.svg',
-    'image/bmp': '.bmp',
-  };
-  return map[mime] ?? '.png';
+  return MIME_EXT_BY_TYPE[mime] ?? '.png';
 }
 
 function extFromMimeFromUrl(url: string): string {
   const match = url.match(/^data:([^;,]+)/);
   return match ? extFromMime(match[1]) : '.png';
+}
+
+// v2 media parts: extension from mediaType first, then the filename, then a
+// sane default. Uses the same mime table as the data-url path.
+function extFromMediaPart(p: {
+  mediaType?: string;
+  filename?: string;
+}): string {
+  if (p.mediaType) {
+    const mimeExt = MIME_EXT_BY_TYPE[p.mediaType];
+    if (mimeExt) return mimeExt;
+  }
+  if (p.filename) {
+    const fileExt = extname(p.filename);
+    if (fileExt) return fileExt;
+  }
+  return '.png';
 }
 
 function sanitizeFilename(name: string): string {
@@ -551,24 +580,60 @@ export function processImageAttachments(args: {
     const savedImageParts = new Set<ImagePart>();
     for (const p of imageParts) {
       const url = p.url as string | undefined;
+      const mediaType = p.mediaType as string | undefined;
+      const data = p.data as string | undefined;
       const filename =
         (p.filename as string | undefined) ?? (p.name as string | undefined);
+      const sanitizedFilename = filename
+        ? sanitizeFilename(filename)
+        : undefined;
+      const baseName = sanitizedFilename
+        ? sanitizedFilename.replace(/\.[^.]+$/, '') || 'image'
+        : 'image';
+
+      // OpenCode v2 media parts carry raw base64 in `data` and their mime in
+      // `mediaType`; there is no data url to decode.
+      if (!url && data !== undefined) {
+        const decoded = Buffer.from(data, 'base64');
+        if (decoded.length === 0) continue;
+        const ext = extFromMediaPart({
+          mediaType,
+          filename: sanitizedFilename,
+        });
+        const effectiveName = `${baseName}-${ext}`;
+        const memoKey = mediaAttachmentMemoKey(
+          targetDir,
+          effectiveName,
+          mediaType ?? '',
+          decoded,
+        );
+        const recalled = recalledResolvedAttachment(memoKey);
+        if (recalled) {
+          savedPaths.push(recalled);
+          savedImageParts.add(p);
+          continue;
+        }
+        const hash = createHash('sha1')
+          .update(decoded)
+          .digest('hex')
+          .slice(0, 8);
+        const name = `${baseName}-${hash}${ext}`;
+        const filePath = writeUniqueFile(targetDir, name, decoded, log);
+        if (filePath) {
+          savedPaths.push(filePath);
+          savedImageParts.add(p);
+          rememberResolvedAttachment(memoKey, filePath);
+        }
+        continue;
+      }
+
       if (url) {
-        const sanitizedFilename = filename
-          ? sanitizeFilename(filename)
-          : undefined;
-        const baseName = sanitizedFilename
-          ? sanitizedFilename.replace(/\.[^.]+$/, '') || 'image'
-          : 'image';
         const ext = sanitizedFilename
           ? extname(sanitizedFilename) || extFromMimeFromUrl(url)
           : extFromMimeFromUrl(url);
         const effectiveName = `${baseName}-${ext}`;
-        const recalled = recalledResolvedAttachment(
-          targetDir,
-          url,
-          effectiveName,
-        );
+        const memoKey = urlAttachmentMemoKey(targetDir, url, effectiveName);
+        const recalled = recalledResolvedAttachment(memoKey);
         if (recalled) {
           savedPaths.push(recalled);
           savedImageParts.add(p);
@@ -585,7 +650,7 @@ export function processImageAttachments(args: {
           if (filePath) {
             savedPaths.push(filePath);
             savedImageParts.add(p);
-            rememberResolvedAttachment(targetDir, url, effectiveName, filePath);
+            rememberResolvedAttachment(memoKey, filePath);
           }
         }
       }

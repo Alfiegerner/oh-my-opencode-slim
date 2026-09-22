@@ -51,11 +51,14 @@ class AcpClient {
   private pending = new Map<number, Pending>();
   private chunks: string[] = [];
   private errors: string[] = [];
+  private progress = new Map<string, string>();
   private sessionId: string | undefined;
   private lastUpdate = Date.now();
   private authMethods: Array<Record<string, unknown>> = [];
   private active = false;
   private activeRequests = 0;
+  /** True once run() returned or the client was closed: late session/update arrivals are ignored. */
+  private settled = false;
 
   constructor(
     private name: string,
@@ -65,6 +68,12 @@ class AcpClient {
       title: string,
       metadata: Record<string, unknown>,
     ) => Promise<void>,
+    /**
+     * Live progress sink (tool part metadata). Called on every tool_call,
+     * tool_call_update, and plan session/update so the parent TUI can show
+     * what the external agent is doing while it works.
+     */
+    private report?: (title: string, metadata: Record<string, unknown>) => void,
   ) {
     this.child = spawn(config.command, config.args, {
       cwd,
@@ -110,9 +119,9 @@ class AcpClient {
     });
     await this.drain();
     this.active = false;
+    this.settled = true;
     return this.output();
   }
-
   private async newSession(): Promise<Json | undefined> {
     try {
       return await this.request('session/new', {
@@ -130,8 +139,8 @@ class AcpClient {
       });
     }
   }
-
   close(): void {
+    this.settled = true;
     if (this.active && this.sessionId && !this.child.killed) {
       this.notify('session/cancel', { sessionId: this.sessionId });
     }
@@ -243,13 +252,19 @@ class AcpClient {
       `Unsupported ACP client method: ${message.method}`,
     );
   }
-
   private handleNotification(message: RpcNotification): void {
-    if (message.method !== 'session/update') return;
+    if (message.method !== 'session/update' || this.settled) return;
     this.lastUpdate = Date.now();
     const update = message.params?.update;
     if (!isRecord(update)) return;
     collectText(update, this.chunks);
+    const rendered = trackProgress(update, this.progress);
+    if (!rendered) return;
+    try {
+      this.report?.(rendered.title, { progress: rendered.progress });
+    } catch {
+      // A host-side metadata failure must not poison the ACP loop.
+    }
   }
 
   private reply(id: number, result: Json): void {
@@ -335,6 +350,7 @@ export function createAcpRunTool(agents: AcpAgentsConfig = {}): ToolDefinition {
             metadata,
           });
         },
+        (title, metadata) => ctx.metadata({ title, metadata }),
       );
       const timeoutMs = args.timeout_ms ?? config.timeoutMs;
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -437,6 +453,80 @@ function collectText(update: Record<string, unknown>, chunks: string[]): void {
   if (update.sessionUpdate !== 'agent_message_chunk') return;
   const text = readText(update.delta) ?? readText(update.content);
   if (text) chunks.push(text);
+}
+
+const PROGRESS_GLYPHS: Record<string, string> = {
+  pending: '○',
+  in_progress: '▸',
+  completed: '✓',
+  failed: '✗',
+};
+/** Rolling progress cap: drop the oldest tracked call beyond this. */
+const PROGRESS_CAP = 40;
+/** How many recent progress lines the TUI metadata carries. */
+const PROGRESS_TAIL = 20;
+
+/**
+ * Fold one ACP session/update into the rolling progress log and render the
+ * latest view. tool_call/tool_call_update are keyed by toolCallId (later
+ * updates replace earlier state); plan replaces as a block. Returns the
+ * tail for the TUI plus its last line as a compact title.
+ */
+export function trackProgress(
+  update: Record<string, unknown>,
+  progress: Map<string, string>,
+): { title: string; progress: string } | undefined {
+  const kind = update.sessionUpdate;
+  let key: string | undefined;
+  let line: string | undefined;
+  if (kind === 'tool_call' || kind === 'tool_call_update') {
+    if (typeof update.toolCallId !== 'string') return undefined;
+    key = update.toolCallId;
+    const status = typeof update.status === 'string' ? update.status : '';
+    const glyph = PROGRESS_GLYPHS[status] ?? '·';
+    // tool_call_update may omit title (status-only): keep the human-readable
+    // label already rendered for this toolCallId instead of degrading to the
+    // opaque id.
+    const previousLine = progress.get(key);
+    const previousTitle = previousLine?.slice(previousLine.indexOf(' ') + 1);
+    const title =
+      typeof update.title === 'string' ? update.title : (previousTitle ?? key);
+    line = `${glyph} ${title}`;
+  } else if (kind === 'plan') {
+    const entries = Array.isArray(update.entries) ? update.entries : [];
+    const lines = entries
+      .filter(
+        (entry): entry is Record<string, unknown> & { content: string } =>
+          isRecord(entry) &&
+          typeof entry.content === 'string' &&
+          entry.content.length > 0,
+      )
+      .map((entry) => {
+        const status = typeof entry.status === 'string' ? entry.status : '';
+        const glyph = PROGRESS_GLYPHS[status] ?? '·';
+        return `${glyph} ${entry.content}`.trimEnd();
+      });
+    if (lines.length === 0) return undefined;
+    key = 'plan';
+    line = lines.join('\n');
+  }
+  if (!key || !line) return undefined;
+  if (!progress.has(key) && progress.size >= PROGRESS_CAP) {
+    const oldest = progress.keys().next().value;
+    if (oldest !== undefined) progress.delete(oldest);
+  }
+  // Re-set so an updated call lands at the newest tail position; otherwise
+  // a late completion of an old call stays outside the visible tail.
+  progress.delete(key);
+  progress.set(key, line);
+  const tail = [...progress.values()]
+    .join('\n')
+    .split('\n')
+    .slice(-PROGRESS_TAIL)
+    .join('\n');
+  const lastBreak = tail.lastIndexOf('\n');
+  const title = lastBreak === -1 ? tail : tail.slice(lastBreak + 1);
+  return { title, progress: tail };
 }
 
 function readText(value: unknown): string | undefined {

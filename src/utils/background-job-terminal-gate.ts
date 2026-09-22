@@ -202,7 +202,7 @@ function validHostTime(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
 
-/** Host `session.outcome` literals the gate treats as attributable
+/** Host terminal-outcome literals the gate treats as attributable
  * terminal outcomes. Intentionally a SUPERSET of the host schema's
  * emitted literals (packages/schema session.ts `Info.outcome`): the
  * extra `'cancelled'` is the plugin's stop-family fail-safe so a
@@ -218,6 +218,10 @@ export const ACCEPTED_HOST_OUTCOMES: readonly string[] = [
   'cancelled',
 ];
 
+function hostTerminalOutcome(info: Record<string, unknown>): unknown {
+  return info.idleOutcome ?? info.idle_outcome ?? info.outcome;
+}
+
 function attributableHostOutcome(
   response: unknown,
   bounds: {
@@ -230,7 +234,7 @@ function attributableHostOutcome(
     return undefined;
   const info = 'data' in response ? response.data : response;
   if (!isRecord(info)) return;
-  const outcome = info.outcome;
+  const outcome = hostTerminalOutcome(info);
   const idleAt = isRecord(info.time) ? info.time.idle : undefined;
   if (
     !bounds.clockComparable ||
@@ -260,7 +264,7 @@ function hostOutcomeRejectionReason(
   if (responseError(response) !== undefined) return 'host-error';
   const info = 'data' in response ? response.data : response;
   if (!isRecord(info)) return 'malformed-info';
-  const outcome = info.outcome;
+  const outcome = hostTerminalOutcome(info);
   const idleAt = isRecord(info.time) ? info.time.idle : undefined;
   if (!bounds.clockComparable) return 'clock-not-comparable';
   if (!validHostTime(idleAt)) return 'invalid-idle-time';
