@@ -201,6 +201,102 @@ describe('isFailoverError', () => {
     ).toBe(true);
   });
 
+  test('returns true for billing/quota rejections (xAI spending-limit)', () => {
+    // xAI billing surfaces as HTTP 400/402 with the structured billing code;
+    // deterministic for the same account, so the next model in the chain
+    // must be tried instead of failing the request.
+    expect(
+      isFailoverError(
+        'AI_APICallError: personal-team-blocked:spending-limit: You have run out of credits or need a Grok subscription. Add credits at https://grok.com/?_s=usage or upgrade at https://grok.com/supergrok.',
+      ),
+    ).toBe(true);
+    expect(
+      isFailoverError({
+        data: {
+          statusCode: 400,
+          message:
+            'personal-team-blocked:spending-limit: You have run out of credits or need a Grok subscription. Add credits at https://grok.com/?_s=usage or upgrade at https://grok.com/supergrok.',
+        },
+      }),
+    ).toBe(true);
+    // 402 Payment Required is the standard billing class: no pattern needed.
+    expect(
+      isFailoverError({
+        data: {
+          statusCode: 402,
+          message: 'payment required',
+        },
+      }),
+    ).toBe(true);
+    // Official xAI fixture: same billing family, different wording, code
+    // embedded in the body.
+    expect(
+      isFailoverError(
+        '{"code":429,"error":"You ran out of credits. [WKE=personal-team-blocked:spending-limit]"}',
+      ),
+    ).toBe(true);
+  });
+
+  test('returns true for Zhipu GLM quota exhaustion codes', () => {
+    // GLM surfaces quota/billing as 429 with a structured code in the JSON
+    // body; the Chinese wire variants and Anthropic-style type envelopes
+    // carry no English text, so the quoted code is the stable signature.
+    expect(
+      isFailoverError({
+        data: {
+          statusCode: 429,
+          responseBody:
+            '{"error":{"code":"1113","message":"余额不足或无可用资源包,请充值。"}}',
+        },
+      }),
+    ).toBe(true);
+    expect(
+      isFailoverError({
+        data: {
+          statusCode: 429,
+          responseBody:
+            '{"error":{"code":"1308","message":"已达到 5 小时的使用上限。您的限额将在 2026-05-09 20:42:25 重置。"}}',
+        },
+      }),
+    ).toBe(true);
+    expect(
+      isFailoverError({
+        data: {
+          statusCode: 429,
+          message:
+            'Your GLM Coding Plan package has expired and is temporarily unavailable. You can resume using it after renewing the subscription on the official website.',
+        },
+      }),
+    ).toBe(true);
+    expect(
+      isFailoverError({
+        message:
+          'Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-05-11 00:00:00',
+      }),
+    ).toBe(true);
+  });
+
+  test('returns false for ordinary wording that merely mentions credits', () => {
+    // Only the structured code or the exact billing wording match; ordinary
+    // errors mentioning "credits" stay hard errors.
+    expect(
+      isFailoverError({
+        message: 'how many credits does this request cost',
+      }),
+    ).toBe(false);
+  });
+
+  test('returns false for generic limit/expiry wording outside the quota family', () => {
+    // The GLM English patterns anchor to the provider wording; generic
+    // exhaustion or expiry phrases from unrelated failures stay hard errors.
+    expect(
+      isFailoverError({ message: 'file descriptor limit exhausted' }),
+    ).toBe(false);
+    expect(
+      isFailoverError({ message: 'TLS certificate package has expired' }),
+    ).toBe(false);
+  });
+
   test('returns false for generic flagged/policy wording without the moderation signature', () => {
     // Only the structured code or the exact provider wording match; ordinary
     // errors mentioning "flagged", "cybersecurity", or "policy" stay hard

@@ -82,6 +82,26 @@ const RETRYABLE_ERROR_PATTERNS = [
   /\bcontent_policy_violation\b/,
   /flagged for possible cybersecurity risk/i,
   /rejected as a result of our safety system/i,
+  // Billing/quota exhaustion (e.g. xAI "personal-team-blocked:spending-limit")
+  // arrives as HTTP 400/402 with a provider-specific billing code. It is
+  // deterministic for the same account — retrying the same model will fail
+  // again, but a different provider in the chain does not share the balance,
+  // so the next model should be tried. Match the structured code and the
+  // exact provider wording; do NOT match generic "credits"/"billing" words
+  // that can appear in ordinary error text.
+  /\bpersonal-team-blocked\b/,
+  /\bspending.?limit\b/i,
+  /\b(?:ran|run) out of credits\b/i,
+  // Zhipu GLM quota/billing (docs.z.ai error codes 1113/1308/1309/1310):
+  // the English messages already match the quota wording above, so the
+  // quoted JSON codes cover the Chinese wire variants and the Anthropic
+  // -style {"type":"1113"} envelopes where no English text survives.
+  /"1113"/,
+  /"1308"/,
+  /"1309"/,
+  /"1310"/,
+  /\bcoding plan package has expired\b/i,
+  /\b(?:weekly|monthly) limit exhausted\b/i,
 ];
 
 const OUTAGE_STATUS_CODES = new Set([500, 502, 503, 504]);
@@ -180,6 +200,7 @@ export function isFailoverError(error: unknown): boolean {
   if (
     statusCode === 429 ||
     statusCode === 401 ||
+    statusCode === 402 ||
     statusCode === 403 ||
     statusCode === 410 ||
     (statusCode !== undefined && OUTAGE_STATUS_CODES.has(statusCode))
