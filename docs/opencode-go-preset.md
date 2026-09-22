@@ -27,10 +27,8 @@ opencode models --refresh
 ## Switch at Runtime
 
 If both presets are already in your config, switch from inside OpenCode:
-
-```text
-/preset opencode-go
-```
+- **v2 hosts:** type `/preset opencode-go` to apply directly (reload still required)
+- **v1 hosts:** open `/preset` from autocomplete and pick Apply
 
 See [Preset Switching](preset-switching.md) for the full runtime switching
 workflow. If you originally installed with the default OpenAI preset, also add
