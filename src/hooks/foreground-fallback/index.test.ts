@@ -282,6 +282,17 @@ describe('isFailoverError', () => {
     ).toBe(false);
   });
 
+  test('returns false for generic limit/expiry wording outside the quota family', () => {
+    // The GLM English patterns anchor to the provider wording; generic
+    // exhaustion or expiry phrases from unrelated failures stay hard errors.
+    expect(
+      isFailoverError({ message: 'file descriptor limit exhausted' }),
+    ).toBe(false);
+    expect(
+      isFailoverError({ message: 'TLS certificate package has expired' }),
+    ).toBe(false);
+  });
+
   test('returns false for generic flagged/policy wording without the moderation signature', () => {
     // Only the structured code or the exact provider wording match; ordinary
     // errors mentioning "flagged", "cybersecurity", or "policy" stay hard

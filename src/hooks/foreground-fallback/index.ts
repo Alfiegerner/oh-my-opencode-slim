@@ -100,8 +100,8 @@ const RETRYABLE_ERROR_PATTERNS = [
   /"1308"/,
   /"1309"/,
   /"1310"/,
-  /package has expired/i,
-  /limit.?exhausted/i,
+  /\bcoding plan package has expired\b/i,
+  /\b(?:weekly|monthly) limit exhausted\b/i,
 ];
 
 const OUTAGE_STATUS_CODES = new Set([500, 502, 503, 504]);
