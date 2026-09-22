@@ -28,7 +28,7 @@ function makePrompt(): ReturnType<typeof mock> {
 function makeSession(prompt: ReturnType<typeof mock>) {
   return {
     get: mock(async () => ({
-      data: { model: { providerID: 'openai', id: 'gpt-5.6' } },
+      data: { model: { providerID: 'openai', id: 'gpt-6' } },
     })),
     prompt,
   };
@@ -67,7 +67,7 @@ describe('task_message', () => {
       path: { id: 'ses_child1' },
       body: {
         agent: 'fixer',
-        model: { providerID: 'openai', modelID: 'gpt-5.6' },
+        model: { providerID: 'openai', modelID: 'gpt-6' },
         variant: 'default',
         noReply: true,
         parts: [{ type: 'text', text: 'Please continue.' }],
@@ -110,7 +110,7 @@ describe('task_message', () => {
         data: {
           model: {
             providerID: 'openai',
-            id: 'gpt-5.6',
+            id: 'gpt-6',
             variant: 'high',
           },
         },
@@ -133,7 +133,7 @@ describe('task_message', () => {
       path: { id: 'ses_child1' },
       body: {
         agent: 'fixer',
-        model: { providerID: 'openai', modelID: 'gpt-5.6' },
+        model: { providerID: 'openai', modelID: 'gpt-6' },
         variant: 'high',
         noReply: true,
         parts: [{ type: 'text', text: 'Continue with the fix.' }],
@@ -148,7 +148,7 @@ describe('task_message', () => {
     const prompt = makePrompt();
     const get = mock(async () => ({
       data: {
-        model: { providerID: 'openai', id: 'gpt-5.6' },
+        model: { providerID: 'openai', id: 'gpt-6' },
         variant: 'medium',
       },
     }));
@@ -161,7 +161,7 @@ describe('task_message', () => {
 
     expect(prompt.mock.calls[0]?.[0].body).toEqual({
       agent: 'fixer',
-      model: { providerID: 'openai', modelID: 'gpt-5.6' },
+      model: { providerID: 'openai', modelID: 'gpt-6' },
       variant: 'medium',
       noReply: true,
       parts: [{ type: 'text', text: 'Continue with the fix.' }],
@@ -175,7 +175,7 @@ describe('task_message', () => {
     client = {
       session: {
         get: mock(async () => ({
-          data: { model: { providerID: 'openai', id: 'gpt-5.6' } },
+          data: { model: { providerID: 'openai', id: 'gpt-6' } },
         })),
         prompt,
       },
@@ -188,7 +188,7 @@ describe('task_message', () => {
 
     expect(prompt.mock.calls[0]?.[0].body).toEqual({
       agent: 'fixer',
-      model: { providerID: 'openai', modelID: 'gpt-5.6' },
+      model: { providerID: 'openai', modelID: 'gpt-6' },
       variant: 'default',
       noReply: true,
       parts: [{ type: 'text', text: 'Continue with the fix.' }],
@@ -380,7 +380,7 @@ describe('task_message', () => {
       board.updateStatus({ taskID: 'ses_child1', state: 'completed' });
       return {
         data: {
-          model: { providerID: 'openai', id: 'gpt-5.6' },
+          model: { providerID: 'openai', id: 'gpt-6' },
           variant: 'high',
         },
       };
@@ -573,7 +573,7 @@ describe('task_message', () => {
     const prompt = makePrompt();
     const session = {
       get: async () => ({
-        data: { model: { providerID: 'openai', id: 'gpt-5.6' } },
+        data: { model: { providerID: 'openai', id: 'gpt-6' } },
       }),
       get prompt() {
         board.drop('ses_child1');

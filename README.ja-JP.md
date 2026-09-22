@@ -40,7 +40,7 @@ oh-my-opencode-slim は OpenCode 向けのエージェントオーケストレ�
 - **[コードインテリジェンスツール](docs/tools.md)** - 25 言語対応の LSP、AST 対応検索、ドキュメント・GitHub コード検索用の組み込み MCP を提供します。
 - **[完全にカスタマイズ可能](docs/configuration.md)** - カスタムエージェント、プロンプト上書き、エージェントごとのスキル/MCP 権限、[プロジェクトローカルのカスタマイズ](docs/project-local-customization.md)に対応します。
 
-### OpenAI GPT-5.6
+### OpenAI GPT-6
 
 <p align="center">
   <img src="img/openai-gpt-5-6-pantheon.jpeg" alt="OpenAI GPT-5.6 パンテオン：Terra、Sol、Luna" width="100%">
@@ -153,12 +153,12 @@ bun run build
   "preset": "openai",
   "presets": {
     "openai": {
-      "orchestrator": { "model": "openai/gpt-5.6-terra", "variant": "high", "skills": ["*"], "mcps": ["*", "!context7"] },
-      "oracle": { "model": "openai/gpt-5.6-sol", "variant": "high", "skills": ["simplify"], "mcps": [] },
-      "librarian": { "model": "openai/gpt-5.6-luna", "variant": "low", "skills": [], "mcps": ["context7", "gh_grep"] },
-      "explorer": { "model": "openai/gpt-5.6-luna", "variant": "low", "skills": [], "mcps": [] },
-      "designer": { "model": "openai/gpt-5.6-luna", "variant": "medium", "skills": [], "mcps": [] },
-      "fixer": { "model": "openai/gpt-5.6-luna", "variant": "high", "skills": [], "mcps": [] }
+      "orchestrator": { "model": "openai/gpt-6-sol", "variant": "high", "skills": ["*"], "mcps": ["*", "!context7"] },
+      "oracle": { "model": "openai/gpt-6-astra", "variant": "high", "skills": ["simplify"], "mcps": [] },
+      "librarian": { "model": "openai/gpt-6-luna", "variant": "low", "skills": [], "mcps": ["context7", "gh_grep"] },
+      "explorer": { "model": "openai/gpt-6-luna", "variant": "low", "skills": [], "mcps": [] },
+      "designer": { "model": "openai/gpt-6-luna", "variant": "medium", "skills": [], "mcps": [] },
+      "fixer": { "model": "openai/gpt-6-luna", "variant": "high", "skills": [], "mcps": [] }
     },
     "opencode-go": {
       "orchestrator": { "model": "opencode-go/minimax-m3", "variant": "thinking" },
@@ -236,12 +236,12 @@ ping all agents
   </tr>
   <tr>
     <td colspan="2">
-      <b>Default Model:</b> <code>openai/gpt-5.6-terra (medium)</code>
+      <b>Default Model:</b> <code>openai/gpt-6-sol (medium)</code>
     </td>
   </tr>
   <tr>
     <td colspan="2">
-      <b>Recommended Models:</b> <code>openai/gpt-5.6-terra (medium)</code> <code>anthropic/claude-fable-5</code> <code>anthropic/claude-opus-4-8</code>
+      <b>Recommended Models:</b> <code>openai/gpt-6-sol (medium)</code> <code>anthropic/claude-fable-5</code> <code>anthropic/claude-opus-4-8</code>
     </td>
   </tr>
   <tr>
@@ -277,7 +277,7 @@ ping all agents
   </tr>
   <tr>
     <td colspan="2">
-      <b>Default Model:</b> <code>openai/gpt-5.6-luna</code>
+      <b>Default Model:</b> <code>openai/gpt-6-luna</code>
     </td>
   </tr>
   <tr>
@@ -318,12 +318,12 @@ ping all agents
   </tr>
   <tr>
     <td colspan="2">
-      <b>Default Model:</b> <code>openai/gpt-5.6-sol (high)</code>
+      <b>Default Model:</b> <code>openai/gpt-6-astra (high)</code>
     </td>
   </tr>
   <tr>
     <td colspan="2">
-      <b>Recommended Models:</b> <code>openai/gpt-5.6-sol (xhigh)</code> <code>anthropic/claude-fable-5</code> <code>anthropic/claude-opus-4-8 (xhigh)</code>
+      <b>Recommended Models:</b> <code>openai/gpt-6-astra (xhigh)</code> <code>anthropic/claude-fable-5</code> <code>anthropic/claude-opus-4-8 (xhigh)</code>
     </td>
   </tr>
   <tr>
@@ -408,7 +408,7 @@ ping all agents
   </tr>
   <tr>
     <td colspan="2">
-      <b>Default Model:</b> <code>openai/gpt-5.6-luna</code>
+      <b>Default Model:</b> <code>openai/gpt-6-luna</code>
     </td>
   </tr>
   <tr>
@@ -449,7 +449,7 @@ ping all agents
   </tr>
   <tr>
     <td colspan="2">
-      <b>Default Model:</b> <code>openai/gpt-5.6-luna</code>
+      <b>Default Model:</b> <code>openai/gpt-6-luna</code>
     </td>
   </tr>
   <tr>
@@ -490,12 +490,12 @@ ping all agents
   </tr>
   <tr>
     <td colspan="2">
-      <b>Default Model:</b> <code>openai/gpt-5.6-luna (medium)</code>
+      <b>Default Model:</b> <code>openai/gpt-6-luna (medium)</code>
     </td>
   </tr>
   <tr>
     <td colspan="2">
-      <b>Recommended Models:</b> <code>openai/gpt-5.6-luna (medium)</code> <code>anthropic/claude-sonnet-4-6</code>
+      <b>Recommended Models:</b> <code>openai/gpt-6-luna (medium)</code> <code>anthropic/claude-sonnet-4-6</code>
     </td>
   </tr>
   <tr>
@@ -537,7 +537,7 @@ ping all agents
   </tr>
   <tr>
     <td colspan="2">
-      <b>Default Model:</b> <code>openai/gpt-5.6-luna</code> - <i>有効化するにはビジョン対応モデルを設定してください</i>
+      <b>Default Model:</b> <code>openai/gpt-6-luna</code> - <i>有効化するにはビジョン対応モデルを設定してください</i>
     </td>
   </tr>
   <tr>

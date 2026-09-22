@@ -72,11 +72,11 @@ a raw JSON prompt for provider-specific settings (e.g.
   "presets": {
     "cheap": {
       "orchestrator": { "model": "anthropic/claude-3.5-haiku" },
-      "explorer": { "model": "openai/gpt-5.6-luna" },
+      "explorer": { "model": "openai/gpt-6-luna" },
       "oracle": { "model": "anthropic/claude-sonnet-4-6" }
     },
     "powerful": {
-      "orchestrator": { "model": "openai/gpt-5.6" },
+      "orchestrator": { "model": "openai/gpt-6" },
       "oracle": { "model": "anthropic/claude-opus-4-6" },
       "librarian": { "model": "anthropic/claude-sonnet-4-6" }
     },

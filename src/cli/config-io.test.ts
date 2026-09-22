@@ -669,10 +669,7 @@ describe('config-io', () => {
         presets: {
           dev: {
             orchestrator: {
-              model: [
-                'openai/gpt-5.6-luna',
-                { id: 'anthropic/claude-opus-4-6' },
-              ],
+              model: ['openai/gpt-6-luna', { id: 'anthropic/claude-opus-4-6' }],
             },
           },
         },
