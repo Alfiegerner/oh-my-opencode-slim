@@ -38,6 +38,7 @@ function createMockClient(overrides?: {
   abortImpl?: () => Promise<unknown>;
   includePromptAsync?: boolean;
   messagesData?: unknown[];
+  messagesImpl?: (args: unknown) => Promise<unknown>;
   postImpl?: (args: unknown) => Promise<unknown>;
   includePostClient?: boolean;
 }) {
@@ -49,11 +50,14 @@ function createMockClient(overrides?: {
     if (overrides?.abortImpl) return overrides.abortImpl();
     return {};
   });
-  const messages = mock(async () => ({
-    data: overrides?.messagesData ?? [
-      { info: { role: 'user' }, parts: [{ type: 'text', text: 'hello' }] },
-    ],
-  }));
+  const messages = mock(async (args: unknown) => {
+    if (overrides?.messagesImpl) return overrides.messagesImpl(args);
+    return {
+      data: overrides?.messagesData ?? [
+        { info: { role: 'user' }, parts: [{ type: 'text', text: 'hello' }] },
+      ],
+    };
+  });
   const post = mock(async (args: unknown) => {
     if (overrides?.postImpl) return overrides.postImpl(args);
     return true;
@@ -736,6 +740,144 @@ describe('ForegroundFallbackManager session.error', () => {
       { parts: Array<{ text?: string }> },
     ];
     expect(call[0].body.parts[0]?.text).toBe('real prompt');
+  });
+
+  test('reads only the transcript tail for the replay and issues no full read', async () => {
+    // The replay needs just the last replayable user message; long-lived
+    // sessions serve the full listing in the hundreds of MB (measured
+    // 463 MB / 11.7 s on a live months-old session), so the hot path
+    // must stay O(tail).
+    ({ mocks } = createMockClient({
+      messagesData: [
+        {
+          info: { role: 'user' },
+          parts: [{ type: 'text', text: 'tail prompt' }],
+        },
+      ],
+    }));
+    mgr = new ForegroundFallbackManager(makeChains(), true, {
+      directory: '/test',
+    } as any);
+
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID: 'sess-1',
+          providerID: 'anthropic',
+          modelID: 'claude-opus-4-5',
+          role: 'assistant',
+        },
+      },
+    });
+    await mgr.handleEvent({
+      type: 'session.error',
+      properties: {
+        sessionID: 'sess-1',
+        error: { message: 'Rate limit exceeded' },
+      },
+    });
+
+    expect(mocks.messages).toHaveBeenCalledTimes(1);
+    const listCall = mocks.messages.mock.calls[0] as [
+      { query?: { limit?: number } },
+    ];
+    expect(listCall[0]?.query?.limit).toBe(50);
+    const promptCall = mocks.promptAsync.mock.calls[0] as [
+      { parts: Array<{ text?: string }> },
+    ];
+    expect(promptCall[0].body.parts[0]?.text).toBe('tail prompt');
+  });
+
+  test('falls back to the full transcript read when the tail has no replayable user message', async () => {
+    // A host that ignores `limit` (or an exotic transcript whose tail
+    // carries no user message) must still fail over: pay the full read
+    // rather than skip the replay.
+    let reads = 0;
+    ({ mocks } = createMockClient({
+      messagesImpl: async () => {
+        reads += 1;
+        if (reads === 1) {
+          return { data: [{ info: { role: 'assistant' }, parts: [] }] };
+        }
+        return {
+          data: [
+            {
+              info: { role: 'user' },
+              parts: [{ type: 'text', text: 'deep prompt' }],
+            },
+          ],
+        };
+      },
+    }));
+    mgr = new ForegroundFallbackManager(makeChains(), true, {
+      directory: '/test',
+    } as any);
+
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID: 'sess-1',
+          providerID: 'anthropic',
+          modelID: 'claude-opus-4-5',
+          role: 'assistant',
+        },
+      },
+    });
+    await mgr.handleEvent({
+      type: 'session.error',
+      properties: {
+        sessionID: 'sess-1',
+        error: { message: 'Rate limit exceeded' },
+      },
+    });
+
+    expect(reads).toBe(2);
+    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+    const promptCall = mocks.promptAsync.mock.calls[0] as [
+      { parts: Array<{ text?: string }> },
+    ];
+    expect(promptCall[0].body.parts[0]?.text).toBe('deep prompt');
+  });
+
+  test('keeps both errors when the tail and the full transcript reads fail', async () => {
+    // A dual transcript-read incident must surface the tail error too:
+    // the full-read error aggregates after it instead of overwriting it.
+    let reads = 0;
+    ({ mocks } = createMockClient({
+      messagesImpl: async () => {
+        reads += 1;
+        return reads === 1
+          ? { error: { message: 'tail down' }, data: [] }
+          : { error: { message: 'full down' }, data: [] };
+      },
+    }));
+    mgr = new ForegroundFallbackManager(makeChains(), true, {
+      directory: '/test',
+    } as any);
+
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID: 'sess-1',
+          providerID: 'anthropic',
+          modelID: 'claude-opus-4-5',
+          role: 'assistant',
+        },
+      },
+    });
+    await mgr.handleEvent({
+      type: 'session.error',
+      properties: {
+        sessionID: 'sess-1',
+        error: { message: 'Rate limit exceeded' },
+      },
+    });
+
+    expect(reads).toBe(2);
+    expect(mocks.promptAsync).not.toHaveBeenCalled();
   });
 
   function handoffMock() {

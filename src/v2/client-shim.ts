@@ -353,11 +353,34 @@ export function buildPluginInput(
       // above).
       ...(s.context
         ? {
-            messages: async (args: Record<string, unknown>) => ({
-              data: (
-                (await s.context?.({ sessionID: sessionIDOf(args) })) ?? []
-              ).map(toV1Message),
-            }),
+            messages: async (args: Record<string, unknown>) => {
+              const query = isRecord(args?.query) ? args.query : undefined;
+              const limit = query?.limit;
+              // Bounded tail read (foreground-fallback replay): the v2
+              // messages route paginates natively, so `limit` maps to the
+              // LAST N projected messages newest-first, reversed back to
+              // the v1 ascending shape. Hosts without the route keep the
+              // full context read.
+              if (
+                typeof limit === 'number' &&
+                Number.isFinite(limit) &&
+                limit > 0 &&
+                typeof s.messages === 'function'
+              ) {
+                const page = (await s.messages({
+                  sessionID: sessionIDOf(args),
+                  limit,
+                  order: 'desc',
+                })) as { data?: Array<Record<string, unknown>> } | undefined;
+                const items = Array.isArray(page?.data) ? page.data : [];
+                return { data: items.slice().reverse().map(toV1Message) };
+              }
+              return {
+                data: (
+                  (await s.context?.({ sessionID: sessionIDOf(args) })) ?? []
+                ).map(toV1Message),
+              };
+            },
           }
         : {}),
       // `status` is intentionally OMITTED: v2 has no equivalent of the v1

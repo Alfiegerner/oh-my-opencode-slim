@@ -77,6 +77,85 @@ describe('v2 client shim delegation', () => {
     ]);
   });
 
+  test('messages forwards query.limit as a bounded v2 page in ascending order', async () => {
+    // The bounded tail read (foreground-fallback replay) must hit the
+    // paginated v2 route, not the full context read, or long-lived v2
+    // sessions keep the latency this path exists to avoid.
+    const contextCalls: unknown[] = [];
+    const messageCalls: unknown[] = [];
+    const input = buildPluginInput(
+      makeCtx({
+        context: async (i: { sessionID: string }) => {
+          contextCalls.push(i);
+          return [];
+        },
+        messages: async (i: {
+          sessionID: string;
+          limit?: number;
+          order?: string;
+        }) => {
+          messageCalls.push(i);
+          return {
+            data: [
+              {
+                id: 'm2',
+                role: 'user',
+                content: [{ type: 'text', text: 'newest' }],
+              },
+              {
+                id: 'm1',
+                role: 'user',
+                content: [{ type: 'text', text: 'older' }],
+              },
+            ],
+          };
+        },
+      } as never),
+    );
+    const res = await (
+      input.client as {
+        session: {
+          messages: (a: unknown) => Promise<{ data: unknown[] }>;
+        };
+      }
+    ).session.messages({ path: { id: 'ses_1' }, query: { limit: 50 } });
+    expect(messageCalls).toEqual([
+      { sessionID: 'ses_1', limit: 50, order: 'desc' },
+    ]);
+    expect(contextCalls).toEqual([]);
+    expect(
+      res.data.map((m) => (m as { info: { id: string } }).info.id),
+    ).toEqual(['m1', 'm2']);
+  });
+
+  test('messages without query.limit keeps the full context read', async () => {
+    const messageCalls: unknown[] = [];
+    const input = buildPluginInput(
+      makeCtx({
+        context: async () => [
+          {
+            id: 'm1',
+            role: 'user',
+            content: [{ type: 'text', text: 'hello' }],
+          },
+        ],
+        messages: async (i: unknown) => {
+          messageCalls.push(i);
+          return { data: [] };
+        },
+      } as never),
+    );
+    const res = await (
+      input.client as {
+        session: {
+          messages: (a: unknown) => Promise<{ data: unknown[] }>;
+        };
+      }
+    ).session.messages({ path: { id: 'ses_1' } });
+    expect(messageCalls).toEqual([]);
+    expect(res.data).toHaveLength(1);
+  });
+
   test('promptAsync switches model then steers when body.model present', async () => {
     const seq: Array<{ m: string; i: unknown }> = [];
     const input = buildPluginInput(

@@ -277,6 +277,10 @@ const REPROMPT_DELAY_MS = 500;
  *  stall the fallback abort below, or the broken session stays busy and
  *  the fallback never arrives — a variant of the bug being fixed. */
 const PROMOTE_WAITER_TIMEOUT_MS = 2_000;
+/** Transcript tail size for the fallback replay read: the replay only needs
+ *  the last replayable user message plus the trailing message id (handoff
+ *  baseline), never the full history. */
+const FALLBACK_REPLAY_TAIL_MESSAGES = 50;
 const FALLBACK_IN_PROGRESS_KEY = Symbol.for(
   'oh-my-opencode-slim.foreground-fallback.in-progress',
 );
@@ -1111,8 +1115,17 @@ export class ForegroundFallbackManager {
       // wildcard.
       const preparedGeneration = this.readBackgroundGeneration?.(sessionID);
 
-      const result = await session.messages({
+      // Read only the transcript tail: the replay needs the last replayable
+      // user message and the trailing message id (handoff baseline), not the
+      // whole history. Long-lived sessions serve the full listing in the
+      // hundreds of megabytes (measured 463 MB / 11.7 s on a live
+      // months-old orchestrator session), which delayed every failover by
+      // ~20 s. The `limit` query keeps the hot path O(tail); the full read
+      // remains as a fallback for hosts that ignore it or transcripts whose
+      // tail carries no replayable user message.
+      const tailResult = await session.messages({
         path: { id: sessionID },
+        query: { limit: FALLBACK_REPLAY_TAIL_MESSAGES },
       });
       // Transcript read suspended across a dispose(): everything from
       // here on — handoff arming, replay prompt, switch claim — would
@@ -1123,13 +1136,29 @@ export class ForegroundFallbackManager {
       // undefined at runtime (OpenCode violates its own declared type), and
       // v2 messages carry `type`/`text` instead of `info`/`parts`, so guard
       // each entry instead of dereferencing a fixed shape.
-      const messages = (result.data ?? []) as unknown[];
+      let messages = (tailResult.data ?? []) as unknown[];
+      let requestError: unknown = tailResult.error ?? undefined;
+      if (!messages.some((message) => isReplayableUserMessage(message))) {
+        const fullResult = await session.messages({
+          path: { id: sessionID },
+        });
+        if (this.abandonedByDispose(sessionID)) return;
+        messages = (fullResult.data ?? []) as unknown[];
+        // Preserve BOTH failures: when the tail and the full read fail
+        // differently, the diagnostic log must surface the first error
+        // too instead of letting the full-read error overwrite it.
+        const fullError = fullResult.error ?? undefined;
+        if (fullError !== undefined) {
+          requestError =
+            requestError === undefined ? fullError : [requestError, fullError];
+        }
+      }
       const lastUser = [...messages].reverse().find(isReplayableUserMessage);
       if (!lastUser) {
         log('[foreground-fallback] no user message found', {
           sessionID,
           messageCount: messages.length,
-          requestError: result.error ?? undefined,
+          requestError,
         });
         return;
       }

@@ -264,6 +264,15 @@ export interface V2Context {
     context?(input: {
       sessionID: string;
     }): Promise<Array<Record<string, unknown>>>;
+    /** v2 session.messages — paginated projected messages (runtime-probed).
+     * `order: 'desc'` + `limit` yields the LAST N items newest-first;
+     * callers reverse for the v1 ascending shape. */
+    messages?(input: {
+      sessionID: string;
+      limit?: number;
+      order?: 'asc' | 'desc';
+      cursor?: string;
+    }): Promise<unknown>;
     /** v2 session.prompt subset used here; resume:false admits without waking. */
     prompt?(input: {
       sessionID: string;
