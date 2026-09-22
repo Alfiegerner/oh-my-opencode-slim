@@ -36,8 +36,8 @@ afterEach(() => {
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
-const LUNA = { agentName: 'explorer', model: 'openai/gpt-5.6-luna' } as const;
-const GPT = { agentName: 'explorer', model: 'openai/gpt-5.6' } as const;
+const LUNA = { agentName: 'explorer', model: 'openai/gpt-6-luna' } as const;
+const GPT = { agentName: 'explorer', model: 'openai/gpt-6' } as const;
 
 function recordLuna(): void {
   recordTuiAgentModel(LUNA, tempDir);
@@ -83,8 +83,8 @@ describe('tui-state persistence', () => {
     recordTuiAgentModels(
       {
         agentModels: {
-          explorer: 'openai/gpt-5.6-luna',
-          fixer: 'openai/gpt-5.6-luna',
+          explorer: 'openai/gpt-6-luna',
+          fixer: 'openai/gpt-6-luna',
         },
         agentVariants: {
           explorer: 'low',
@@ -97,8 +97,8 @@ describe('tui-state persistence', () => {
     const snapshot = readTuiSnapshot(tempDir);
 
     expect(snapshot.agentModels).toEqual({
-      explorer: 'openai/gpt-5.6-luna',
-      fixer: 'openai/gpt-5.6-luna',
+      explorer: 'openai/gpt-6-luna',
+      fixer: 'openai/gpt-6-luna',
     });
     expect(snapshot.agentVariants).toEqual({
       explorer: 'low',
@@ -111,7 +111,7 @@ describe('tui-state persistence', () => {
       {
         agentModels: {
           orchestrator: 'default',
-          explorer: 'openai/gpt-5.6-luna',
+          explorer: 'openai/gpt-6-luna',
         },
       },
       tempDir,
@@ -120,14 +120,14 @@ describe('tui-state persistence', () => {
     recordTuiAgentModel(
       {
         agentName: 'orchestrator',
-        model: 'openai/gpt-5.6',
+        model: 'openai/gpt-6',
       },
       tempDir,
     );
 
     expect(readTuiSnapshot(tempDir).agentModels).toEqual({
-      orchestrator: 'openai/gpt-5.6',
-      explorer: 'openai/gpt-5.6-luna',
+      orchestrator: 'openai/gpt-6',
+      explorer: 'openai/gpt-6-luna',
     });
   });
 
@@ -136,7 +136,7 @@ describe('tui-state persistence', () => {
       {
         agentModels: {
           orchestrator: 'default',
-          explorer: 'openai/gpt-5.6-luna',
+          explorer: 'openai/gpt-6-luna',
         },
         agentVariants: {
           explorer: 'low',
@@ -148,7 +148,7 @@ describe('tui-state persistence', () => {
     recordTuiAgentModel(
       {
         agentName: 'orchestrator',
-        model: 'openai/gpt-5.6',
+        model: 'openai/gpt-6',
         variant: 'high',
       },
       tempDir,
@@ -301,12 +301,12 @@ describe('tui-state persistence', () => {
     fs.utimesSync(lockPath, staleTime, staleTime);
 
     recordTuiAgentModel(
-      { agentName: 'explorer', model: 'openai/gpt-5.6-luna' },
+      { agentName: 'explorer', model: 'openai/gpt-6-luna' },
       tempDir,
     );
 
     expect(readTuiSnapshot(tempDir).agentModels.explorer).toBe(
-      'openai/gpt-5.6-luna',
+      'openai/gpt-6-luna',
     );
     expect(fs.existsSync(lockPath)).toBe(false);
   });
@@ -394,7 +394,7 @@ describe('tui-state persistence', () => {
 
   test('startup sweep keeps live own-PID activity and still drops dead residue', () => {
     recordTuiAgentModels(
-      { agentModels: { explorer: 'openai/gpt-5.6-luna' } },
+      { agentModels: { explorer: 'openai/gpt-6-luna' } },
       tempDir,
     );
     recordTuiAgentActivity(
@@ -413,7 +413,7 @@ describe('tui-state persistence', () => {
     expect(snapshot.activeSessions).toEqual({ 'explorer-a': 'explorer' });
     expect(snapshot.sessionDetails['explorer-a']?.alias).toBe('exp-1');
     expect(snapshot.agentModels).toEqual({
-      explorer: 'openai/gpt-5.6-luna',
+      explorer: 'openai/gpt-6-luna',
     });
   });
 
@@ -425,7 +425,7 @@ describe('tui-state persistence', () => {
       JSON.stringify({
         version: 1,
         updatedAt: Date.now(),
-        agentModels: { explorer: 'openai/gpt-5.6-luna' },
+        agentModels: { explorer: 'openai/gpt-6-luna' },
         configInvalid: true,
         configInvalidByProject: { old: true },
       }),
@@ -433,7 +433,7 @@ describe('tui-state persistence', () => {
 
     const snapshot = readTuiSnapshot(tempDir);
     expect(snapshot.agentModels).toEqual({
-      explorer: 'openai/gpt-5.6-luna',
+      explorer: 'openai/gpt-6-luna',
     });
     expect(snapshot.agentVariants).toEqual({});
     expect(snapshot.activeSessions).toEqual({});
@@ -447,7 +447,7 @@ describe('tui-state persistence', () => {
       JSON.stringify({
         version: 1,
         updatedAt: Date.now(),
-        agentModels: { explorer: 'openai/gpt-5.6-luna' },
+        agentModels: { explorer: 'openai/gpt-6-luna' },
         // Pre-dot snapshot: no reusableByAgent key at all.
       }),
     );
@@ -455,7 +455,7 @@ describe('tui-state persistence', () => {
     const snapshot = readTuiSnapshot(tempDir);
     expect(snapshot.reusableByAgent).toEqual({});
     // Sibling sections still parse.
-    expect(snapshot.agentModels.explorer).toBe('openai/gpt-5.6-luna');
+    expect(snapshot.agentModels.explorer).toBe('openai/gpt-6-luna');
   });
 
   test('parseSnapshot restores a well-formed reusableByAgent section', () => {
@@ -692,7 +692,7 @@ describe('tui-state persistence', () => {
 
   test('keeps the final file intact when the atomic rename fails', async () => {
     recordTuiAgentModel(
-      { agentName: 'explorer', model: 'openai/gpt-5.6-luna' },
+      { agentName: 'explorer', model: 'openai/gpt-6-luna' },
       tempDir,
     );
 
@@ -703,7 +703,7 @@ describe('tui-state persistence', () => {
 
     try {
       recordTuiAgentModel(
-        { agentName: 'explorer', model: 'openai/gpt-5.6' },
+        { agentName: 'explorer', model: 'openai/gpt-6' },
         tempDir,
       );
     } finally {
@@ -712,7 +712,7 @@ describe('tui-state persistence', () => {
 
     // The previously written state must still be readable in full.
     expect(readTuiSnapshot(tempDir).agentModels).toEqual({
-      explorer: 'openai/gpt-5.6-luna',
+      explorer: 'openai/gpt-6-luna',
     });
 
     const stateDir = path.dirname(getTuiStatePath(tempDir));
@@ -723,7 +723,7 @@ describe('tui-state persistence', () => {
 
   test('leaves no temp files behind on the happy path', () => {
     recordTuiAgentModel(
-      { agentName: 'explorer', model: 'openai/gpt-5.6-luna' },
+      { agentName: 'explorer', model: 'openai/gpt-6-luna' },
       tempDir,
     );
 
@@ -741,12 +741,12 @@ describe('sessionDetails (clickable sidebar projection)', () => {
         sessionID: 'ora-1-ses',
         agentName: 'oracle',
         active: true,
-        details: { alias: 'ora-1', model: 'openai/gpt-5.6', status: 'busy' },
+        details: { alias: 'ora-1', model: 'openai/gpt-6', status: 'busy' },
       },
       tempDir,
     );
     expect(readTuiSnapshot(tempDir).sessionDetails).toEqual({
-      'ora-1-ses': { alias: 'ora-1', model: 'openai/gpt-5.6', status: 'busy' },
+      'ora-1-ses': { alias: 'ora-1', model: 'openai/gpt-6', status: 'busy' },
     });
   });
 
@@ -778,9 +778,9 @@ describe('sessionDetails (clickable sidebar projection)', () => {
       tempDir,
     );
     updateTuiSessionDetails('live', { alias: 'ora-1' }, tempDir);
-    updateTuiSessionDetails('live', { model: 'openai/gpt-5.6' }, tempDir);
+    updateTuiSessionDetails('live', { model: 'openai/gpt-6' }, tempDir);
     expect(readTuiSnapshot(tempDir).sessionDetails).toEqual({
-      live: { alias: 'ora-1', model: 'openai/gpt-5.6' },
+      live: { alias: 'ora-1', model: 'openai/gpt-6' },
     });
   });
 
@@ -790,13 +790,13 @@ describe('sessionDetails (clickable sidebar projection)', () => {
         sessionID: 'live',
         agentName: 'oracle',
         active: true,
-        details: { alias: 'ora-1', model: 'openai/gpt-5.6', status: 'busy' },
+        details: { alias: 'ora-1', model: 'openai/gpt-6', status: 'busy' },
       },
       tempDir,
     );
     clearTuiSessionAlias('live', tempDir);
     expect(readTuiSnapshot(tempDir).sessionDetails).toEqual({
-      live: { model: 'openai/gpt-5.6', status: 'busy' },
+      live: { model: 'openai/gpt-6', status: 'busy' },
     });
     // Alias-less entry with no other fields is removed entirely.
     recordTuiAgentActivity(
@@ -871,11 +871,11 @@ describe('sessionDetails (clickable sidebar projection)', () => {
       `${JSON.stringify({
         version: 1,
         updatedAt: 1,
-        agentModels: { oracle: 'openai/gpt-5.6' },
+        agentModels: { oracle: 'openai/gpt-6' },
       })}\n`,
     );
     const parsed = readTuiSnapshot(tempDir);
     expect(parsed.sessionDetails).toEqual({});
-    expect(parsed.agentModels).toEqual({ oracle: 'openai/gpt-5.6' });
+    expect(parsed.agentModels).toEqual({ oracle: 'openai/gpt-6' });
   });
 });

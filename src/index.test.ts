@@ -931,13 +931,13 @@ describe('plugin TUI agent activity', () => {
       {
         sessionID: 'ora-child',
         agent: 'oracle',
-        model: { providerID: 'openai', modelID: 'gpt-5.6' },
+        model: { providerID: 'openai', modelID: 'gpt-6' },
       } as never,
       {} as never,
     );
 
     expect(readTuiSnapshot(projectDir).sessionDetails['ora-child']).toEqual({
-      model: 'openai/gpt-5.6',
+      model: 'openai/gpt-6',
       status: 'busy',
     });
   });
@@ -947,7 +947,7 @@ describe('plugin TUI agent activity', () => {
       {
         sessionID: 'ora-early',
         agent: 'oracle',
-        model: { providerID: 'openai', modelID: 'gpt-5.6' },
+        model: { providerID: 'openai', modelID: 'gpt-6' },
       } as never,
       {} as never,
     );
@@ -955,7 +955,7 @@ describe('plugin TUI agent activity', () => {
 
     await busy('ora-early');
     expect(readTuiSnapshot(projectDir).sessionDetails['ora-early']).toEqual({
-      model: 'openai/gpt-5.6',
+      model: 'openai/gpt-6',
       status: 'busy',
     });
   });
@@ -965,7 +965,7 @@ describe('plugin TUI agent activity', () => {
       {
         sessionID: 'ora-a',
         agent: 'oracle',
-        model: { providerID: 'openai', modelID: 'gpt-5.6' },
+        model: { providerID: 'openai', modelID: 'gpt-6' },
       } as never,
       {} as never,
     );
@@ -981,7 +981,7 @@ describe('plugin TUI agent activity', () => {
     await busy('ora-b');
 
     const details = readTuiSnapshot(projectDir).sessionDetails;
-    expect(details['ora-a']?.model).toBe('openai/gpt-5.6');
+    expect(details['ora-a']?.model).toBe('openai/gpt-6');
     expect(details['ora-b']?.model).toBe('anthropic/claude-opus');
   });
 
@@ -990,7 +990,7 @@ describe('plugin TUI agent activity', () => {
       {
         sessionID: 'ora-idle',
         agent: 'oracle',
-        model: { providerID: 'openai', modelID: 'gpt-5.6' },
+        model: { providerID: 'openai', modelID: 'gpt-6' },
       } as never,
       {} as never,
     );
@@ -1006,7 +1006,7 @@ describe('plugin TUI agent activity', () => {
       {
         sessionID: 'ora-idle',
         agent: 'oracle',
-        model: { providerID: 'openai', modelID: 'gpt-5.6' },
+        model: { providerID: 'openai', modelID: 'gpt-6' },
       } as never,
       {} as never,
     );

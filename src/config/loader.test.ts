@@ -278,7 +278,7 @@ describe('loadPluginConfig', () => {
       JSON.stringify({
         agents: {
           oracle: {
-            model: 'openai/gpt-5.6',
+            model: 'openai/gpt-6',
             prompt: 'This is now allowed for built-in agents.',
           },
         },
@@ -295,7 +295,7 @@ describe('loadPluginConfig', () => {
       JSON.stringify({
         agents: {
           orchestrator: {
-            model: 'openai/gpt-5.6',
+            model: 'openai/gpt-6',
             orchestratorPrompt: 'This must be rejected.',
           },
         },
@@ -556,7 +556,7 @@ describe('onWarning callback', () => {
     fs.writeFileSync(
       path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
       JSON.stringify({
-        agents: { oracle: { model: 'openai/gpt-5.6-luna' } },
+        agents: { oracle: { model: 'openai/gpt-6-luna' } },
         council: {
           default_preset: 'spaced',
           presets: {
@@ -583,7 +583,7 @@ describe('onWarning callback', () => {
     });
 
     expect(warnings).toEqual([]);
-    expect(config.agents?.oracle?.model).toBe('openai/gpt-5.6-luna');
+    expect(config.agents?.oracle?.model).toBe('openai/gpt-6-luna');
     expect(config.council?.presets.spaced?.scalar?.model).toBe('of/MiniMax M3');
     expect(config.council?.presets.spaced?.fallback?.models).toEqual([
       { id: 'of/Kimi K2.6', variant: undefined },
@@ -625,10 +625,10 @@ describe('onWarning callback', () => {
       path.join(projectConfigDir, 'oh-my-opencode-slim.json'),
       JSON.stringify({
         council: {
-          master: { model: 'openai/gpt-5.6' },
+          master: { model: 'openai/gpt-6' },
           presets: {
             default: {
-              alpha: { model: 'openai/gpt-5.6-luna' },
+              alpha: { model: 'openai/gpt-6-luna' },
             },
           },
         },
@@ -646,7 +646,7 @@ describe('onWarning callback', () => {
       'Deprecated council.master config key',
     );
     expect(config.council?.presets?.default?.alpha?.model).toBe(
-      'openai/gpt-5.6-luna',
+      'openai/gpt-6-luna',
     );
   });
 
@@ -779,10 +779,10 @@ describe('onWarning callback', () => {
       JSON.stringify({
         tmux: { enabled: true },
         council: {
-          master: { model: 'openai/gpt-5.6' },
+          master: { model: 'openai/gpt-6' },
           presets: {
             default: {
-              alpha: { model: 'openai/gpt-5.6-luna' },
+              alpha: { model: 'openai/gpt-6-luna' },
             },
           },
         },
@@ -1588,7 +1588,7 @@ describe('preset resolution', () => {
         presets: {
           openai: {
             oracle: {
-              model: 'openai/gpt-5.6',
+              model: 'openai/gpt-6',
               options: { textVerbosity: 'low' },
             },
           },
@@ -1602,7 +1602,7 @@ describe('preset resolution', () => {
     );
 
     const config = loadPluginConfig(projectDir);
-    expect(config.agents?.oracle?.model).toBe('openai/gpt-5.6');
+    expect(config.agents?.oracle?.model).toBe('openai/gpt-6');
     // deepMerge should combine both option keys
     expect(config.agents?.oracle?.options).toEqual({
       textVerbosity: 'low',
@@ -1649,7 +1649,7 @@ describe('preset resolution', () => {
         presets: {
           concise: {
             oracle: {
-              model: 'openai/gpt-5.6',
+              model: 'openai/gpt-6',
               options: { textVerbosity: 'low' },
             },
           },
@@ -1663,7 +1663,7 @@ describe('preset resolution', () => {
     );
 
     const config = loadPluginConfig(projectDir);
-    expect(config.agents?.oracle?.model).toBe('openai/gpt-5.6');
+    expect(config.agents?.oracle?.model).toBe('openai/gpt-6');
     // root wins over preset for same key
     expect(config.agents?.oracle?.options).toEqual({
       textVerbosity: 'high',

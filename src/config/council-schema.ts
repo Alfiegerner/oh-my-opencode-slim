@@ -25,7 +25,7 @@ const CouncillorModelSchema = z
       .min(1),
   ])
   .describe(
-    'Model ID in provider/model format (e.g. "openai/gpt-5.6-luna"), or an ' +
+    'Model ID in provider/model format (e.g. "openai/gpt-6-luna"), or an ' +
       'ordered fallback chain (array of model IDs or { id, variant } entries) ' +
       'tried in order until one responds.',
   );
@@ -132,7 +132,7 @@ export type CouncilPreset = z.infer<typeof CouncilPresetSchema>;
  *   "council": {
  *     "presets": {
  *       "default": {
- *         "alpha": { "model": "openai/gpt-5.6-luna" },
+ *         "alpha": { "model": "openai/gpt-6-luna" },
  *         "beta":  { "model": "openai/gpt-5.3-codex" },
  *         "gamma": { "model": "google/gemini-3-pro" }
  *       }

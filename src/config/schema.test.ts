@@ -25,7 +25,7 @@ describe('ProviderModelIdSchema', () => {
       'of/MiniMax M3',
       'of/Kimi K2.6',
       'opencode-omniroute-live/of/Qwen3.8 27b',
-      'openai/gpt-5.6-luna',
+      'openai/gpt-6-luna',
     ];
 
     for (const id of ids) {
@@ -639,7 +639,7 @@ describe('PluginConfigSchema backgroundJobs', () => {
         concurrency: {
           defaultConcurrency: 2,
           providerConcurrency: { openai: 3 },
-          modelConcurrency: { 'openai/gpt-5.6-luna': 1 },
+          modelConcurrency: { 'openai/gpt-6-luna': 1 },
         },
       },
     });
@@ -654,8 +654,8 @@ describe('PluginConfigSchema backgroundJobs', () => {
       { defaultConcurrency: 1.5 },
       { providerConcurrency: { openai: -1 } },
       { providerConcurrency: { openai: 1.5 } },
-      { modelConcurrency: { 'openai/gpt-5.6-luna': -1 } },
-      { modelConcurrency: { 'openai/gpt-5.6-luna': 1.5 } },
+      { modelConcurrency: { 'openai/gpt-6-luna': -1 } },
+      { modelConcurrency: { 'openai/gpt-6-luna': 1.5 } },
     ]) {
       expect(
         PluginConfigSchema.safeParse({ backgroundJobs: { concurrency } })
@@ -670,7 +670,7 @@ describe('PluginConfigSchema backgroundJobs', () => {
         concurrency: {
           defaultConcurrency: 2,
           providerConcurrency: { openai: 0 },
-          modelConcurrency: { 'openai/gpt-5.6-luna': 0 },
+          modelConcurrency: { 'openai/gpt-6-luna': 0 },
         },
       },
     });
@@ -681,7 +681,7 @@ describe('PluginConfigSchema backgroundJobs', () => {
         result.data.backgroundJobs?.concurrency?.providerConcurrency,
       ).toEqual({ openai: 0 });
       expect(result.data.backgroundJobs?.concurrency?.modelConcurrency).toEqual(
-        { 'openai/gpt-5.6-luna': 0 },
+        { 'openai/gpt-6-luna': 0 },
       );
     }
   });

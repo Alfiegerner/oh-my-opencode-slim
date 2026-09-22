@@ -53,7 +53,7 @@ oh-my-opencode-slim은 OpenCode용 에이전트 오케스트레이션 플러그�
   오버라이드, 에이전트별 스킬/MCP 권한 및
   [프로젝트 로컬 사용자 지정](docs/project-local-customization.md)을 지원합니다.
 
-### OpenAI GPT-5.6
+### OpenAI GPT-6
 
 <p align="center">
   <img src="img/openai-gpt-5-6-pantheon.jpeg" alt="OpenAI GPT-5.6 판테온: Terra, Sol, Luna" width="100%">
@@ -171,12 +171,12 @@ bun run build
   "preset": "openai",
   "presets": {
     "openai": {
-      "orchestrator": { "model": "openai/gpt-5.6-terra", "variant": "high", "skills": ["*"], "mcps": ["*", "!context7"] },
-      "oracle": { "model": "openai/gpt-5.6-sol", "variant": "high", "skills": ["simplify"], "mcps": [] },
-      "librarian": { "model": "openai/gpt-5.6-luna", "variant": "low", "skills": [], "mcps": ["context7", "gh_grep"] },
-      "explorer": { "model": "openai/gpt-5.6-luna", "variant": "low", "skills": [], "mcps": [] },
-      "designer": { "model": "openai/gpt-5.6-luna", "variant": "medium", "skills": [], "mcps": [] },
-      "fixer": { "model": "openai/gpt-5.6-luna", "variant": "high", "skills": [], "mcps": [] }
+      "orchestrator": { "model": "openai/gpt-6-sol", "variant": "high", "skills": ["*"], "mcps": ["*", "!context7"] },
+      "oracle": { "model": "openai/gpt-6-astra", "variant": "high", "skills": ["simplify"], "mcps": [] },
+      "librarian": { "model": "openai/gpt-6-luna", "variant": "low", "skills": [], "mcps": ["context7", "gh_grep"] },
+      "explorer": { "model": "openai/gpt-6-luna", "variant": "low", "skills": [], "mcps": [] },
+      "designer": { "model": "openai/gpt-6-luna", "variant": "medium", "skills": [], "mcps": [] },
+      "fixer": { "model": "openai/gpt-6-luna", "variant": "high", "skills": [], "mcps": [] }
     },
     "opencode-go": {
       "orchestrator": { "model": "opencode-go/minimax-m3", "variant": "thinking" },
@@ -253,12 +253,12 @@ ping all agents
   </tr>
   <tr>
     <td colspan="2">
-      <b>기본 모델:</b> <code>openai/gpt-5.6-terra (medium)</code>
+      <b>기본 모델:</b> <code>openai/gpt-6-sol (medium)</code>
     </td>
   </tr>
   <tr>
     <td colspan="2">
-      <b>추천 모델:</b> <code>claude-fable-5</code> <code>claude-opus-4-8</code> <code>glm-5.2</code> <code>gpt-5.6-terra</code> <code>mimo-v2.5</code> <code>minimax-m3</code> <code>qwen3.7-plus</code>
+      <b>추천 모델:</b> <code>claude-fable-5</code> <code>claude-opus-4-8</code> <code>glm-5.2</code> <code>gpt-6-sol</code> <code>mimo-v2.5</code> <code>minimax-m3</code> <code>qwen3.7-plus</code>
     </td>
   </tr>
   <tr>
@@ -294,7 +294,7 @@ ping all agents
   </tr>
   <tr>
     <td colspan="2">
-      <b>기본 모델:</b> <code>openai/gpt-5.6-luna</code>
+      <b>기본 모델:</b> <code>openai/gpt-6-luna</code>
     </td>
   </tr>
   <tr>
@@ -335,12 +335,12 @@ ping all agents
   </tr>
   <tr>
     <td colspan="2">
-      <b>기본 모델:</b> <code>openai/gpt-5.6-sol (high)</code>
+      <b>기본 모델:</b> <code>openai/gpt-6-astra (high)</code>
     </td>
   </tr>
   <tr>
     <td colspan="2">
-      <b>추천 모델:</b> <code>claude-fable-5</code> <code>claude-opus-4-8</code> <code>deepseek-v4-pro</code> <code>glm-5.2</code> <code>gpt-5.6-sol</code> <code>qwen3.7-max</code>
+      <b>추천 모델:</b> <code>claude-fable-5</code> <code>claude-opus-4-8</code> <code>deepseek-v4-pro</code> <code>glm-5.2</code> <code>gpt-6-astra</code> <code>qwen3.7-max</code>
     </td>
   </tr>
   <tr>
@@ -425,7 +425,7 @@ ping all agents
   </tr>
   <tr>
     <td colspan="2">
-      <b>기본 모델:</b> <code>openai/gpt-5.6-luna</code>
+      <b>기본 모델:</b> <code>openai/gpt-6-luna</code>
     </td>
   </tr>
   <tr>
@@ -466,7 +466,7 @@ ping all agents
   </tr>
   <tr>
     <td colspan="2">
-      <b>기본 모델:</b> <code>openai/gpt-5.6-luna</code>
+      <b>기본 모델:</b> <code>openai/gpt-6-luna</code>
     </td>
   </tr>
   <tr>
@@ -507,12 +507,12 @@ ping all agents
   </tr>
   <tr>
     <td colspan="2">
-      <b>기본 모델:</b> <code>openai/gpt-5.6-luna</code>
+      <b>기본 모델:</b> <code>openai/gpt-6-luna</code>
     </td>
   </tr>
   <tr>
     <td colspan="2">
-      <b>추천 모델:</b> <code>claude-sonnet-4-6</code> <code>deepseek-v4-flash</code> <code>gpt-5.6-luna</code> <code>kimi-k2.7-code</code>
+      <b>추천 모델:</b> <code>claude-sonnet-4-6</code> <code>deepseek-v4-flash</code> <code>gpt-6-luna</code> <code>kimi-k2.7-code</code>
     </td>
   </tr>
   <tr>
@@ -554,7 +554,7 @@ ping all agents
   </tr>
   <tr>
     <td colspan="2">
-      <b>기본 모델:</b> <code>openai/gpt-5.6-luna</code> - <i>비전 지원 모델을 구성하여 활성화</i>
+      <b>기본 모델:</b> <code>openai/gpt-6-luna</code> - <i>비전 지원 모델을 구성하여 활성화</i>
     </td>
   </tr>
   <tr>

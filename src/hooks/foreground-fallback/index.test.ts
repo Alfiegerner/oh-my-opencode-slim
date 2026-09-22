@@ -153,12 +153,12 @@ describe('isFailoverError', () => {
     expect(
       isFailoverError({
         message:
-          'AI_APICallError: [codex/gpt-5.6-sol-medium] All codex accounts reached configured quota threshold (reset after 20h 41m 59s)',
+          'AI_APICallError: [codex/gpt-6-astra-medium] All codex accounts reached configured quota threshold (reset after 20h 41m 59s)',
       }),
     ).toBe(true);
     expect(
       isFailoverError(
-        'AI_APICallError: [codex/gpt-5.6-sol-medium] All codex accounts reached configured quota threshold (reset after 20h 41m 59s)',
+        'AI_APICallError: [codex/gpt-6-astra-medium] All codex accounts reached configured quota threshold (reset after 20h 41m 59s)',
       ),
     ).toBe(true);
   });
@@ -424,7 +424,7 @@ describe('isFailoverError', () => {
 
   test('returns true for NewAPI "no available channel" error shapes', () => {
     const message =
-      'No available channel for model gpt-5.6-luna under group Codex专用 (distributor) (request id: abc123)';
+      'No available channel for model gpt-6-luna under group Codex专用 (distributor) (request id: abc123)';
 
     expect(isFailoverError(message)).toBe(true);
     expect(isFailoverError({ message })).toBe(true);
@@ -471,7 +471,7 @@ describe('isFailoverError', () => {
   test('returns false for permanent channel-not-found errors', () => {
     expect(
       isFailoverError({
-        message: 'channel not found for model gpt-5.6-luna',
+        message: 'channel not found for model gpt-6-luna',
       }),
     ).toBe(false);
   });
@@ -643,7 +643,7 @@ describe('ForegroundFallbackManager session.error', () => {
         sessionID: 'sess-1',
         error: {
           message:
-            'No available channel for model gpt-5.6-luna under group Codex专用 (distributor)',
+            'No available channel for model gpt-6-luna under group Codex专用 (distributor)',
         },
       },
     });
@@ -3751,7 +3751,7 @@ describe('ForegroundFallbackManager resolveChain cross-agent isolation', () => {
     // chain — that would switch the session from Build to Orchestrator.
     const { mocks } = createMockClient();
     const mgr = new ForegroundFallbackManager(
-      { orchestrator: ['openai/gpt-5.6', 'new-api/glm-5.2'] },
+      { orchestrator: ['openai/gpt-6', 'new-api/glm-5.2'] },
       true,
       { directory: '/test' } as any,
     );
@@ -3763,7 +3763,7 @@ describe('ForegroundFallbackManager resolveChain cross-agent isolation', () => {
           sessionID: 'build-sess',
           agent: 'build',
           providerID: 'openai',
-          modelID: 'gpt-5.6',
+          modelID: 'gpt-6',
           error: { message: 'rate limit exceeded' },
         },
       },

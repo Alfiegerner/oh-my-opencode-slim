@@ -97,8 +97,8 @@ describe('tui sidebar agents', () => {
     const agentNames = getSidebarAgentNames(
       createSnapshot({
         agentModels: {
-          explorer: 'openai/gpt-5.6-luna',
-          fixer: 'openai/gpt-5.6-luna',
+          explorer: 'openai/gpt-6-luna',
+          fixer: 'openai/gpt-6-luna',
         },
       }),
     );
@@ -118,11 +118,11 @@ describe('tui sidebar agents', () => {
             data: [
               {
                 name: 'explorer',
-                model: { providerID: 'openai', modelID: 'gpt-5.6-luna' },
+                model: { providerID: 'openai', modelID: 'gpt-6-luna' },
               },
               {
                 name: 'fixer',
-                model: { providerID: 'openai', modelID: 'gpt-5.6' },
+                model: { providerID: 'openai', modelID: 'gpt-6' },
               },
               { name: 'unrelated', model: { providerID: 'x', modelID: 'y' } },
               { name: 'oracle' },
@@ -135,8 +135,8 @@ describe('tui sidebar agents', () => {
     const remote = await fetchRemoteAgentModels(client, '/tmp/project');
     expect(seen).toEqual([{ directory: '/tmp/project' }]);
     expect(remote).toEqual({
-      explorer: 'openai/gpt-5.6-luna',
-      fixer: 'openai/gpt-5.6',
+      explorer: 'openai/gpt-6-luna',
+      fixer: 'openai/gpt-6',
     });
 
     const merged = applyRemoteAgentModels(
@@ -145,7 +145,7 @@ describe('tui sidebar agents', () => {
     );
     expect(merged.agentModels).toEqual({
       explorer: 'local/model',
-      fixer: 'openai/gpt-5.6',
+      fixer: 'openai/gpt-6',
     });
   });
 
@@ -160,11 +160,11 @@ describe('tui sidebar agents', () => {
               data: [
                 {
                   id: 'explorer',
-                  model: { providerID: 'openai', id: 'gpt-5.6-luna' },
+                  model: { providerID: 'openai', id: 'gpt-6-luna' },
                 },
                 {
                   id: 'fixer',
-                  model: { providerID: 'openai', id: 'gpt-5.6' },
+                  model: { providerID: 'openai', id: 'gpt-6' },
                 },
                 { id: 'unrelated', model: { providerID: 'x', id: 'y' } },
                 { id: 'oracle' },
@@ -178,8 +178,8 @@ describe('tui sidebar agents', () => {
     const remote = await fetchRemoteAgentModels(client, '/srv/project');
     expect(seen).toEqual([{ location: { directory: '/srv/project' } }]);
     expect(remote).toEqual({
-      explorer: 'openai/gpt-5.6-luna',
-      fixer: 'openai/gpt-5.6',
+      explorer: 'openai/gpt-6-luna',
+      fixer: 'openai/gpt-6',
     });
   });
 
@@ -196,7 +196,7 @@ describe('tui sidebar agents', () => {
                 data: [
                   {
                     id: 'explorer',
-                    model: { providerID: 'openai', id: 'gpt-5.6-luna' },
+                    model: { providerID: 'openai', id: 'gpt-6-luna' },
                   },
                 ],
               },
@@ -208,7 +208,7 @@ describe('tui sidebar agents', () => {
 
     const remote = await fetchRemoteAgentModels(client, '/srv/project');
     expect(seen).toEqual([{ location: { directory: '/srv/project' } }]);
-    expect(remote).toEqual({ explorer: 'openai/gpt-5.6-luna' });
+    expect(remote).toEqual({ explorer: 'openai/gpt-6-luna' });
   });
 
   test('remote model fetch is a no-op without a host client', async () => {
@@ -296,7 +296,7 @@ describe('tui sidebar agents', () => {
         {
           agentModels: {
             explorer: 'fireworks-ai/accounts/fireworks/routers/kimi-k2p5-turbo',
-            oracle: 'openai/gpt-5.6-luna-fast',
+            oracle: 'openai/gpt-6-luna-fast',
           },
         },
         projectDir,
@@ -355,7 +355,7 @@ describe('tui sidebar agents', () => {
 
       // Oracle row should be single-line with right-aligned model
       const oracleLine = lines[oracleLineIdx];
-      expect(oracleLine).toMatch(/oracle\s+gpt-5\.6-luna-fast/);
+      expect(oracleLine).toMatch(/oracle\s+gpt-6-luna-fast/);
 
       // No unwrapped model path fragments should appear on separate lines
       expect(frame).not.toMatch(/fireworks\/routers\//);
@@ -380,7 +380,7 @@ describe('live TUI activity rendering', () => {
       fs.mkdirSync(projectDir, { recursive: true });
       process.env.XDG_DATA_HOME = path.join(root, 'data');
       recordTuiAgentModels(
-        { agentModels: { explorer: 'openai/gpt-5.6-luna-fast' } },
+        { agentModels: { explorer: 'openai/gpt-6-luna-fast' } },
         projectDir,
       );
 
@@ -460,9 +460,9 @@ describe('live TUI activity rendering', () => {
 
 describe('splitSidebarModelId', () => {
   test('splits provider from model at the first slash', () => {
-    expect(splitSidebarModelId('openai/gpt-5.6-fast')).toEqual({
+    expect(splitSidebarModelId('openai/gpt-6-sol-fast')).toEqual({
       provider: 'openai',
-      model: 'gpt-5.6-fast',
+      model: 'gpt-6-sol-fast',
     });
     expect(
       splitSidebarModelId(
@@ -815,7 +815,7 @@ describe('clickable sidebar sessions', () => {
       sessionDetails: {
         'ora-1-ses': {
           alias: 'ora-1',
-          model: 'openai/gpt-5.6',
+          model: 'openai/gpt-6',
           status: 'busy',
         },
         'ora-2-ses': { alias: 'ora-2', status: 'retry' },
@@ -830,7 +830,7 @@ describe('clickable sidebar sessions', () => {
       'ora-2-ses',
     ]);
     expect(oracle?.sessions[0].alias).toBe('ora-1');
-    expect(oracle?.sessions[0].model).toBe('openai/gpt-5.6');
+    expect(oracle?.sessions[0].model).toBe('openai/gpt-6');
     expect(oracle?.sessions[1].status).toBe('retry');
 
     // Other conversation: no targets even though sessions are active.
@@ -1174,7 +1174,7 @@ describe('clickable sidebar sessions', () => {
 
     try {
       recordTuiAgentModels(
-        { agentModels: { oracle: 'openai/gpt-5.6' } },
+        { agentModels: { oracle: 'openai/gpt-6' } },
         projectDir,
       );
       recordTuiSessionParent('ora-only', 'conv-1', projectDir);
@@ -1226,7 +1226,7 @@ describe('clickable sidebar sessions', () => {
 
     try {
       recordTuiAgentModels(
-        { agentModels: { oracle: 'openai/gpt-5.6' } },
+        { agentModels: { oracle: 'openai/gpt-6' } },
         projectDir,
       );
       recordTuiSessionParent('ora-a', 'conv-1', projectDir);
@@ -1339,7 +1339,7 @@ describe('clickable sidebar sessions', () => {
 
     try {
       recordTuiAgentModels(
-        { agentModels: { oracle: 'openai/gpt-5.6' } },
+        { agentModels: { oracle: 'openai/gpt-6' } },
         projectDir,
       );
       recordTuiSessionParent('ora-only', 'conv-1', projectDir);
@@ -1403,7 +1403,7 @@ describe('clickable sidebar sessions', () => {
 
     try {
       recordTuiAgentModels(
-        { agentModels: { oracle: 'openai/gpt-5.6' } },
+        { agentModels: { oracle: 'openai/gpt-6' } },
         projectDir,
       );
       // Idle history only: no live session. The whole highlighted row
@@ -1440,7 +1440,7 @@ describe('clickable sidebar sessions', () => {
       const nameCol = lines[oracleRow].indexOf('oracle');
       const dotCol = lines[oracleRow].indexOf('✦');
       expect(dotCol).toBeGreaterThan(nameCol);
-      expect(dotCol).toBeLessThan(lines[oracleRow].indexOf('gpt-5.6'));
+      expect(dotCol).toBeLessThan(lines[oracleRow].indexOf('gpt-6'));
       // Pegged to the name: no more than one column of padding.
       expect(dotCol - (nameCol + 'oracle'.length)).toBeLessThanOrEqual(1);
 
@@ -1465,7 +1465,7 @@ describe('clickable sidebar sessions', () => {
 
     try {
       recordTuiAgentModels(
-        { agentModels: { oracle: 'openai/gpt-5.6' } },
+        { agentModels: { oracle: 'openai/gpt-6' } },
         projectDir,
       );
       recordTuiSessionParent('ora-live', 'conv-1', projectDir);
@@ -1531,7 +1531,7 @@ describe('clickable sidebar sessions', () => {
 
     try {
       recordTuiAgentModels(
-        { agentModels: { oracle: 'openai/gpt-5.6' } },
+        { agentModels: { oracle: 'openai/gpt-6' } },
         projectDir,
       );
       recordTuiSessionParent('ora-live', 'conv-1', projectDir);

@@ -5,7 +5,7 @@
  * Empirical verification of the checkpoint-compatible board strategy's
  * cache behavior (fix/checkpoint-cache-epochs investigation). Simulates a
  * multi-turn orchestrator tool loop with realistic SDK-shaped message
- * fixtures (github-copilot / gpt-5.6-luna) and measures, per turn:
+ * fixtures (github-copilot / gpt-6-luna) and measures, per turn:
  *
  *  1. transform-level bytes: the exact `messages` array the hook produces
  *  2. provider-level bytes: those messages passed through the same
@@ -42,7 +42,7 @@ function userMsg(id: string, text: string, createdAt: number) {
       role: 'user',
       time: { created: createdAt },
       agent: 'orchestrator',
-      model: { providerID: 'github-copilot', modelID: 'gpt-5.6-luna' },
+      model: { providerID: 'github-copilot', modelID: 'gpt-6-luna' },
     },
     parts: [
       {
@@ -84,7 +84,7 @@ function assistantMsg(
       role: 'assistant',
       time: { created: createdAt, completed: createdAt + 4321 },
       parentID: 'msg_u1',
-      modelID: 'gpt-5.6-luna',
+      modelID: 'gpt-6-luna',
       providerID: 'github-copilot',
       mode: 'orchestrator',
       path: { cwd: '/work/repo', root: '/work/repo' },

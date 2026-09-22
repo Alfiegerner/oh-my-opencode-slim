@@ -205,7 +205,7 @@ describe('openPresetManager', () => {
       presets: {
         base: {
           orchestrator: { model: 'anthropic/claude-3.5-haiku' },
-          oracle: { model: 'openai/gpt-5.6-luna' },
+          oracle: { model: 'openai/gpt-6-luna' },
         },
         child: {
           extends: 'base',

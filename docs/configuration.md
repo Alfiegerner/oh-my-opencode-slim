@@ -89,8 +89,8 @@ All config files support **JSONC** (JSON with Comments):
   /* Agent model mappings */
   "presets": {
     "openai": {
-      "oracle": { "model": "openai/gpt-5.6-sol" },
-      "explorer": { "model": "openai/gpt-5.6-luna" },
+      "oracle": { "model": "openai/gpt-6-astra" },
+      "explorer": { "model": "openai/gpt-6-luna" },
     },
   },
 
@@ -206,8 +206,8 @@ override only the agents it needs to change:
   "presets": {
     "base": {
       "agents": {
-        "orchestrator": { "model": "openai/gpt-5.6-terra" },
-        "designer": { "model": "openai/gpt-5.6-luna" }
+        "orchestrator": { "model": "openai/gpt-6-sol" },
+        "designer": { "model": "openai/gpt-6-luna" }
       }
     },
     "design": {
@@ -268,7 +268,7 @@ and troubleshooting.
       "command": "claude-code-acp",
       "args": [],
       "description": "Claude Code subscription agent for deep research",
-      "wrapperModel": "openai/gpt-5.6-luna",
+      "wrapperModel": "openai/gpt-6-luna",
       "permissionMode": "ask",
       "timeoutMs": 300000
     },
@@ -312,7 +312,7 @@ subprocess.
     "presets": {
       "balanced": {
         "alpha": {
-          "model": "openai/gpt-5.6-sol",
+          "model": "openai/gpt-6-astra",
           "variant": "high"
         },
         "beta": {
@@ -379,7 +379,7 @@ The wall-clock supervisor is separately opt-in and remains disabled unless
         "openai": 2
       },
       "modelConcurrency": {
-        "openai/gpt-5.6-luna": 1
+        "openai/gpt-6-luna": 1
       }
     }
   }
@@ -552,7 +552,7 @@ six-digit hex value or an OpenCode theme color:
   "agents": {
     "oracle": { "color": "#FF5733" },
     "reviewer": {
-      "model": "openai/gpt-5.6",
+      "model": "openai/gpt-6",
       "color": "info"
     }
   }
@@ -659,7 +659,7 @@ teaches the orchestrator exactly when to delegate to it.
 {
   "agents": {
     "janitor": {
-      "model": "github-copilot/gpt-5.6",
+      "model": "github-copilot/gpt-6",
       "prompt": "You are Janitor. Audit codebase entropy, dead code, docs drift, naming inconsistencies, and unnecessary complexity. Prefer analysis and plans over direct edits.",
       "orchestratorPrompt": "@janitor\n- Role: Maintenance specialist for codebase cleanup and entropy reduction\n- **Delegate when:** after large refactors • cleanup/technical-debt review • dead code or docs drift is suspected\n- **Don't delegate when:** feature implementation • urgent debugging • UI/UX work"
     }

@@ -51,10 +51,10 @@ describe('CouncillorConfigSchema', () => {
     const config = {
       master: { model: 'anthropic/claude-opus-4-6' },
       master_timeout: 300000,
-      master_fallback: ['openai/gpt-5.6'],
+      master_fallback: ['openai/gpt-6'],
       presets: {
         default: {
-          alpha: { model: 'openai/gpt-5.6-luna' },
+          alpha: { model: 'openai/gpt-6-luna' },
         },
       },
     };
@@ -73,7 +73,7 @@ describe('CouncillorConfigSchema', () => {
     const config = {
       presets: {
         default: {
-          alpha: { model: 'openai/gpt-5.6-luna' },
+          alpha: { model: 'openai/gpt-6-luna' },
         },
       },
     };
@@ -133,7 +133,7 @@ test('mixed legacy "councillors" and flat keys in same preset', () => {
     presets: {
       mixed: {
         councillors: {
-          alpha: { model: 'openai/gpt-5.6-luna' },
+          alpha: { model: 'openai/gpt-6-luna' },
         },
         beta: { model: 'google/gemini-3-pro' },
       },
@@ -156,7 +156,7 @@ test('deprecated master with non-standard model ID still parses', () => {
     master_fallback: 'all', // not an array
     presets: {
       default: {
-        alpha: { model: 'openai/gpt-5.6-luna' },
+        alpha: { model: 'openai/gpt-6-luna' },
       },
     },
   };
@@ -180,7 +180,7 @@ test('rejects empty model string', () => {
 
 test('accepts optional prompt field', () => {
   const config: CouncillorConfig = {
-    model: 'openai/gpt-5.6-luna',
+    model: 'openai/gpt-6-luna',
     prompt: 'Focus on security implications and edge cases.',
   };
 
@@ -195,7 +195,7 @@ test('accepts optional prompt field', () => {
 
 test('prompt is optional and defaults to undefined', () => {
   const config: CouncillorConfig = {
-    model: 'openai/gpt-5.6-luna',
+    model: 'openai/gpt-6-luna',
   };
 
   const result = CouncillorConfigSchema.safeParse(config);
@@ -209,7 +209,7 @@ describe('CouncilPresetSchema', () => {
   test('validates a named preset with multiple councillors', () => {
     const raw = {
       alpha: {
-        model: 'openai/gpt-5.6-luna',
+        model: 'openai/gpt-6-luna',
       },
       beta: {
         model: 'openai/gpt-5.3-codex',
@@ -230,7 +230,7 @@ describe('CouncilPresetSchema', () => {
   test('accepts preset with single councillor', () => {
     const raw = {
       solo: {
-        model: 'openai/gpt-5.6-luna',
+        model: 'openai/gpt-6-luna',
       },
     };
 
@@ -257,7 +257,7 @@ describe('CouncilConfigSchema', () => {
     const config = {
       presets: {
         default: {
-          alpha: { model: 'openai/gpt-5.6-luna' },
+          alpha: { model: 'openai/gpt-6-luna' },
           beta: { model: 'openai/gpt-5.3-codex' },
           gamma: { model: 'google/gemini-3-pro' },
         },
@@ -276,7 +276,7 @@ describe('CouncilConfigSchema', () => {
     const config = {
       presets: {
         custom: {
-          alpha: { model: 'openai/gpt-5.6-luna' },
+          alpha: { model: 'openai/gpt-6-luna' },
         },
       },
       default_preset: 'custom',
@@ -312,18 +312,18 @@ describe('CouncilConfigSchema', () => {
     const config = {
       presets: {
         default: {
-          alpha: { model: 'openai/gpt-5.6-luna' },
+          alpha: { model: 'openai/gpt-6-luna' },
           beta: { model: 'openai/gpt-5.3-codex' },
         },
         fast: {
-          quick: { model: 'openai/gpt-5.6-luna', variant: 'low' },
+          quick: { model: 'openai/gpt-6-luna', variant: 'low' },
         },
         thorough: {
           detailed1: {
             model: 'anthropic/claude-opus-4-6',
             prompt: 'Provide detailed analysis with citations.',
           },
-          detailed2: { model: 'openai/gpt-5.6' },
+          detailed2: { model: 'openai/gpt-6' },
         },
       },
     };

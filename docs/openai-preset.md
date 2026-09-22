@@ -31,12 +31,12 @@ The generated `openai` preset assigns each specialist an OpenAI model:
 
 | Agent | Model |
 |-------|-------|
-| Orchestrator | `openai/gpt-5.6-terra` (`high`) |
-| Oracle | `openai/gpt-5.6-sol` (`high`) |
-| Librarian | `openai/gpt-5.6-luna` (`low`) |
-| Explorer | `openai/gpt-5.6-luna` (`low`) |
-| Designer | `openai/gpt-5.6-luna` (`medium`) |
-| Fixer | `openai/gpt-5.6-luna` (`high`) |
+| Orchestrator | `openai/gpt-6-sol` (`high`) |
+| Oracle | `openai/gpt-6-astra` (`high`) |
+| Librarian | `openai/gpt-6-luna` (`low`) |
+| Explorer | `openai/gpt-6-luna` (`low`) |
+| Designer | `openai/gpt-6-luna` (`medium`) |
+| Fixer | `openai/gpt-6-luna` (`high`) |
 
 ## Generated Config Shape
 
@@ -49,37 +49,37 @@ setting the top-level `preset` field:
   "presets": {
     "openai": {
       "orchestrator": {
-        "model": "openai/gpt-5.6-terra",
+        "model": "openai/gpt-6-sol",
         "variant": "high",
         "skills": ["*"],
         "mcps": ["*", "!context7"]
       },
       "oracle": {
-        "model": "openai/gpt-5.6-sol",
+        "model": "openai/gpt-6-astra",
         "variant": "high",
         "skills": ["simplify"],
         "mcps": []
       },
       "librarian": {
-        "model": "openai/gpt-5.6-luna",
+        "model": "openai/gpt-6-luna",
         "variant": "low",
         "skills": [],
         "mcps": ["context7", "gh_grep"]
       },
       "explorer": {
-        "model": "openai/gpt-5.6-luna",
+        "model": "openai/gpt-6-luna",
         "variant": "low",
         "skills": [],
         "mcps": []
       },
       "designer": {
-        "model": "openai/gpt-5.6-luna",
+        "model": "openai/gpt-6-luna",
         "variant": "medium",
         "skills": [],
         "mcps": []
       },
       "fixer": {
-        "model": "openai/gpt-5.6-luna",
+        "model": "openai/gpt-6-luna",
         "variant": "high",
         "skills": [],
         "mcps": []

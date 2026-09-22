@@ -112,7 +112,7 @@ describe('switchPresetOnDisk', () => {
       presets: {
         cheap: {
           orchestrator: { model: 'anthropic/claude-3.5-haiku' },
-          explorer: { model: 'openai/gpt-5.6-luna' },
+          explorer: { model: 'openai/gpt-6-luna' },
         },
       },
     };
@@ -129,7 +129,7 @@ describe('switchPresetOnDisk', () => {
     expect(result.summary).toContain(
       'orchestrator → model: anthropic/claude-3.5-haiku',
     );
-    expect(result.summary).toContain('explorer → model: openai/gpt-5.6-luna');
+    expect(result.summary).toContain('explorer → model: openai/gpt-6-luna');
   });
 
   test('persists preset name to a JSONC user config file', () => {
@@ -203,7 +203,7 @@ describe('switchPresetOnDisk', () => {
   test('resolves legacy alias keys (explore → explorer)', () => {
     const config: PluginConfig = {
       presets: {
-        scout: { explore: { model: 'openai/gpt-5.6-luna' } },
+        scout: { explore: { model: 'openai/gpt-6-luna' } },
       },
     };
 
@@ -240,7 +240,7 @@ describe('switchPresetOnDisk', () => {
       presets: {
         fallback: {
           orchestrator: {
-            model: ['anthropic/claude-3.5-haiku', 'openai/gpt-5.6'],
+            model: ['anthropic/claude-3.5-haiku', 'openai/gpt-6'],
           },
         },
       },
@@ -319,7 +319,7 @@ describe('switchPresetOnDisk', () => {
       presets: {
         base: {
           orchestrator: { model: 'anthropic/claude-3.5-haiku' },
-          oracle: { model: 'openai/gpt-5.6-luna' },
+          oracle: { model: 'openai/gpt-6-luna' },
         },
         child: {
           extends: 'base',
@@ -335,7 +335,7 @@ describe('switchPresetOnDisk', () => {
     expect(result.ok).toBe(true);
     expect(result.presetName).toBe('child');
     expect(result.summary).toContain('orchestrator → model: openai/o3');
-    expect(result.summary).toContain('oracle → model: openai/gpt-5.6-luna');
+    expect(result.summary).toContain('oracle → model: openai/gpt-6-luna');
   });
 
   test('fails cleanly when preset extends a missing parent', () => {
@@ -668,7 +668,7 @@ describe('writePreset', () => {
     );
 
     const ok = writePreset(tempDir, 'scout', {
-      explorer: { model: 'openai/gpt-5.6-luna' },
+      explorer: { model: 'openai/gpt-6-luna' },
     });
 
     expect(ok).toBe(true);
@@ -679,7 +679,7 @@ describe('writePreset', () => {
       ),
     ) as { presets?: Record<string, unknown> };
     expect(persisted.presets?.scout).toEqual({
-      explorer: { model: 'openai/gpt-5.6-luna' },
+      explorer: { model: 'openai/gpt-6-luna' },
     });
     // existing fields preserved
     expect(persisted.preset).toBe('old');
@@ -699,7 +699,7 @@ describe('writePreset', () => {
     );
 
     const ok = writePreset(tempDir, 'scout', {
-      explorer: { model: 'openai/gpt-5.6-luna' },
+      explorer: { model: 'openai/gpt-6-luna' },
     });
 
     expect(ok).toBe(true);
@@ -711,7 +711,7 @@ describe('writePreset', () => {
     expect(persisted.preset).toBe('old');
     expect(persisted.presets?.existing).toEqual({ oracle: { model: 'a' } });
     expect(persisted.presets?.scout).toEqual({
-      explorer: { model: 'openai/gpt-5.6-luna' },
+      explorer: { model: 'openai/gpt-6-luna' },
     });
   });
 
@@ -774,7 +774,7 @@ describe('writePreset', () => {
 
     const ok = writePreset(tempDir, 'child', {
       extends: 'base',
-      agents: { explorer: { model: 'openai/gpt-5.6-luna' } },
+      agents: { explorer: { model: 'openai/gpt-6-luna' } },
     });
 
     expect(ok).toBe(true);
@@ -788,7 +788,7 @@ describe('writePreset', () => {
     // Does NOT materialize orchestrator from base; keeps extends and local agents only
     expect(persisted.presets?.child).toEqual({
       extends: 'base',
-      agents: { explorer: { model: 'openai/gpt-5.6-luna' } },
+      agents: { explorer: { model: 'openai/gpt-6-luna' } },
     });
   });
 
@@ -1068,7 +1068,7 @@ describe('getEditablePreset', () => {
           child: {
             extends: 'base',
             agents: {
-              explorer: { model: 'openai/gpt-5.6-luna' },
+              explorer: { model: 'openai/gpt-6-luna' },
             },
           },
         },
@@ -1080,7 +1080,7 @@ describe('getEditablePreset', () => {
     expect(editable.extends).toBe('base');
     // ONLY explorer is returned as local agent; orchestrator and oracle are NOT materialized
     expect(editable.agents).toEqual({
-      explorer: { model: 'openai/gpt-5.6-luna' },
+      explorer: { model: 'openai/gpt-6-luna' },
     });
   });
 
