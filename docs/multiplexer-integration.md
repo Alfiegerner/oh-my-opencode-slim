@@ -349,11 +349,12 @@ and host diagnostics are emitted at most once per cause per process.
   interleave layout updates. Scope is limited to anchors this client created,
   but visual interleaving is possible and harmless.
 - **Readiness requires the child to be live.** Before creating a pane the
-  client polls `/session/status` (with the project `directory` parameter) with
-  bounded retries. A child that was created but never ran never appears in the
-  live status table and gets no pane (`readiness-timeout`). Real `task`
-  dispatches make the child busy immediately, so this only affects synthetic
-  sessions created through the REST API.
+  client polls `/session/status` with the project directory (sent as the
+  pre-encoded `x-opencode-directory` header) with bounded retries. A child that
+  was created but never ran never appears in the live status table and gets no
+  pane (`readiness-timeout`). Real `task` dispatches make the child busy
+  immediately, so this only affects synthetic sessions created through the REST
+  API.
 - **v2 hosts and embedded hosts have no pane feature** (see
   [Deployment Modes](#deployment-modes)).
 - **Nested multiplexer detection priority is unchanged** (for example, kitty
