@@ -18,11 +18,10 @@ opencode models --refresh
 
 ## Switch at Runtime
 
-If both presets are already in your config, switch from inside OpenCode:
-
-```text
-/preset openai
-```
+If both presets are already in your config, switch from inside OpenCode.
+On v2-compatible hosts (OpenCode with TUI plugin v2), the typed shortcut
+`/preset openai` applies directly. On older hosts, open `/preset` from
+autocomplete and pick Apply from the preset list.
 
 See [Preset Switching](preset-switching.md) for the full runtime switching
 workflow.
