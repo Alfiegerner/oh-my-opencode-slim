@@ -55,7 +55,7 @@ class AcpClient {
   private exitPromise: Promise<void>;
   private closePromise: Promise<void> | undefined;
   private closing = new AbortController();
-  private childClosed = false;
+  private childTerminated = false;
   private next = 1;
   private pending = new Map<number, Pending>();
   private chunks: string[] = [];
@@ -90,10 +90,14 @@ class AcpClient {
       stdio: 'pipe',
     });
     this.exitPromise = new Promise((resolve) => {
-      this.child.once('close', () => {
-        this.childClosed = true;
+      const settle = () => {
+        this.child.off('exit', settle);
+        this.child.off('close', settle);
+        this.childTerminated = true;
         resolve();
-      });
+      };
+      this.child.once('exit', settle);
+      this.child.once('close', settle);
     });
     this.child.stderr.on('data', (chunk) => {
       this.errors.push(String(chunk));
@@ -183,7 +187,7 @@ class AcpClient {
 
   private hasExited(): boolean {
     return (
-      this.childClosed ||
+      this.childTerminated ||
       this.child.exitCode !== null ||
       this.child.signalCode !== null
     );

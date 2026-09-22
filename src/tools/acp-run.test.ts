@@ -445,4 +445,57 @@ describe('acp_run integration', () => {
 
     expect(Date.now() - startedAt).toBeLessThan(1_500);
   }, 15_000);
+
+  test('does not wait for descendant-held stdio after the bridge exits', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'acp-exit-before-close-'));
+    const serverPath = join(dir, 'server.js');
+    await writeFile(
+      serverPath,
+      [
+        'const { spawn } = require("node:child_process");',
+        'let seen = 0; let buf = "";',
+        'process.stdin.setEncoding("utf8");',
+        'process.stdin.on("data", (chunk) => {',
+        '  buf += chunk; let idx;',
+        '  while ((idx = buf.indexOf("\\n")) >= 0) {',
+        '    const line = buf.slice(0, idx); buf = buf.slice(idx + 1);',
+        '    if (!line.trim()) continue;',
+        '    const msg = JSON.parse(line); seen++;',
+        '    const result = seen === 2 ? { sessionId: "sess-exit" } : {};',
+        '    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result }) + "\\n");',
+        '  }',
+        '});',
+        'process.stdin.on("end", () => {',
+        '  spawn(process.execPath, ["-e", "setTimeout(() => {}, 1500)"], {',
+        '    stdio: ["ignore", process.stdout, process.stderr],',
+        '  });',
+        '  process.exit(0);',
+        '});',
+      ].join('\n'),
+    );
+    const tool = createAcpRunTool({
+      cursor: {
+        command: process.execPath,
+        args: [serverPath],
+        permissionMode: 'allow',
+      },
+    });
+    const startedAt = Date.now();
+
+    await tool.execute(
+      { agent: 'cursor', prompt: 'hi' } as never,
+      {
+        sessionID: 's',
+        messageID: 'm',
+        agent: 'cursor',
+        directory: dir,
+        worktree: dir,
+        abort: new AbortController().signal,
+        metadata: () => {},
+        ask: async () => {},
+      } as never,
+    );
+
+    expect(Date.now() - startedAt).toBeLessThan(750);
+  }, 15_000);
 });
