@@ -1144,7 +1144,14 @@ export class ForegroundFallbackManager {
         });
         if (this.abandonedByDispose(sessionID)) return;
         messages = (fullResult.data ?? []) as unknown[];
-        requestError = fullResult.error ?? requestError;
+        // Preserve BOTH failures: when the tail and the full read fail
+        // differently, the diagnostic log must surface the first error
+        // too instead of letting the full-read error overwrite it.
+        const fullError = fullResult.error ?? undefined;
+        if (fullError !== undefined) {
+          requestError =
+            requestError === undefined ? fullError : [requestError, fullError];
+        }
       }
       const lastUser = [...messages].reverse().find(isReplayableUserMessage);
       if (!lastUser) {

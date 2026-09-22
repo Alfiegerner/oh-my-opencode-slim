@@ -841,6 +841,45 @@ describe('ForegroundFallbackManager session.error', () => {
     expect(promptCall[0].body.parts[0]?.text).toBe('deep prompt');
   });
 
+  test('keeps both errors when the tail and the full transcript reads fail', async () => {
+    // A dual transcript-read incident must surface the tail error too:
+    // the full-read error aggregates after it instead of overwriting it.
+    let reads = 0;
+    ({ mocks } = createMockClient({
+      messagesImpl: async () => {
+        reads += 1;
+        return reads === 1
+          ? { error: { message: 'tail down' }, data: [] }
+          : { error: { message: 'full down' }, data: [] };
+      },
+    }));
+    mgr = new ForegroundFallbackManager(makeChains(), true, {
+      directory: '/test',
+    } as any);
+
+    await mgr.handleEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          sessionID: 'sess-1',
+          providerID: 'anthropic',
+          modelID: 'claude-opus-4-5',
+          role: 'assistant',
+        },
+      },
+    });
+    await mgr.handleEvent({
+      type: 'session.error',
+      properties: {
+        sessionID: 'sess-1',
+        error: { message: 'Rate limit exceeded' },
+      },
+    });
+
+    expect(reads).toBe(2);
+    expect(mocks.promptAsync).not.toHaveBeenCalled();
+  });
+
   function handoffMock() {
     const calls = {
       prepare: [] as Array<[string, number | undefined, string | undefined]>,
