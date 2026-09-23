@@ -45,7 +45,7 @@ const V2_DEFAULT_PERMISSIONS = [
 /** Map a v1 permission key (the tool) to v2 (action, resource). The host
  * evaluator matches the tool against `action` and the path/pattern against
  * `resource`. v1 `task` is v2 `subagent`; v1 `bash` is v2 `execute`. */
-function v1PermKeyToV2(
+export function v1PermKeyToV2(
   key: string,
 ): Array<{ action: string; resource: string }> {
   if (key === 'task') return [{ action: 'subagent', resource: '*' }];

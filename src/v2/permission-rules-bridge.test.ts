@@ -71,10 +71,10 @@ const TASK_POLICY = {
 
 /** deriveExactPermissionRules(TASK_POLICY) — insertion order, with the
  * v1→v2 action mapping (bash → execute+bash, task → subagent). The
- * whole-tool `edit: 'deny'` derives its action-scoped rule (resource =
- * the declared tool key); only the wildcard shapes are skipped. */
+ * whole-tool `edit: 'deny'` derives the host-canonical `'*'`-resource
+ * rule; only the wildcard-pattern shapes are skipped. */
 const EXACT_RULES: V2PermissionRule[] = [
-  { action: 'edit', resource: 'edit', effect: 'deny' },
+  { action: 'edit', resource: '*', effect: 'deny' },
   { action: 'execute', resource: 'git push', effect: 'ask' },
   { action: 'bash', resource: 'git push', effect: 'ask' },
   { action: 'subagent', resource: 'explorer', effect: 'allow' },
@@ -128,26 +128,26 @@ describe('deriveExactPermissionRules', () => {
     expect(deriveExactPermissionRules(TASK_POLICY)).toEqual(EXACT_RULES);
   });
 
-  test('whole-tool effects derive action-scoped rules; the string shorthand is skipped', () => {
+  test('whole-tool effects derive host-canonical *-resource rules; the string shorthand is skipped', () => {
     // A whole-tool effect (edit: 'deny') covers every resource of the
-    // tool; the tool key itself is the one exact resource the
-    // declaration names, so the rule's scope stays a subset of the
-    // declaration. The string shorthand applies to every ACTION and
-    // still cannot be emitted.
+    // tool; the host-canonical expression of that scope is the `'*'`
+    // resource — what `whollyDisabled` keys on and what the static agent
+    // registration emits. The string shorthand applies to every ACTION
+    // and is still skipped — the static agent rules carry it.
     expect(deriveExactPermissionRules('ask')).toEqual([]);
     expect(deriveExactPermissionRules({ edit: 'deny', read: 'allow' })).toEqual(
       [
-        { action: 'edit', resource: 'edit', effect: 'deny' },
-        { action: 'read', resource: 'read', effect: 'allow' },
+        { action: 'edit', resource: '*', effect: 'deny' },
+        { action: 'read', resource: '*', effect: 'allow' },
       ],
     );
     // v1→v2 action aliasing applies to whole-tool entries too.
     expect(deriveExactPermissionRules({ bash: 'deny' })).toEqual([
-      { action: 'execute', resource: 'bash', effect: 'deny' },
-      { action: 'bash', resource: 'bash', effect: 'deny' },
+      { action: 'execute', resource: '*', effect: 'deny' },
+      { action: 'bash', resource: '*', effect: 'deny' },
     ]);
     expect(deriveExactPermissionRules({ task: 'deny' })).toEqual([
-      { action: 'subagent', resource: 'task', effect: 'deny' },
+      { action: 'subagent', resource: '*', effect: 'deny' },
     ]);
   });
 
@@ -202,7 +202,7 @@ function coversWholeToolDeclarations(
         !rules.some(
           (rule) =>
             rule.action === action &&
-            rule.resource === tool &&
+            rule.resource === '*' &&
             rule.effect === value,
         )
       ) {
@@ -223,9 +223,9 @@ function everyRuleIsDeclared(
   for (const rule of rules) {
     const declared = Object.entries(map).some(([tool, value]) => {
       if (!v2ActionsForV1Key(tool).includes(rule.action)) return false;
-      if (rule.resource.includes('*') || rule.resource.includes('?'))
+      if (rule.resource !== '*' && (rule.resource.includes('*') || rule.resource.includes('?')))
         return false;
-      if (value === rule.effect && rule.resource === tool) return true;
+      if (value === rule.effect && rule.resource === '*') return true;
       return (
         !!value &&
         typeof value === 'object' &&
@@ -237,9 +237,13 @@ function everyRuleIsDeclared(
   return true;
 }
 
-function rulesAreWildcardFree(rules: V2PermissionRule[]): boolean {
+/** Host-canonical rule shapes: no wildcard ACTIONS; resources are the
+ * whole-tool `'*'` or wildcard-free patterns. */
+function rulesAreHostCanonical(rules: V2PermissionRule[]): boolean {
   return rules.every(
-    (rule) => !rule.action.match(/[*?]/) && !rule.resource.match(/[*?]/),
+    (rule) =>
+      !rule.action.match(/[*?]/) &&
+      (rule.resource === '*' || !rule.resource.match(/[*?]/)),
   );
 }
 
@@ -304,7 +308,7 @@ describe('built-in agent permission-rule derivation matrix', () => {
     // Incident fix: 0 rules meant the bridge skipped session.update and
     // the child stayed on inherited parent session rules.
     expect(rules.length).toBeGreaterThan(0);
-    expect(rulesAreWildcardFree(rules)).toBe(true);
+    expect(rulesAreHostCanonical(rules)).toBe(true);
     expect(coversWholeToolDeclarations(rules, map)).toBe(true);
     expect(everyRuleIsDeclared(rules, map)).toBe(true);
   });
@@ -324,7 +328,7 @@ describe('built-in agent permission-rule derivation matrix', () => {
     ]) {
       expect(rules).toContainEqual({
         action,
-        resource: action,
+        resource: '*',
         effect: 'allow',
       });
     }
@@ -332,7 +336,7 @@ describe('built-in agent permission-rule derivation matrix', () => {
     for (const action of ['edit', 'write', 'apply_patch']) {
       expect(rules).toContainEqual({
         action,
-        resource: action,
+        resource: '*',
         effect: 'deny',
       });
     }
@@ -368,10 +372,10 @@ describe('built-in agent permission-rule derivation matrix', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0].sessionID).toBe('ses_child_1');
     expect(calls[0].permissions.length).toBeGreaterThan(0);
-    expect(rulesAreWildcardFree(calls[0].permissions)).toBe(true);
+    expect(rulesAreHostCanonical(calls[0].permissions)).toBe(true);
     expect(calls[0].permissions).toContainEqual({
       action: 'question',
-      resource: 'question',
+      resource: '*',
       effect: 'allow',
     });
   });
@@ -396,12 +400,12 @@ describe('built-in agent permission-rule derivation matrix', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0].permissions).toContainEqual({
       action: 'read',
-      resource: 'read',
+      resource: '*',
       effect: 'allow',
     });
     expect(calls[0].permissions).toContainEqual({
       action: 'grep',
-      resource: 'grep',
+      resource: '*',
       effect: 'allow',
     });
   });
@@ -490,7 +494,7 @@ describe('createPermissionRulesBridge', () => {
     expect(warnings).toHaveLength(2);
   });
 
-  test('(d) emitted rules never contain wildcard characters', async () => {
+  test('(d) emitted rules are host-canonical (whole-tool * resource, no pattern wildcards)', async () => {
     const calls: RulesCall[] = [];
     const bridge = makeBridge({
       session: makeSession(async (input) => {
@@ -505,7 +509,7 @@ describe('createPermissionRulesBridge', () => {
     expect(calls[0].permissions).toHaveLength(EXACT_RULES.length);
     for (const rule of calls[0].permissions) {
       expect(rule.action).not.toMatch(/[*?]/);
-      expect(rule.resource).not.toMatch(/[*?]/);
+      expect(rule.resource === '*' || !rule.resource.match(/[*?]/)).toBe(true);
       expect(['allow', 'deny', 'ask']).toContain(rule.effect);
     }
   });
@@ -783,10 +787,10 @@ describe('createV2Setup permission rules wiring', () => {
         effect: 'ask',
       });
       // Whatever else the resolved task-policy contributed stays
-      // wildcard-free (skill entries and the like).
+      // host-canonical (whole-tool '*' or wildcard-free patterns).
       for (const rule of calls[0].permissions) {
         expect(rule.action).not.toMatch(/[*?]/);
-        expect(rule.resource).not.toMatch(/[*?]/);
+        expect(rule.resource === '*' || !rule.resource.match(/[*?]/)).toBe(true);
       }
     } finally {
       await cleanup();
