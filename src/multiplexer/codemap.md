@@ -48,7 +48,10 @@ multiplexer-specific command translation.
   URL). Owns the in-process `Map<childSessionId, PaneRecord>` that guarantees
   per-client uniqueness, the stable-idle debounce timers, busy-driven rebuilds
   of idle-closed children, and the reconnect backfill (FR-3/4/6/7/9/10/11).
-- **`tui-wiring.ts` — `createTuiPaneWiring`**: The v1 TUI host wiring. Owns
+- **`tui-wiring.ts` — `createTuiPaneWiring`**: The v1 TUI host wiring. The
+  caller scopes it to the displayed session's persisted directory (falling
+  back to the TUI launch directory), so resumed cross-directory sessions keep
+  their child panes. Owns
   admission (`multiplexer.type` × client environment), config reading, plugin
   log initialization, serverUrl reflection (`api.client.client.getConfig()
   .baseUrl` + `/session/status` probe, embedded-sentinel fail-closed), raw

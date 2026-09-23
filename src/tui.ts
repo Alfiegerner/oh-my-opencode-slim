@@ -143,6 +143,40 @@ export function resolveRouteSessionId(route: TuiRouteView): string | undefined {
   return undefined;
 }
 
+/**
+ * Resolves the project scope for panes owned by the displayed conversation.
+ *
+ * A TUI can be launched from one directory while resuming a session created
+ * in another. `state.path.directory` keeps the launch scope in that case,
+ * while the selected session retains the directory its children inherit.
+ * Prefer that session directory so multiplexer event filtering, status reads,
+ * and spawned attach panes all use the same scope as the displayed session.
+ */
+export function resolveTuiPaneDirectory(api: {
+  route?: { current?: TuiRouteView };
+  state?: {
+    path?: { directory?: string };
+    session?: {
+      get?: (sessionID: string) => { directory?: unknown } | undefined;
+    };
+  };
+}): string {
+  const fallback = getTuiDirectory(api);
+  const sessionID = api.route?.current
+    ? resolveRouteSessionId(api.route.current)
+    : undefined;
+  if (!sessionID) return fallback;
+
+  try {
+    const directory = api.state?.session?.get?.(sessionID)?.directory;
+    return typeof directory === 'string' && directory.length > 0
+      ? directory
+      : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export function splitSidebarModelId(model: string): {
   provider?: string;
   model: string;
@@ -1702,7 +1736,7 @@ const plugin: TuiDualContractModule = {
     // wiring owns admission, config, log init, serverUrl reflection and the
     // event projection; disposal closes this client's panes best-effort.
     const paneWiring = await createTuiPaneWiring({
-      directory: configDirectory,
+      directory: resolveTuiPaneDirectory(api),
       getDisplayedSessionId: () => resolveRouteSessionId(api.route.current),
       eventBus: api.event,
       client: (api as { client?: unknown }).client,

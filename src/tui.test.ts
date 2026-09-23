@@ -22,6 +22,7 @@ import {
   readConfigInvalid,
   resolveHoverBackground,
   resolveSidebarSlotOrder,
+  resolveTuiPaneDirectory,
   selectionGuard,
   shortSessionID,
   splitSidebarModelId,
@@ -42,6 +43,38 @@ import {
 } from './tui-state';
 
 const ACTIVITY_FRAME_PATTERN = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/;
+
+describe('TUI multiplexer directory scope', () => {
+  test('uses the displayed session directory when launch scope differs', () => {
+    expect(
+      resolveTuiPaneDirectory({
+        route: {
+          current: { name: 'session', params: { sessionID: 'ses_project' } },
+        },
+        state: {
+          path: { directory: '/home/user' },
+          session: {
+            get: () => ({ directory: '/home/user/project' }),
+          },
+        },
+      }),
+    ).toBe('/home/user/project');
+  });
+
+  test('falls back to the TUI directory when session metadata is unavailable', () => {
+    expect(
+      resolveTuiPaneDirectory({
+        route: {
+          current: { name: 'session', params: { sessionID: 'ses_missing' } },
+        },
+        state: {
+          path: { directory: '/home/user/project' },
+          session: { get: () => undefined },
+        },
+      }),
+    ).toBe('/home/user/project');
+  });
+});
 
 function createSnapshot(overrides: Partial<TuiSnapshot> = {}): TuiSnapshot {
   return {
