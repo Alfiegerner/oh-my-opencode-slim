@@ -206,6 +206,7 @@ export function sessionManagerMultiplexerConfig(
 export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   const sessionId = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15);
   initLogger(sessionId);
+  log('[plugin] oh-my-opencode-slim fork=Alfiegerner version=2.2.23-fleet.1 commit=65c4c8d2');
 
   if (isPluginDisabledByEnv()) {
     log('[plugin] disabled by OH_MY_OPENCODE_SLIM_DISABLE');
