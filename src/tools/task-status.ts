@@ -3,6 +3,7 @@ import {
   type ToolDefinition,
   tool,
 } from '@opencode-ai/plugin';
+import { listChildInputWaits } from '../hooks/task-session-manager/child-input-wait';
 import type { BackgroundJobStore } from '../utils/background-job-store';
 import { getRuntimeSessionStatusSnapshot } from '../utils/session-runtime-status';
 import type { TaskActivityTracker } from './task-activity';
@@ -58,6 +59,15 @@ export function createTaskStatusTool(options: {
         `idle_for_seconds: ${report.idleSeconds}`,
         `possibly_stuck: ${report.possiblyStuck}`,
       ];
+      // A child parked on an open question/permission moves no tokens and
+      // never finishes on its own: surface the block explicitly so the
+      // parent answers it (task_reply) instead of waiting it out.
+      for (const wait of listChildInputWaits(job.taskID)) {
+        details.push(`waiting_input: true (${wait.kind} ${wait.requestID})`);
+        details.push(
+          `pending_${wait.kind}: ${formatPendingInput(wait.kind, wait.requestID, wait.questions, wait.permission, wait.patterns)}`,
+        );
+      }
       if (report.uncertain) {
         details.push('status_uncertain: true');
         if (report.lastStatusError) {
@@ -70,9 +80,47 @@ export function createTaskStatusTool(options: {
           '[guidance]: The task is still running. Work on non-overlapping tasks, or conclude your response now to await the completion event.',
         );
       }
+      if (listChildInputWaits(job.taskID).length > 0) {
+        details.push('');
+        details.push(
+          '[guidance]: The task is waiting for your input and cannot proceed until you answer. Use task_reply with the request ID above to answer or reject it.',
+        );
+      }
       return details.join('\n');
     },
   });
 
   return { task_status };
+}
+
+function formatPendingInput(
+  kind: 'question' | 'permission',
+  requestID: string,
+  questions?: Array<{
+    question: string;
+    header: string;
+    options: Array<{ label: string; description: string }>;
+  }>,
+  permission?: string,
+  patterns?: string[],
+): string {
+  if (kind === 'permission') {
+    const patternText =
+      patterns && patterns.length > 0
+        ? ` patterns: ${patterns.join(', ')}`
+        : '';
+    return `${requestID} permission: ${permission ?? 'unknown'}${patternText}`;
+  }
+  if (!questions || questions.length === 0) return requestID;
+  const rendered = questions
+    .map((entry) => {
+      const options =
+        entry.options.length > 0
+          ? ` [${entry.options.map((option) => option.label).join(' / ')}]`
+          : '';
+      const header = entry.header ? `${entry.header}: ` : '';
+      return `${header}${entry.question}${options}`;
+    })
+    .join('; ');
+  return `${requestID} ${rendered}`;
 }

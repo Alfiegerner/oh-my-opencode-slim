@@ -90,6 +90,7 @@ const DEFAULT_BACKGROUND_JOBS: BackgroundJobsConfig = {
   },
   sameProviderPolicy: {},
   waitForUserGuard: true,
+  childInputWake: true,
 };
 
 const DEFAULT_FALLBACK: FailoverConfig = {

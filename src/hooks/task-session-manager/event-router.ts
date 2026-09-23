@@ -17,6 +17,14 @@ import type {
   InjectedTerminalJobs,
   RetainedBoardSnapshotState,
 } from './board-injection';
+import {
+  type ChildInputWaitKind,
+  type ChildInputWaitNotification,
+  clearChildInputWait,
+  clearChildInputWaitsForSession,
+  getChildInputWait,
+  noteChildInputWait,
+} from './child-input-wait';
 import type {
   EarlyTaskRegistration,
   PendingTaskCall,
@@ -323,9 +331,14 @@ export async function handleEvent(
     releaseConcurrencyTask?: (taskID: string) => void;
     observeSyntheticTerminalPart?: (part: unknown) => void;
     revivedRunTracker?: RevivedRunTracker;
+    /** Surface a background child's newly opened input wait to the parent. */
+    onChildInputWait?: (notification: ChildInputWaitNotification) => void;
+    /** Test seam; production uses event-arrival wall-clock time. */
+    now?: () => number;
   },
 ): Promise<void> {
   deps.inputWaits.trackInputWait(input.event);
+  routeChildInputWait(input, deps);
 
   if (input.event.type === 'message.part.updated') {
     deps.observeSyntheticTerminalPart?.(input.event.properties?.part);
@@ -810,6 +823,7 @@ export async function handleEvent(
   deps.inputWaits.clearInputWaits(sessionId);
   deps.pendingCallTracker.clearSession(sessionId);
   deps.retainedBoardSnapshots.delete(sessionId);
+  clearChildInputWaitsForSession(sessionId);
   const fallbackInProgress =
     deps.options.isFallbackInProgress?.(sessionId) === true;
   const job = deps.backgroundJobBoard.get(sessionId);
@@ -821,4 +835,118 @@ export async function handleEvent(
     sessionID: sessionId,
   });
   eventFenceMap(deps.backgroundJobBoard).delete(sessionId);
+}
+
+/**
+ * Surface a background child's pending question/permission to its parent.
+ *
+ * The per-session input-wait tracker arms a wait for the asking session
+ * only; a background child's ask never reaches the parent whose turn
+ * already ended. When the asking session is a RUNNING board-tracked
+ * BACKGROUND child, record the ask in the child-input-wait sidecar
+ * (idempotent per request id) and notify so the parent can be woken with
+ * the ask content. Replies/rejections clear the entry. Foreground children
+ * (background !== true), unknown sessions, and id-less asks are ignored.
+ */
+function routeChildInputWait(
+  input: {
+    event: {
+      type: string;
+      properties?: {
+        id?: string;
+        requestID?: string;
+        sessionID?: string;
+        questions?: unknown;
+        permission?: unknown;
+        patterns?: unknown;
+      };
+    };
+  },
+  deps: {
+    backgroundJobBoard: BackgroundJobStore;
+    onChildInputWait?: (notification: ChildInputWaitNotification) => void;
+    now?: () => number;
+  },
+): void {
+  const type = input.event.type;
+  const properties = input.event.properties;
+  const sessionID = properties?.sessionID;
+  if (!sessionID) return;
+
+  if (
+    type === 'question.asked' ||
+    type === 'question.v2.asked' ||
+    type === 'permission.asked'
+  ) {
+    const kind: ChildInputWaitKind =
+      type === 'permission.asked' ? 'permission' : 'question';
+    const requestID =
+      typeof properties?.id === 'string' ? properties.id : undefined;
+    if (!requestID || requestID.trim() === '') return;
+    const job = deps.backgroundJobBoard.get(sessionID);
+    if (
+      job?.state !== 'running' ||
+      job.background !== true ||
+      job.provisional === true
+    ) {
+      return;
+    }
+    const isDuplicate = getChildInputWait(sessionID, requestID) !== undefined;
+    const record = noteChildInputWait({
+      taskID: sessionID,
+      parentSessionID: job.parentSessionID,
+      kind,
+      requestID,
+      questions: properties?.questions,
+      permission: properties?.permission,
+      patterns: properties?.patterns,
+      now: deps.now?.(),
+    });
+    if (record) {
+      // The hook instance also subscribes to the sidecar globally (for asks
+      // observed by other instances); notify the direct dep here so callers
+      // that only hold this hook still see the ask. noteChildInputWait only
+      // notifies global subscribers on the FIRST ask per request id, and
+      // this direct call mirrors that: duplicates return the existing record
+      // without notifying.
+      if (!isDuplicate) {
+        deps.onChildInputWait?.({
+          parentSessionID: record.parentSessionID,
+          taskID: record.taskID,
+          kind: record.kind,
+          requestID: record.requestID,
+        });
+      }
+      log('[task-session-manager] background child input wait opened', {
+        taskID: record.taskID,
+        parentSessionID: record.parentSessionID,
+        kind: record.kind,
+        requestID: record.requestID,
+      });
+    }
+    return;
+  }
+
+  if (
+    type === 'question.replied' ||
+    type === 'question.v2.replied' ||
+    type === 'question.rejected' ||
+    type === 'question.v2.rejected' ||
+    type === 'permission.replied'
+  ) {
+    const requestID =
+      typeof properties?.requestID === 'string'
+        ? properties.requestID
+        : undefined;
+    if (!requestID || requestID.trim() === '') return;
+    if (
+      clearChildInputWait(sessionID, requestID) &&
+      deps.backgroundJobBoard.get(sessionID)
+    ) {
+      log('[task-session-manager] background child input wait resolved', {
+        taskID: sessionID,
+        requestID,
+      });
+    }
+  }
 }

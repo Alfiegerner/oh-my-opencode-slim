@@ -298,6 +298,12 @@ export const BackgroundJobsConfigSchema = z.object({
     .describe(
       'When true, intercept wait_for_user calls made while background tasks are still running and the orchestrator wake scheduler is enabled, returning guidance to end the turn instead of blocking on manual input. Default enabled.',
     ),
+  childInputWake: z
+    .boolean()
+    .default(true)
+    .describe(
+      'When true, a background child that asks a question or permission request wakes its parent with the ask content so the parent can answer via task_reply. Disable only if you answer child asks out-of-band. Default enabled.',
+    ),
 });
 
 export type BackgroundJobsConfig = z.infer<typeof BackgroundJobsConfigSchema>;
