@@ -1082,6 +1082,15 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "expnn",
+      "name": "expnn",
+      "avatar_url": "https://avatars.githubusercontent.com/u/18525479?v=4",
+      "profile": "https://github.com/expnn",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "commitConvention": "angular"
