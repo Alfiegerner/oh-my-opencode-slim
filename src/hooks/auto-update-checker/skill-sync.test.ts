@@ -568,12 +568,16 @@ describe('syncBundledSkillsFromPackage', () => {
     expect(manifestParsed.skills[existingSkill].status).toBe('customized');
   });
 
-  test('prevents reinstall when manifest indicates skill was deleted by user', async () => {
+  test('prevents reinstall when manifest indicates skill was deleted by user under the current version', async () => {
     const skillName = 'deleted-skill-test';
 
     const skillSrcDir = path.join(fakePackageRoot, 'src', 'skills', skillName);
     fs.mkdirSync(skillSrcDir, { recursive: true });
     fs.writeFileSync(path.join(skillSrcDir, 'SKILL.md'), '# Current');
+    fs.writeFileSync(
+      path.join(fakePackageRoot, 'package.json'),
+      JSON.stringify({ version: '1.1.0' }),
+    );
 
     const manifestDir = path.join(fakeDestConfigDir, '.oh-my-opencode-slim');
     fs.mkdirSync(manifestDir, { recursive: true });
@@ -585,7 +589,7 @@ describe('syncBundledSkillsFromPackage', () => {
       skills: {
         [skillName]: {
           status: 'deleted',
-          packageVersion: '1.0.0',
+          packageVersion: '1.1.0',
           sourceHash: 'some-hash',
           lastManagedHash: 'some-hash',
           lastSeenHash: 'some-hash',
@@ -601,6 +605,49 @@ describe('syncBundledSkillsFromPackage', () => {
     expect(
       fs.existsSync(path.join(fakeDestConfigDir, 'skills', skillName)),
     ).toBe(false);
+  });
+
+  test('expired tombstone (older package version) is re-offered by a newer package', async () => {
+    // A wiped skills directory is indistinguishable from per-skill user
+    // deletion at tombstone-write time; the tombstone can only be trusted
+    // for the version it was written under (issue #1266).
+    const skillName = 'stale-tombstone-test';
+
+    const skillSrcDir = path.join(fakePackageRoot, 'src', 'skills', skillName);
+    fs.mkdirSync(skillSrcDir, { recursive: true });
+    fs.writeFileSync(path.join(skillSrcDir, 'SKILL.md'), '# Current');
+
+    const manifestDir = path.join(fakeDestConfigDir, '.oh-my-opencode-slim');
+    fs.mkdirSync(manifestDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(manifestDir, 'skills-manifest.json'),
+      JSON.stringify(
+        {
+          schemaVersion: 1,
+          updatedAt: new Date().toISOString(),
+          skills: {
+            [skillName]: {
+              status: 'deleted',
+              packageVersion: '1.0.0',
+              sourceHash: 'some-hash',
+              lastManagedHash: 'some-hash',
+              lastSeenHash: 'some-hash',
+              updatedAt: new Date().toISOString(),
+            },
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
+    const result = await syncBundledSkillsFromPackage(fakePackageRoot);
+
+    expect(result.installed).toContain(skillName);
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(manifestDir, 'skills-manifest.json'), 'utf-8'),
+    );
+    expect(manifest.skills[skillName].status).toBe('managed');
   });
 
   test('recovers conflict status when destination is now a directory', async () => {

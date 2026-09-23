@@ -852,11 +852,21 @@ export function syncBundledSkillsFromPackage(
 
         if (!destExists) {
           if (entry && entry.status === 'deleted') {
+            if (entry.packageVersion === packageVersion) {
+              log(
+                `[skill-sync] Skill ${skill.name} was deleted by user. Skipping.`,
+              );
+              skippedExisting.push(skill.name);
+              continue;
+            }
+            // Tombstone from an older package version: a wiped skills
+            // directory looks identical to per-skill user deletion, so a
+            // tombstone can only be trusted for the version it was written
+            // under. A newer package re-offers the skill — fall through to
+            // a fresh install (issue #1266).
             log(
-              `[skill-sync] Skill ${skill.name} was deleted by user. Skipping.`,
+              `[skill-sync] Skill ${skill.name} tombstone is from ${entry.packageVersion}; package is now ${packageVersion}. Re-installing.`,
             );
-            skippedExisting.push(skill.name);
-            continue;
           }
           if (entry && entry.status !== 'deleted') {
             if (hadArtifacts) {
@@ -895,6 +905,7 @@ export function syncBundledSkillsFromPackage(
               delete rawEntry.stagedVersion;
               delete rawEntry.stagedHash;
               entry.status = 'deleted';
+              entry.packageVersion = packageVersion;
               entry.updatedAt = new Date().toISOString();
               log(
                 `[skill-sync] Skill ${skill.name} was deleted by user (detected now). Skipping.`,
