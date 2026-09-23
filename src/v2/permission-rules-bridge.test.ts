@@ -223,7 +223,10 @@ function everyRuleIsDeclared(
   for (const rule of rules) {
     const declared = Object.entries(map).some(([tool, value]) => {
       if (!v2ActionsForV1Key(tool).includes(rule.action)) return false;
-      if (rule.resource !== '*' && (rule.resource.includes('*') || rule.resource.includes('?')))
+      if (
+        rule.resource !== '*' &&
+        (rule.resource.includes('*') || rule.resource.includes('?'))
+      )
         return false;
       if (value === rule.effect && rule.resource === '*') return true;
       return (
@@ -790,7 +793,9 @@ describe('createV2Setup permission rules wiring', () => {
       // host-canonical (whole-tool '*' or wildcard-free patterns).
       for (const rule of calls[0].permissions) {
         expect(rule.action).not.toMatch(/[*?]/);
-        expect(rule.resource === '*' || !rule.resource.match(/[*?]/)).toBe(true);
+        expect(rule.resource === '*' || !rule.resource.match(/[*?]/)).toBe(
+          true,
+        );
       }
     } finally {
       await cleanup();
