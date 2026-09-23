@@ -645,10 +645,7 @@ describe('syncBundledSkillsFromPackage', () => {
 
     expect(result.installed).toContain(skillName);
     const manifest = JSON.parse(
-      fs.readFileSync(
-        path.join(manifestDir, 'skills-manifest.json'),
-        'utf-8',
-      ),
+      fs.readFileSync(path.join(manifestDir, 'skills-manifest.json'), 'utf-8'),
     );
     expect(manifest.skills[skillName].status).toBe('managed');
   });
