@@ -1,0 +1,233 @@
+import { getGlobalStore } from '../../utils/global-store';
+import { log } from '../../utils/logger';
+
+/**
+ * Pending input waits (question / permission) on background child sessions.
+ *
+ * The per-session `input-wait-tracker` arms a wait for the *asking* session,
+ * but a background child's `question.asked` never reaches its parent: the
+ * parent's turn already ended, so nothing wakes it (19.7h hang: child parked
+ * on `que_…`, parent idle with finish=stop, no notification anywhere).
+ *
+ * This sidecar closes that hole: it records the open asks of board-tracked
+ * RUNNING background children (keyed by taskID + request id, idempotent per
+ * ask) and notifies listeners with the parent session and the ask content so
+ * the parent can be woken. Entries clear on reply/reject, session deletion,
+ * or terminal board state. Process-local via globalThis + Symbol.for so
+ * independently created hook instances in the same JS process share one
+ * store — same pattern as the user-wait gate.
+ */
+
+export type ChildInputWaitKind = 'question' | 'permission';
+
+export interface ChildInputWaitQuestion {
+  question: string;
+  header: string;
+  options: Array<{ label: string; description: string }>;
+}
+
+export interface ChildInputWaitRecord {
+  taskID: string;
+  parentSessionID: string;
+  kind: ChildInputWaitKind;
+  requestID: string;
+  askedAt: number;
+  /** Truncated question content (question kind) or permission summary. */
+  questions?: ChildInputWaitQuestion[];
+  permission?: string;
+  patterns?: string[];
+}
+
+export interface ChildInputWaitNotification {
+  parentSessionID: string;
+  taskID: string;
+  kind: ChildInputWaitKind;
+  requestID: string;
+}
+
+type ChildInputWaitListener = (
+  notification: ChildInputWaitNotification,
+) => void;
+
+type ChildInputWaitStore = {
+  waits: Map<string, ChildInputWaitRecord>;
+  listeners: ChildInputWaitListener[];
+};
+
+const STORE_KEY = 'oh-my-opencode-slim.child-input-wait';
+
+function getStore(): ChildInputWaitStore {
+  return getGlobalStore<ChildInputWaitStore>(STORE_KEY, () => ({
+    waits: new Map(),
+    listeners: [],
+  }));
+}
+
+function waitKey(taskID: string, requestID: string): string {
+  return `${taskID}:${requestID}`;
+}
+
+/** Subscribe to newly opened child input waits. Best-effort: listener
+ * failures are logged, never propagated to the event path. */
+export function onChildInputWait(listener: ChildInputWaitListener): void {
+  getStore().listeners.push(listener);
+}
+
+export function removeChildInputWaitListener(
+  listener: ChildInputWaitListener,
+): void {
+  const store = getStore();
+  store.listeners = store.listeners.filter((entry) => entry !== listener);
+}
+
+function notifyListeners(record: ChildInputWaitRecord): void {
+  const notification: ChildInputWaitNotification = {
+    parentSessionID: record.parentSessionID,
+    taskID: record.taskID,
+    kind: record.kind,
+    requestID: record.requestID,
+  };
+  for (const listener of getStore().listeners) {
+    try {
+      listener(notification);
+    } catch (error) {
+      log('Child input wait listener threw', {
+        taskID: record.taskID,
+        requestID: record.requestID,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+}
+
+function sanitizeText(value: unknown, maxLength: number): string {
+  const text = typeof value === 'string' ? value : '';
+  const singleLine = text.replace(/\s+/g, ' ').trim();
+  return singleLine.length <= maxLength
+    ? singleLine
+    : `${singleLine.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function sanitizeQuestions(value: unknown): ChildInputWaitQuestion[] {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 8).map((entry) => {
+    const record =
+      typeof entry === 'object' && entry !== null
+        ? (entry as Record<string, unknown>)
+        : {};
+    const options = Array.isArray(record.options)
+      ? record.options.slice(0, 8).map((option) => {
+          const optionRecord =
+            typeof option === 'object' && option !== null
+              ? (option as Record<string, unknown>)
+              : {};
+          return {
+            label: sanitizeText(optionRecord.label, 30),
+            description: sanitizeText(optionRecord.description, 160),
+          };
+        })
+      : [];
+    return {
+      question: sanitizeText(record.question, 500),
+      header: sanitizeText(record.header, 30),
+      options,
+    };
+  });
+}
+
+function sanitizePatterns(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((entry): entry is string => typeof entry === 'string')
+    .slice(0, 8)
+    .map((entry) => sanitizeText(entry, 160));
+}
+
+/**
+ * Record a newly opened input wait on a board-tracked running background
+ * child. Idempotent per (taskID, requestID): a duplicate ask replays the
+ * stored content without re-notifying. Returns the record, or undefined
+ * when there is nothing to track (missing/empty request id).
+ */
+export function noteChildInputWait(input: {
+  taskID: string;
+  parentSessionID: string;
+  kind: ChildInputWaitKind;
+  requestID: string;
+  questions?: unknown;
+  permission?: unknown;
+  patterns?: unknown;
+  now?: number;
+}): ChildInputWaitRecord | undefined {
+  const requestID = input.requestID.trim();
+  if (!requestID) return undefined;
+  const store = getStore();
+  const key = waitKey(input.taskID, requestID);
+  const existing = store.waits.get(key);
+  if (existing) return existing;
+  const record: ChildInputWaitRecord = {
+    taskID: input.taskID,
+    parentSessionID: input.parentSessionID,
+    kind: input.kind,
+    requestID,
+    askedAt: input.now ?? Date.now(),
+  };
+  if (input.kind === 'question') {
+    record.questions = sanitizeQuestions(input.questions);
+  } else {
+    record.permission = sanitizeText(input.permission, 160);
+    record.patterns = sanitizePatterns(input.patterns);
+  }
+  store.waits.set(key, record);
+  notifyListeners(record);
+  return record;
+}
+
+/** Clear the wait for an answered/rejected request. Idempotent. */
+export function clearChildInputWait(
+  taskID: string,
+  requestID: string,
+): boolean {
+  const id = requestID.trim();
+  if (!id) return false;
+  return getStore().waits.delete(waitKey(taskID, id));
+}
+
+/** Clear every wait for a session (deleted/terminal/drop). Returns the
+ * number of entries removed. */
+export function clearChildInputWaitsForSession(taskID: string): number {
+  const store = getStore();
+  let removed = 0;
+  for (const key of [...store.waits.keys()]) {
+    if (key === taskID || key.startsWith(`${taskID}:`)) {
+      store.waits.delete(key);
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
+/** Look up one pending wait by task session and request id. */
+export function getChildInputWait(
+  taskID: string,
+  requestID: string,
+): ChildInputWaitRecord | undefined {
+  const id = requestID.trim();
+  if (!id) return undefined;
+  return getStore().waits.get(waitKey(taskID, id));
+}
+
+export function listChildInputWaits(taskID?: string): ChildInputWaitRecord[] {
+  const waits = [...getStore().waits.values()];
+  const filtered = taskID
+    ? waits.filter((wait) => wait.taskID === taskID)
+    : waits;
+  return filtered.sort((a, b) => a.askedAt - b.askedAt);
+}
+
+/** Test seam: wipe process-local state between cases. */
+export function resetChildInputWaitForTests(): void {
+  const store = getStore();
+  store.waits.clear();
+  store.listeners = [];
+}
