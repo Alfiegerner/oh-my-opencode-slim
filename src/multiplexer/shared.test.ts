@@ -253,3 +253,25 @@ describe('buildShellLaunchArgs', () => {
     }
   });
 });
+
+describe('findBinaryLogPrefix', () => {
+  test('derives [<binaryName>] for callers without an override', async () => {
+    const { findBinaryLogPrefix } = await importShared();
+
+    // tmux/zellij/herdr/kitty pass no override, so their `findBinary` log
+    // lines stay byte-identical.
+    expect(findBinaryLogPrefix('tmux')).toBe('[tmux]');
+    expect(findBinaryLogPrefix('zellij')).toBe('[zellij]');
+    expect(findBinaryLogPrefix('herdr')).toBe('[herdr]');
+    expect(findBinaryLogPrefix('kitten')).toBe('[kitten]');
+    expect(findBinaryLogPrefix('kitty')).toBe('[kitty]');
+  });
+
+  test('honors the cmux adapter override for both probes', async () => {
+    const { findBinaryLogPrefix } = await importShared();
+
+    // The legacy `cmux` fallback must log under `[cmux-tui]`, never `[cmux]`.
+    expect(findBinaryLogPrefix('cmux-tui', 'cmux-tui')).toBe('[cmux-tui]');
+    expect(findBinaryLogPrefix('cmux', 'cmux-tui')).toBe('[cmux-tui]');
+  });
+});

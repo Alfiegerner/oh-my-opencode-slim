@@ -5,22 +5,30 @@
  * - detection: `CMUX_TUI_SOCKET` (preferred) / legacy `CMUX_MUX_SOCKET`;
  * - explicit control plane: `--socket <path>` / `--session <name>`;
  * - anchor: `CMUX_TUI_TERMINAL_ID` → `terminal <id> show` (tab) →
- *   `tab <id> show` (pane);
- * - spawn: `pane <sel> split --right|--down`, then
- *   `pane <sel> run --on-exit keep -- <argv>`;
- * - close: `pane <sel> close`.
+ *   `tab <id> show` (pane, tab name, active flag);
+ * - spawn: `pane <sel> run --on-exit keep --name <parent/child> -- <argv>`,
+ *   which appends a sibling tab inside the parent pane and names it at
+ *   creation, then a best-effort `tab <pre-spawn active tab> focus`;
+ * - close: `terminal <sel> close` — the only primitive that ends the PTY;
+ * - sweep: `terminal list` → `terminal <sel> process show` → scan the launch
+ *   argv for the `# omosc:<pid>:<childSessionId>` data marker.
  *
  * Availability is a protocol read self-check (`session current ping`), never
  * `--version`: the binary reports its crate version, which is unrelated to the
  * npm distribution. Old-generation action-first binaries (the 0.64.x macOS app
  * surface model) fail the self-check with `unknown resource scope` and are
- * rejected with a distinguishable `old-generation` diagnostic.
+ * rejected with a distinguishable `old-generation` diagnostic. `pane run
+ * --name` was verified live on cmux-tui 0.13.3 and 0.13.4 (the documented
+ * floor is 0.13.3).
  *
- * Deliberately absent: `equalize`/rebalancing, readiness polling, mutation
- * queues, orphan cooldowns, close budgets, deferred spawns, hot-reload
- * takeover, and global pane registries. The client-side lifecycle core owns
- * readiness, per-client dedup, and stable-idle close; this adapter is a
- * stateless command translator that only ever acts on panes it just created.
+ * Deliberately absent: pane-level division primitives, tab reordering, tab
+ * renaming, `equalize`/rebalancing, readiness polling, mutation queues, orphan
+ * cooldowns, close
+ * budgets, deferred spawns, hot-reload takeover, and global pane registries.
+ * The client-side lifecycle core owns readiness, per-client dedup, and
+ * stable-idle close; this adapter is a stateless command translator that only
+ * ever acts on views it just created. It never calls `terminal.project`, so a
+ * `terminal close` can only ever remove views this adapter created.
  */
 
 import type { MultiplexerLayout } from '../../config/schema';
@@ -31,8 +39,10 @@ import {
   buildShellLaunchArgs,
   findBinary,
   resolveHostOpencodeBinary,
+  shellSupportsHashComments,
 } from '../shared';
-import type { Multiplexer, PaneResult } from '../types';
+import type { Multiplexer, PaneResult, PaneSpawnOptions } from '../types';
+import { childName, displayName, parentName } from './names';
 
 export interface CommandResult {
   exitCode: number;
@@ -80,46 +90,65 @@ export type CmuxResult<T> =
   | { ok: true; value: T }
   | { ok: false; error: CmuxError; reason: CmuxFailureReason };
 
+/** The parent view's container: the anchor tab and its pane. */
 export interface CmuxAnchor {
   tabId: string;
   paneId: string;
+  /** Parent tab `name` ('' when the tab has none). */
+  tabName: string;
+  /** True when the anchor tab was the pane's active tab at read time. */
+  tabFocused: boolean;
+}
+
+/** One `tab list` entry (only the fields this adapter reads). */
+export interface CmuxTab {
+  tabId: string;
+  paneId: string;
+  focused: boolean;
+}
+
+/** One `terminal list` entry (sweep candidate discovery). */
+export interface CmuxTerminal {
+  terminalId: string;
+}
+
+/** The handle of a created child view: terminal id plus its tab. */
+export interface CmuxRunResult {
+  tabId: string;
+  terminalId: string;
 }
 
 export interface CmuxClient {
   /** Protocol read self-check; never `--version`. */
   selfCheck(target: CmuxTarget): Promise<CmuxResult<true>>;
-  /** `terminal <id> show` → `tab <id> show` → anchor pane. */
+  /** `terminal <id> show` → `tab <id> show` → anchor pane + parent tab. */
   resolveAnchor(
     target: CmuxTarget,
     terminalId: string,
   ): Promise<CmuxResult<CmuxAnchor>>;
-  /** `pane <sel> split --right|--down`; resolves the created pane id. */
-  split(
-    target: CmuxTarget,
-    anchorPaneId: string,
-    direction: 'right' | 'down',
-  ): Promise<CmuxResult<string>>;
-  /** `pane <sel> rename --name <name>` (FR-8 title metadata). */
-  rename(
-    target: CmuxTarget,
-    paneId: string,
-    name: string,
-  ): Promise<CmuxResult<true>>;
-  /** `pane list` → pane ids and names (FR-8 sweep). */
-  listPanes(
-    target: CmuxTarget,
-  ): Promise<CmuxResult<Array<{ paneId: string; name: string }>>>;
-  /** `pane <sel> run --on-exit keep -- <argv>`. */
-  run(
+  /** `tab list` (used only to locate the pane's active sibling tab). */
+  listTabs(target: CmuxTarget): Promise<CmuxResult<CmuxTab[]>>;
+  /** `pane <sel> run --on-exit keep --name <name> -- <argv>`. */
+  runInPane(
     target: CmuxTarget,
     paneId: string,
     argv: string[],
-  ): Promise<CmuxResult<true>>;
-  /** `pane <sel> close`; `not_found` means the pane is already gone. */
-  close(
+    name: string,
+  ): Promise<CmuxResult<CmuxRunResult>>;
+  /** `tab <sel> focus` (restores the pre-spawn active tab). */
+  focusTab(target: CmuxTarget, tabId: string): Promise<CmuxResult<true>>;
+  /** `terminal <sel> close`; `not_found` means it is already gone. */
+  closeTerminal(
     target: CmuxTarget,
-    paneId: string,
+    terminalId: string,
   ): Promise<'closed' | 'not_found' | 'failed'>;
+  /** `terminal <sel> process show` → the verbatim launch argv. */
+  processShow(
+    target: CmuxTarget,
+    terminalId: string,
+  ): Promise<CmuxResult<{ argv: string[] }>>;
+  /** `terminal list` (sweep candidate discovery). */
+  listTerminals(target: CmuxTarget): Promise<CmuxResult<CmuxTerminal[]>>;
 }
 
 export interface CmuxOptions {
@@ -137,20 +166,18 @@ export interface CmuxOptions {
 }
 
 export class CmuxMultiplexer implements Multiplexer {
-  readonly type = 'cmux' as const;
+  readonly type = 'cmux-tui' as const;
 
-  private layout: MultiplexerLayout;
   private readonly client: CmuxClient;
   private readonly env: CmuxEnvironment;
   private readonly sessionName: string | undefined;
   private readonly opencodeBinary: string;
 
   constructor(
-    layout: MultiplexerLayout = 'main-vertical',
+    _layout: MultiplexerLayout = 'main-vertical',
     _mainPaneSize = 60,
     options: CmuxOptions = {},
   ) {
-    this.layout = layout;
     this.client =
       options.client ?? new CliCmuxClient(undefined, options.binary);
     this.env = options.env ?? process.env;
@@ -164,7 +191,7 @@ export class CmuxMultiplexer implements Multiplexer {
   async isAvailable(): Promise<boolean> {
     const target = this.resolveTarget();
     if (!target) {
-      log('[cmux] isAvailable: no control-plane target', {
+      log('[cmux-tui] isAvailable: no control-plane target', {
         stage: 'target',
         reason: 'no-control-plane',
       });
@@ -172,7 +199,7 @@ export class CmuxMultiplexer implements Multiplexer {
     }
     const check = await this.client.selfCheck(target);
     if (!check.ok) {
-      log('[cmux] isAvailable: unavailable', {
+      log('[cmux-tui] isAvailable: unavailable', {
         stage: 'selfCheck',
         reason: check.reason,
         error: check.error,
@@ -191,10 +218,11 @@ export class CmuxMultiplexer implements Multiplexer {
     description: string,
     serverUrl: string,
     directory: string,
+    options?: PaneSpawnOptions,
   ): Promise<PaneResult> {
     const target = this.resolveTarget();
     if (!target) {
-      log('[cmux] spawnPane: no control-plane target', {
+      log('[cmux-tui] spawnPane: no control-plane target', {
         stage: 'target',
         reason: 'no-control-plane',
       });
@@ -203,7 +231,7 @@ export class CmuxMultiplexer implements Multiplexer {
 
     const terminalId = firstNonEmpty(this.env.CMUX_TUI_TERMINAL_ID);
     if (!terminalId) {
-      log('[cmux] spawnPane: no anchor terminal id', {
+      log('[cmux-tui] spawnPane: no anchor terminal id', {
         stage: 'anchor',
         reason: 'no-anchor',
       });
@@ -212,7 +240,7 @@ export class CmuxMultiplexer implements Multiplexer {
 
     const check = await this.client.selfCheck(target);
     if (!check.ok) {
-      log('[cmux] spawnPane: self-check failed', {
+      log('[cmux-tui] spawnPane: self-check failed', {
         stage: 'selfCheck',
         reason: check.reason,
         error: check.error,
@@ -222,7 +250,7 @@ export class CmuxMultiplexer implements Multiplexer {
 
     const anchor = await this.client.resolveAnchor(target, terminalId);
     if (!anchor.ok) {
-      log('[cmux] spawnPane: anchor resolution failed', {
+      log('[cmux-tui] spawnPane: anchor resolution failed', {
         stage: 'anchor',
         reason: anchor.reason,
         error: anchor.error,
@@ -231,66 +259,84 @@ export class CmuxMultiplexer implements Multiplexer {
       return { success: false, error: anchor.error };
     }
 
-    const direction = cmuxSplitDirection(this.layout);
-    const created = await this.client.split(
+    // The display name is computed before `run` so the tab is named at
+    // creation (`pane run --name`); the name is never rewritten afterwards.
+    // It never carries sweep metadata — the argv marker does.
+    const name = displayName(
+      parentName(anchor.value.tabName, process.pid),
+      childName(options?.subagentType, sessionId),
+    );
+
+    // `pane run` activates the new tab, so remember what the user was
+    // looking at in this pane before the spawn (D4).
+    const restoreTabId = await this.resolvePreSpawnActiveTab(
+      target,
+      anchor.value,
+    );
+
+    const attachArgv = this.buildAttachArgv(
+      sessionId,
+      description,
+      serverUrl,
+      directory,
+    );
+    const created = await this.client.runInPane(
       target,
       anchor.value.paneId,
-      direction,
+      attachArgv,
+      name,
     );
     if (!created.ok) {
-      log('[cmux] spawnPane: split failed', {
-        stage: 'split',
+      log('[cmux-tui] spawnPane: run failed', {
+        stage: 'run',
         reason: created.reason,
         error: created.error,
-        anchorPaneId: anchor.value.paneId,
-        direction,
+        paneId: anchor.value.paneId,
       });
+      // `not_found` means the parent pane itself is gone: provably nothing
+      // was created, so the marker scan is pointless.
+      if (created.error !== 'not_found') {
+        await this.cleanupFailedRun(target, description);
+      }
       return { success: false, error: created.error };
     }
 
-    // FR-8 metadata: the description is the encoded owner pid + child session
-    // id. A failed rename only costs the crash-leftover sweep for this pane,
-    // so it is logged and the spawn continues.
-    const renamed = await this.client.rename(
-      target,
-      created.value,
-      description,
-    );
-    if (!renamed.ok) {
-      log('[cmux] spawnPane: pane rename failed (continuing)', {
-        stage: 'rename',
-        reason: renamed.reason,
-        error: renamed.error,
-        paneId: created.value,
+    const restored = await this.client.focusTab(target, restoreTabId);
+    if (!restored.ok) {
+      // Restoring the user's view is best-effort: the child view lives on.
+      log('[cmux-tui] spawnPane: focus restore failed (continuing)', {
+        stage: 'focus',
+        reason: restored.reason,
+        error: restored.error,
+        tabId: restoreTabId,
       });
     }
 
-    const attachArgv = this.buildAttachArgv(sessionId, serverUrl, directory);
-    const started = await this.client.run(target, created.value, attachArgv);
-    if (!started.ok) {
-      log('[cmux] spawnPane: attach run failed', {
-        stage: 'run',
-        reason: started.reason,
-        error: started.error,
-        paneId: created.value,
-      });
-      await this.closeQuietly(target, created.value);
-      return { success: false, error: started.error };
-    }
-
-    log('[cmux] spawnPane: created', {
-      paneId: created.value,
-      anchoredTarget: anchor.value.paneId,
-      tabId: anchor.value.tabId,
-      direction,
+    log('[cmux-tui] spawnPane: created', {
+      terminalId: created.value.terminalId,
+      tabId: created.value.tabId,
+      anchorTabId: anchor.value.tabId,
+      anchorPaneId: anchor.value.paneId,
+      restoreTabId,
     });
-    return { success: true, paneId: created.value };
+    return { success: true, paneId: created.value.terminalId };
   }
 
   /**
-   * FR-8 sweep capability: panes known to cmux with their `name` (the field
-   * `pane rename` writes). Returns an empty list when no control plane can be
-   * resolved (no command is issued).
+   * FR-8 sweep capability: discover this plugin's terminals by scanning each
+   * terminal's launch argv for the `# omosc:<pid>:<childSessionId>` marker.
+   * Returns `{ paneId: <terminal id>, title: <omosc token> }` for matches and
+   * nothing for user terminals (no marker). `tab list` is not a scan source:
+   * it cannot see terminals whose views were closed.
+   *
+   * Rejects when `terminal list` itself fails: a clean scan with zero
+   * candidates is `[]`, but a failed scan must stay retryable instead of
+   * looking like "nothing to do".
+   *
+   * Per-terminal inspection failures are classified: `not_found` is a
+   * definitive answer (nothing addressable to inspect, nothing to close) and
+   * only skips that terminal, while `unavailable` / `hard` leave the scan
+   * incomplete and reject so the caller retries.
    */
   async listPanesWithTitles(): Promise<
     Array<{ paneId: string; title: string }>
@@ -298,58 +344,113 @@ export class CmuxMultiplexer implements Multiplexer {
     const target = this.resolveTarget();
     if (!target) return [];
 
-    const listed = await this.client.listPanes(target);
-    if (!listed.ok) return [];
-    return listed.value.map((pane) => ({
-      paneId: pane.paneId,
-      title: pane.name,
-    }));
+    const listed = await this.client.listTerminals(target);
+    if (!listed.ok) {
+      throw new Error(`cmux terminal list failed (${listed.reason})`);
+    }
+
+    const candidates: Array<{ paneId: string; title: string }> = [];
+    for (const terminal of listed.value) {
+      const shown = await this.client.processShow(target, terminal.terminalId);
+      if (!shown.ok) {
+        if (shown.error === 'not_found') {
+          // Definitive answer: the terminal is not addressable, so there is
+          // nothing to inspect and nothing the sweep could ever close.
+          log('[cmux-tui] listPanesWithTitles: terminal already gone', {
+            terminalId: terminal.terminalId,
+            reason: shown.reason,
+          });
+          continue;
+        }
+        // Unknown state: the scan could not determine whether this terminal
+        // is a leftover, so it must stay retryable.
+        throw new Error(
+          `cmux process show failed for ${terminal.terminalId} (${shown.reason})`,
+        );
+      }
+      const title = extractArgvMarker(shown.value.argv);
+      if (!title) continue;
+      candidates.push({ paneId: terminal.terminalId, title });
+    }
+    return candidates;
   }
 
   async closePane(paneId: string): Promise<boolean> {
     const target = this.resolveTarget();
     if (!target) {
-      log('[cmux] closePane: no control-plane target', {
+      log('[cmux-tui] closePane: no control-plane target', {
         stage: 'target',
         reason: 'no-control-plane',
       });
       return false;
     }
     if (!paneId) {
-      log('[cmux] closePane: empty pane id', {
+      log('[cmux-tui] closePane: empty terminal id', {
         stage: 'close',
         reason: 'no-anchor',
       });
       return false;
     }
 
-    const outcome = await this.client.close(target, paneId);
+    const outcome = await this.client.closeTerminal(target, paneId);
     if (outcome === 'failed') {
-      log('[cmux] closePane: failed', { paneId });
+      log('[cmux-tui] closePane: failed', { paneId });
       return false;
     }
     if (outcome === 'not_found') {
       // Already gone: the desired state holds, so the close is a success.
-      log('[cmux] closePane: pane already gone', { paneId });
+      log('[cmux-tui] closePane: terminal already gone', { paneId });
     }
     return true;
   }
 
   async applyLayout(
-    layout: MultiplexerLayout,
+    _layout: MultiplexerLayout,
     _mainPaneSize: number,
   ): Promise<void> {
-    // cmux has no rebalancing primitive (no `equalize`); the layout only
-    // selects the split direction used by the next spawn.
-    this.layout = layout;
+    // cmux has no layout expression: the child view is a sibling tab inside
+    // the parent pane and never participates in the pane layout, so layout
+    // and main-pane-size produce no command at all.
   }
 
   private resolveTarget(): CmuxTarget | null {
     return resolveCmuxTarget(this.env, this.sessionName);
   }
 
+  /**
+   * The tab that was active in the parent pane right before the spawn. The
+   * anchor read already answers this when the anchor tab itself was active;
+   * otherwise `tab list` names the active sibling. When the active tab cannot
+   * be determined — the `tab list` read fails, or the pane has no focused
+   * entry — the parent tab is the fallback, so the focus restore is always
+   * attempted (best-effort; a failed focus only logs).
+   */
+  private async resolvePreSpawnActiveTab(
+    target: CmuxTarget,
+    anchor: CmuxAnchor,
+  ): Promise<string> {
+    if (anchor.tabFocused) return anchor.tabId;
+
+    const tabs = await this.client.listTabs(target);
+    if (!tabs.ok) {
+      log('[cmux-tui] spawnPane: tab list failed, restoring the parent tab', {
+        stage: 'activeTab',
+        reason: tabs.reason,
+        error: tabs.error,
+        paneId: anchor.paneId,
+      });
+      return anchor.tabId;
+    }
+    const active = tabs.value.find(
+      (tab) => tab.paneId === anchor.paneId && tab.focused,
+    );
+    // No focused entry for the pane: fall back to the parent tab.
+    return active?.tabId ?? anchor.tabId;
+  }
+
   private buildAttachArgv(
     sessionId: string,
+    description: string,
     serverUrl: string,
     directory: string,
   ): string[] {
@@ -359,19 +460,48 @@ export class CmuxMultiplexer implements Multiplexer {
       directory,
       this.opencodeBinary,
     );
-    return buildShellLaunchArgs(command);
+    // FR-8 carrier: a POSIX comment data marker in the launch script. The
+    // `cmd` branch has no `#` comments, so the marker is omitted there and
+    // the cmux sweep cannot identify those views (documented limitation).
+    // Line breaks are rejected first: a newline would end the comment and
+    // turn the remainder into executable script. (names.ts sanitizes display
+    // names with its own control-char stripper; the marker only needs the
+    // line-break guarantee, since nothing else terminates a shell comment.)
+    const marker = shellSupportsHashComments()
+      ? `# ${description.replace(/[\r\n]/g, ' ')}\n`
+      : '';
+    return buildShellLaunchArgs(`${marker}${command}`);
   }
 
-  private async closeQuietly(
+  /**
+   * Best-effort cleanup after a failed `runInPane`. The terminal id is only
+   * known from a successful response, so the exact argv marker identifies any
+   * terminal this spawn did create; user terminals carry no marker and are
+   * never touched.
+   */
+  private async cleanupFailedRun(
     target: CmuxTarget,
-    paneId: string,
+    description: string,
   ): Promise<void> {
     try {
-      const outcome = await this.client.close(target, paneId);
-      if (outcome === 'failed') {
-        log('[cmux] spawnPane: failed to close pane after run failure', {
-          paneId,
-        });
+      const listed = await this.client.listTerminals(target);
+      if (!listed.ok) return;
+      for (const terminal of listed.value) {
+        const shown = await this.client.processShow(
+          target,
+          terminal.terminalId,
+        );
+        if (!shown.ok) continue;
+        if (extractArgvMarker(shown.value.argv) !== description) continue;
+        const outcome = await this.client.closeTerminal(
+          target,
+          terminal.terminalId,
+        );
+        if (outcome === 'failed') {
+          log('[cmux-tui] spawnPane: cleanup close failed', {
+            terminalId: terminal.terminalId,
+          });
+        }
       }
     } catch {
       // Cleanup is best-effort; the spawn already failed.
@@ -423,6 +553,17 @@ export class CliCmuxClient implements CmuxClient {
   constructor(
     private readonly runner: CommandRunner = new SpawnCommandRunner(),
     binary?: string,
+    /**
+     * Binary probe seam (defaults to `findBinary`). The resolution order is
+     * the explicit `binary` above, then the `cmux-tui` distribution binary,
+     * then the legacy `cmux` name. Both probes log under `[cmux-tui]` so no
+     * `[cmux]` prefix can leak from the legacy fallback.
+     */
+    private readonly find: (
+      name: string,
+      logPrefix?: string,
+    ) => Promise<string | null> = (name, logPrefix) =>
+      findBinary(name, { logPrefix }),
   ) {
     this.binary = binary ?? null;
   }
@@ -440,7 +581,7 @@ export class CliCmuxClient implements CmuxClient {
 
     const payload = asRecord(parseJson(result.stdout));
     if (payload?.alive !== true) {
-      log('[cmux] selfCheck: invalid ping payload', {
+      log('[cmux-tui] selfCheck: invalid ping payload', {
         stage: 'selfCheck',
         detail: 'invalid-ping-payload',
         stdoutLength: result.stdout.length,
@@ -469,7 +610,7 @@ export class CliCmuxClient implements CmuxClient {
       stringField(terminalRecord, 'tab_id') ??
       firstStringItem(terminalRecord?.tab_ids);
     if (!tabId) {
-      log('[cmux] resolveAnchor: no tab_id in terminal show', {
+      log('[cmux-tui] resolveAnchor: no tab_id in terminal show', {
         stage: 'anchor',
         reason: 'invalid-response',
         terminalId,
@@ -484,12 +625,10 @@ export class CliCmuxClient implements CmuxClient {
       return { ok: false, ...classifyFailure(tab.value) };
     }
 
-    const paneId = stringField(
-      asRecord(parseJson(tab.value.stdout)),
-      'pane_id',
-    );
+    const tabRecord = asRecord(parseJson(tab.value.stdout));
+    const paneId = stringField(tabRecord, 'pane_id');
     if (!paneId) {
-      log('[cmux] resolveAnchor: no pane_id in tab show', {
+      log('[cmux-tui] resolveAnchor: no pane_id in tab show', {
         stage: 'anchor',
         reason: 'invalid-response',
         tabId,
@@ -497,100 +636,53 @@ export class CliCmuxClient implements CmuxClient {
       });
       return { ok: false, error: 'hard', reason: 'invalid-response' };
     }
-    return { ok: true, value: { tabId, paneId } };
-  }
-
-  async split(
-    target: CmuxTarget,
-    anchorPaneId: string,
-    direction: 'right' | 'down',
-  ): Promise<CmuxResult<string>> {
-    const result = await this.exec(target, [
-      'pane',
-      anchorPaneId,
-      'split',
-      `--${direction}`,
-    ]);
-    if (!result.ok) return result;
-    if (result.value.exitCode !== 0) {
-      return { ok: false, ...classifyFailure(result.value) };
-    }
-
-    const envelope = asRecord(parseJson(result.value.stdout));
-    const payload = asRecord(envelope?.value) ?? envelope;
-    const paneId = stringField(payload, 'pane_id');
-    if (!paneId) {
-      log('[cmux] split: no pane_id in response', {
-        stage: 'split',
-        reason: 'invalid-response',
-        anchorPaneId,
-        stdoutLength: result.value.stdout.length,
-      });
-      return { ok: false, error: 'hard', reason: 'invalid-response' };
-    }
-    return { ok: true, value: paneId };
-  }
-
-  async rename(
-    target: CmuxTarget,
-    paneId: string,
-    name: string,
-  ): Promise<CmuxResult<true>> {
-    const result = await this.exec(target, [
-      'pane',
-      paneId,
-      'rename',
-      '--name',
-      name,
-    ]);
-    if (!result.ok) return result;
-    if (result.value.exitCode !== 0) {
-      return { ok: false, ...classifyFailure(result.value) };
-    }
-    return { ok: true, value: true };
-  }
-
-  async listPanes(
-    target: CmuxTarget,
-  ): Promise<CmuxResult<Array<{ paneId: string; name: string }>>> {
-    const result = await this.exec(target, ['pane', 'list']);
-    if (!result.ok) return result;
-    if (result.value.exitCode !== 0) {
-      return { ok: false, ...classifyFailure(result.value) };
-    }
-
-    const parsed = parseJson(result.value.stdout);
-    const envelope = asRecord(parsed);
-    const entries = Array.isArray(parsed)
-      ? parsed
-      : Array.isArray(envelope?.value)
-        ? envelope.value
-        : [];
-
-    const panes: Array<{ paneId: string; name: string }> = [];
-    for (const entry of entries) {
-      const record = asRecord(entry);
-      const paneId = stringField(record, 'id');
-      if (!paneId) continue;
-      panes.push({
+    return {
+      ok: true,
+      value: {
+        tabId,
         paneId,
-        name: typeof record?.name === 'string' ? record.name : '',
-      });
-    }
-    return { ok: true, value: panes };
+        tabName: stringField(tabRecord, 'name') ?? '',
+        tabFocused: tabRecord?.focused === true,
+      },
+    };
   }
 
-  async run(
+  async listTabs(target: CmuxTarget): Promise<CmuxResult<CmuxTab[]>> {
+    const result = await this.exec(target, ['tab', 'list']);
+    if (!result.ok) return result;
+    if (result.value.exitCode !== 0) {
+      return { ok: false, ...classifyFailure(result.value) };
+    }
+
+    const tabs: CmuxTab[] = [];
+    for (const entry of listPayload(result.value.stdout)) {
+      const record = asRecord(entry);
+      const tabId = stringField(record, 'id');
+      const paneId = stringField(record, 'pane_id');
+      if (!tabId || !paneId) continue;
+      tabs.push({
+        tabId,
+        paneId,
+        focused: record?.focused === true,
+      });
+    }
+    return { ok: true, value: tabs };
+  }
+
+  async runInPane(
     target: CmuxTarget,
     paneId: string,
     argv: string[],
-  ): Promise<CmuxResult<true>> {
+    name: string,
+  ): Promise<CmuxResult<CmuxRunResult>> {
     const result = await this.exec(target, [
       'pane',
       paneId,
       'run',
       '--on-exit',
       'keep',
+      '--name',
+      name,
       '--',
       ...argv,
     ]);
@@ -598,27 +690,101 @@ export class CliCmuxClient implements CmuxClient {
     if (result.value.exitCode !== 0) {
       return { ok: false, ...classifyFailure(result.value) };
     }
+
+    const payload = valuePayload(result.value.stdout);
+    const tabId = stringField(payload, 'tab_id');
+    const terminalId = stringField(payload, 'terminal_id');
+    if (!tabId || !terminalId) {
+      log('[cmux-tui] runInPane: response missing tab_id/terminal_id', {
+        stage: 'run',
+        reason: 'invalid-response',
+        paneId,
+        stdoutLength: result.value.stdout.length,
+      });
+      return { ok: false, error: 'hard', reason: 'invalid-response' };
+    }
+    return { ok: true, value: { tabId, terminalId } };
+  }
+
+  async focusTab(target: CmuxTarget, tabId: string): Promise<CmuxResult<true>> {
+    const result = await this.exec(target, ['tab', tabId, 'focus']);
+    if (!result.ok) return result;
+    if (result.value.exitCode !== 0) {
+      return { ok: false, ...classifyFailure(result.value) };
+    }
     return { ok: true, value: true };
   }
 
-  async close(
+  async closeTerminal(
     target: CmuxTarget,
-    paneId: string,
+    terminalId: string,
   ): Promise<'closed' | 'not_found' | 'failed'> {
-    const result = await this.exec(target, ['pane', paneId, 'close']);
+    const result = await this.exec(target, ['terminal', terminalId, 'close']);
     if (!result.ok) return 'failed';
     if (result.value.exitCode === 0) return 'closed';
     const failure = classifyFailure(result.value);
     return failure.error === 'not_found' ? 'not_found' : 'failed';
   }
 
+  async processShow(
+    target: CmuxTarget,
+    terminalId: string,
+  ): Promise<CmuxResult<{ argv: string[] }>> {
+    const result = await this.exec(target, [
+      'terminal',
+      terminalId,
+      'process',
+      'show',
+    ]);
+    if (!result.ok) return result;
+    if (result.value.exitCode !== 0) {
+      return { ok: false, ...classifyFailure(result.value) };
+    }
+
+    const payload = valuePayload(result.value.stdout);
+    const rawArgv = payload?.argv;
+    if (!Array.isArray(rawArgv)) {
+      log('[cmux-tui] processShow: response missing argv', {
+        stage: 'processShow',
+        reason: 'invalid-response',
+        terminalId,
+        stdoutLength: result.value.stdout.length,
+      });
+      return { ok: false, error: 'hard', reason: 'invalid-response' };
+    }
+    const argv = rawArgv.filter(
+      (item): item is string => typeof item === 'string',
+    );
+    return { ok: true, value: { argv } };
+  }
+
+  async listTerminals(target: CmuxTarget): Promise<CmuxResult<CmuxTerminal[]>> {
+    const result = await this.exec(target, ['terminal', 'list']);
+    if (!result.ok) return result;
+    if (result.value.exitCode !== 0) {
+      return { ok: false, ...classifyFailure(result.value) };
+    }
+
+    const terminals: CmuxTerminal[] = [];
+    for (const entry of listPayload(result.value.stdout)) {
+      const terminalId = stringField(asRecord(entry), 'id');
+      if (!terminalId) continue;
+      terminals.push({ terminalId });
+    }
+    return { ok: true, value: terminals };
+  }
+
   private async exec(
     target: CmuxTarget,
     args: string[],
   ): Promise<CmuxResult<CommandResult>> {
-    this.binary ??= await findBinary('cmux');
+    // Resolution order: explicit `options.binary` (already stored), then the
+    // `cmux-tui` distribution binary, then the legacy `cmux` name.
+    this.binary ??=
+      (await this.find('cmux-tui', 'cmux-tui')) ??
+      (await this.find('cmux', 'cmux-tui'));
     if (!this.binary) {
-      log('[cmux] command skipped: binary not found', {
+      log('[cmux-tui] command skipped: binary not found', {
         operation: args[0],
       });
       return { ok: false, error: 'unavailable', reason: 'binary-not-found' };
@@ -633,7 +799,7 @@ export class CliCmuxClient implements CmuxClient {
         ...args,
       ]);
     } catch (error) {
-      log('[cmux] command threw', {
+      log('[cmux-tui] command threw', {
         operation: args[0],
         errorType: errorName(error),
       });
@@ -641,16 +807,41 @@ export class CliCmuxClient implements CmuxClient {
     }
 
     if (result.exitCode !== 0) {
-      log('[cmux] command failed', {
+      log('[cmux-tui] command failed', {
         operation: args[0],
         exitCode: result.exitCode,
-        stderr: args.includes('run')
+        stderr: commandCarriesArgv(args)
           ? '[redacted: may contain attach command]'
           : safeSummary(result.stderr),
       });
     }
     return { ok: true, value: result };
   }
+}
+
+/**
+ * True when the command carries a shell argv payload (the attach script,
+ * separated by `--`), whose stderr may echo it. Such stderr is redacted.
+ */
+export function commandCarriesArgv(args: string[]): boolean {
+  return args.includes('--');
+}
+
+/**
+ * Extract the FR-8 `omosc:<pid>:<childSessionId>` data marker from a terminal
+ * launch argv. The marker is written as a POSIX comment line (`# omosc:...`)
+ * at the start of the shell script, so it can never be an executable
+ * instruction. Returns null for terminals without a marker (user terminals).
+ */
+const ARGV_MARKER_PATTERN =
+  /(?:^|\n)# (omosc:\d{1,10}:[A-Za-z0-9_-]{1,64})(?=\n|$)/;
+
+export function extractArgvMarker(argv: string[]): string | null {
+  for (const arg of argv) {
+    const match = ARGV_MARKER_PATTERN.exec(arg);
+    if (match) return match[1];
+  }
+  return null;
 }
 
 /**
@@ -666,25 +857,6 @@ export function resolveCmuxTarget(
   const name = firstNonEmpty(sessionName, env.CMUX_TUI_SESSION);
   if (!socketPath && !name) return null;
   return { socketPath, sessionName: name };
-}
-
-/**
- * Fixed FR-14 layout mapping: cmux only has a single split direction, so each
- * standard layout picks the nearest `--right` / `--down` expression. The
- * documentation records this approximation.
- */
-export function cmuxSplitDirection(
-  layout: MultiplexerLayout,
-): 'right' | 'down' {
-  switch (layout) {
-    case 'main-horizontal':
-    case 'even-vertical':
-      return 'down';
-    case 'main-vertical':
-    case 'even-horizontal':
-    case 'tiled':
-      return 'right';
-  }
 }
 
 function controlPlaneArgs(target: CmuxTarget): string[] {
@@ -754,6 +926,20 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object'
     ? (value as Record<string, unknown>)
     : null;
+}
+
+/** Array payload of a list command, accepting an envelope or a bare array. */
+function listPayload(stdout: string): unknown[] {
+  const parsed = parseJson(stdout);
+  if (Array.isArray(parsed)) return parsed;
+  const value = asRecord(parsed)?.value;
+  return Array.isArray(value) ? value : [];
+}
+
+/** `value` object payload of a command response, accepting a bare object. */
+function valuePayload(stdout: string): Record<string, unknown> | null {
+  const parsed = asRecord(parseJson(stdout));
+  return asRecord(parsed?.value) ?? parsed;
 }
 
 function stringField(

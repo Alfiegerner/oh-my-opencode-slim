@@ -94,7 +94,7 @@ describe('pane-created diagnostics', () => {
     logPaneCreated(logger, {
       childSessionId: 'child-9',
       parentSessionId: 'parent-3',
-      adapter: 'cmux',
+      adapter: 'cmux-tui',
       paneId: 'pane-42',
       anchoredTarget: 'pane-7',
     });
@@ -105,7 +105,7 @@ describe('pane-created diagnostics', () => {
       event: DIAGNOSTIC_EVENT_PANE_CREATED,
       childSessionId: 'child-9',
       parentSessionId: 'parent-3',
-      adapter: 'cmux',
+      adapter: 'cmux-tui',
       paneId: 'pane-42',
       anchoredTarget: 'pane-7',
     });

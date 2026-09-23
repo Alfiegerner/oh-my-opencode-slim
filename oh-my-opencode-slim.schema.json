@@ -2033,7 +2033,7 @@
             "zellij",
             "herdr",
             "kitty",
-            "cmux",
+            "cmux-tui",
             "none"
           ]
         },
@@ -2053,6 +2053,11 @@
           "type": "number",
           "minimum": 20,
           "maximum": 80
+        },
+        "cmux_tui_binary": {
+          "description": "Explicit path to the cmux-tui binary. When unset, the adapter probes PATH for `cmux-tui` first and falls back to `cmux`.",
+          "type": "string",
+          "minLength": 1
         }
       }
     },

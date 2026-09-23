@@ -17,6 +17,12 @@ export interface PaneResult {
 export interface PaneSpawnOptions {
   /** Root/parent OpenCode session that requested this child pane. */
   parentSessionId?: string;
+  /**
+   * Subagent type of the child session (the host session's `agent` field,
+   * e.g. `oracle` / `explorer`). Adapters that build human-readable display
+   * names (cmux) consume it; every other adapter ignores it.
+   */
+  subagentType?: string;
 }
 
 /**
@@ -25,7 +31,7 @@ export interface PaneSpawnOptions {
  * CmuxMultiplexer, KittyMultiplexer
  */
 export interface Multiplexer {
-  readonly type: 'tmux' | 'zellij' | 'herdr' | 'cmux' | 'kitty';
+  readonly type: 'tmux' | 'zellij' | 'herdr' | 'cmux-tui' | 'kitty';
 
   /**
    * Check if the multiplexer binary is available on the system
@@ -53,8 +59,12 @@ export interface Multiplexer {
   ): Promise<PaneResult>;
 
   /**
-   * Close a pane by its ID
-   * @param paneId - The pane ID returned by spawnPane
+   * Close a pane by its adapter-local opaque handle.
+   *
+   * The handle is only meaningful to the adapter that produced it: cmux
+   * returns a terminal id, tmux/zellij/herdr/kitty return their native pane
+   * id. Callers must pass it back unmodified and never interpret it.
+   * @param paneId - The adapter-local opaque handle returned by spawnPane
    * @returns true if successfully closed
    */
   closePane(paneId: string): Promise<boolean>;
