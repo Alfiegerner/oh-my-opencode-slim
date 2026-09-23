@@ -27,6 +27,34 @@ function errorText(error: unknown): string {
 }
 
 /**
+ * Fail a reply when the host transport reports an error result.
+ *
+ * v1 SDK calls return `{ data, error, response }` and do NOT throw on HTTP
+ * errors by default, so a bare `await` would treat a 404/validation failure
+ * as success. Treat a set `error` or a non-2xx response as failure; results
+ * that carry neither (including domain-mock shapes like `{ data: true }`
+ * or `{}`) pass.
+ */
+function assertHostReplyResult(result: unknown, operation: string): void {
+  if (typeof result !== 'object' || result === null) return;
+  const record = result as {
+    error?: unknown;
+    response?: { ok?: unknown; status?: unknown };
+  };
+  if (record.error !== undefined && record.error !== null) {
+    throw new Error(`${operation} failed: ${errorText(record.error)}`);
+  }
+  const response = record.response;
+  if (response && typeof response.ok === 'boolean' && !response.ok) {
+    const status =
+      typeof response.status === 'number'
+        ? ` with HTTP ${response.status}`
+        : '';
+    throw new Error(`${operation} failed${status}`);
+  }
+}
+
+/**
  * Answer (or reject) a background child's pending question/permission.
  *
  * A background child that calls the `question` tool parks with no tokens
@@ -104,74 +132,150 @@ export function createTaskReplyTool(options: {
         permission?: {
           reply: (args: Record<string, unknown>) => Promise<unknown>;
         };
+        postSessionIdPermissionsPermissionId?: (
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+        _client?: {
+          post?: (args: Record<string, unknown>) => Promise<unknown>;
+        };
       };
       const timeoutMs = Math.max(
         1,
         options.replyTimeoutMs ?? DEFAULT_REPLY_TIMEOUT_MS,
       );
+      // Pinned after the guards above so the transport closures below keep
+      // narrowed (non-undefined) types.
+      const openWait = wait;
+      const targetJob = job;
 
-      try {
-        if (wait.kind === 'question') {
-          const question = client.question;
-          if (typeof question?.reply !== 'function') {
+      /**
+       * Answer/reject through the host. Future or v2-style clients expose
+       * `question` / `permission` domains directly and keep that preferred
+       * branch; the v1 SDK client (no such domains) falls back to its own
+       * underlying hey-api transport so auth headers + the directory
+       * interceptor are reused — never a hand-rolled fetch. The child
+       * session id is the job's taskID. v1 SDK results do not throw on
+       * HTTP errors, so error/non-2xx results fail here.
+       */
+      async function replyQuestion(
+        answers: string[][] | undefined,
+        operation: string,
+      ): Promise<unknown> {
+        const question = client.question;
+        if (answers !== undefined) {
+          if (typeof question?.reply === 'function') {
+            return await question.reply({
+              requestID: openWait.requestID,
+              directory: options.input.directory,
+              answers,
+            });
+          }
+          const post = client._client?.post;
+          if (typeof post !== 'function') {
             throw new Error(
               'Host client has no question.reply API; cannot answer the pending question',
             );
           }
+          return await post({
+            url: '/question/{requestID}/reply',
+            path: { requestID: openWait.requestID },
+            query: { directory: options.input.directory },
+            body: { answers },
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        if (typeof question?.reject === 'function') {
+          return await question.reject({
+            requestID: openWait.requestID,
+            directory: options.input.directory,
+          });
+        }
+        const post = client._client?.post;
+        if (typeof post !== 'function') {
+          throw new Error(
+            'Host client has no question.reject API; cannot reject the pending question',
+          );
+        }
+        return await post({
+          url: '/question/{requestID}/reject',
+          path: { requestID: openWait.requestID },
+          query: { directory: options.input.directory },
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      async function replyPermission(
+        response: 'once' | 'always' | 'reject',
+      ): Promise<unknown> {
+        const permission = client.permission;
+        if (typeof permission?.reply === 'function') {
+          return await permission.reply({
+            requestID: openWait.requestID,
+            directory: options.input.directory,
+            reply: response,
+          });
+        }
+        if (typeof client.postSessionIdPermissionsPermissionId === 'function') {
+          return await client.postSessionIdPermissionsPermissionId({
+            path: { id: targetJob.taskID, permissionID: openWait.requestID },
+            query: { directory: options.input.directory },
+            body: { response },
+          });
+        }
+        throw new Error(
+          'Host client has no permission.reply API; cannot answer the pending permission request',
+        );
+      }
+
+      try {
+        if (openWait.kind === 'question') {
           if (!args.answers || args.answers.length === 0) {
-            if (typeof question?.reject !== 'function') {
-              throw new Error(
-                'Host client has no question.reject API; cannot reject the pending question',
-              );
-            }
-            await withTimeout(
-              question.reject({
-                requestID: wait.requestID,
-                directory: options.input.directory,
-              }),
+            const result = await withTimeout(
+              replyQuestion(
+                undefined,
+                `Question reject ${openWait.requestID}`,
+              ),
               timeoutMs,
               `Question reject timed out after ${timeoutMs}ms`,
             );
-            return `Rejected pending question ${wait.requestID} for ${job.alias} (${job.taskID}).`;
+            assertHostReplyResult(
+              result,
+              `Question reject ${openWait.requestID}`,
+            );
+            // Confirmed on the host (which also emits question.rejected on
+            // success, clearing the sidecar via the event path); clear here
+            // as well so a missed/slow event cannot re-wake the parent.
+            clearChildInputWait(targetJob.taskID, openWait.requestID);
+            return `Rejected pending question ${openWait.requestID} for ${targetJob.alias} (${targetJob.taskID}).`;
           }
-          await withTimeout(
-            question.reply({
-              requestID: wait.requestID,
-              directory: options.input.directory,
-              answers: args.answers.map((answer) => [answer]),
-            }),
+          const result = await withTimeout(
+            replyQuestion(
+              args.answers.map((answer) => [answer]),
+              `Question reply ${openWait.requestID}`,
+            ),
             timeoutMs,
             `Question reply timed out after ${timeoutMs}ms`,
           );
-          return `Answered pending question ${wait.requestID} for ${job.alias} (${job.taskID}).`;
+          assertHostReplyResult(result, `Question reply ${openWait.requestID}`);
+          clearChildInputWait(targetJob.taskID, openWait.requestID);
+          return `Answered pending question ${openWait.requestID} for ${targetJob.alias} (${targetJob.taskID}).`;
         }
 
-        const permission = client.permission;
-        if (typeof permission?.reply !== 'function') {
-          throw new Error(
-            'Host client has no permission.reply API; cannot answer the pending permission request',
-          );
-        }
-        await withTimeout(
-          permission.reply({
-            requestID: wait.requestID,
-            directory: options.input.directory,
-            reply: args.reply ?? 'once',
-          }),
+        const reply = args.reply ?? 'once';
+        const result = await withTimeout(
+          replyPermission(reply),
           timeoutMs,
           `Permission reply timed out after ${timeoutMs}ms`,
         );
-        return `Replied ${args.reply ?? 'once'} to pending permission ${wait.requestID} for ${job.alias} (${job.taskID}).`;
+        assertHostReplyResult(result, `Permission reply ${openWait.requestID}`);
+        clearChildInputWait(targetJob.taskID, openWait.requestID);
+        return `Replied ${reply} to pending permission ${openWait.requestID} for ${targetJob.alias} (${targetJob.taskID}).`;
       } catch (error) {
+        // Keep the wait on error/timeout so task_status still shows the
+        // open ask and task_reply can retry; a failed transport leaves the
+        // ask open on the host.
         if (error instanceof OperationTimeoutError) throw error;
         throw new Error(`Task reply transport failed: ${errorText(error)}`);
-      } finally {
-        // The host emits question.replied/rejected (or permission.replied)
-        // on success, which clears the sidecar via the event path. Clear
-        // here as well so a missed/slow event cannot re-wake the parent
-        // for an already-answered ask; a failed transport leaves the ask
-        // open on the host, and the next ask event re-records it.
-        clearChildInputWait(job.taskID, wait.requestID);
       }
     },
   });

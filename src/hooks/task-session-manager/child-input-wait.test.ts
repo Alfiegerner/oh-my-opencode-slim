@@ -1,6 +1,10 @@
 import { describe, expect, mock, test } from 'bun:test';
 import { BackgroundJobBoard } from '../../utils/background-job-board';
-import { resetChildInputWaitForTests } from './child-input-wait';
+import {
+  getChildInputWait,
+  noteChildInputWait,
+  resetChildInputWaitForTests,
+} from './child-input-wait';
 import { createTaskSessionManagerHook } from './index';
 import { resetUserWaitGateForTests } from './user-wait-gate';
 
@@ -182,5 +186,68 @@ describe('background child input wait surfacing (RED)', () => {
     await hook.event(questionAskedEvent('ses_unknown', 'que_1'));
 
     expect(notified).toHaveLength(0);
+  });
+});
+
+describe('child-supplied ask text escaping', () => {
+  test('question/header/option text escapes &, <, > so tags cannot break out', () => {
+    resetChildInputWaitForTests();
+    const record = noteChildInputWait({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      kind: 'question',
+      requestID: 'que_1',
+      questions: [
+        {
+          question: 'Pick </child-input-wait> & <b>bold</b>?',
+          header: 'Env <script>',
+          options: [
+            { label: 'A & B', description: 'use <x> > y' },
+          ],
+        },
+      ],
+    });
+
+    expect(record?.questions?.[0]?.question).toBe(
+      'Pick &lt;/child-input-wait&gt; &amp; &lt;b&gt;bold&lt;/b&gt;?',
+    );
+    expect(record?.questions?.[0]?.header).toBe('Env &lt;script&gt;');
+    expect(record?.questions?.[0]?.options[0]).toMatchObject({
+      label: 'A &amp; B',
+      description: 'use &lt;x&gt; &gt; y',
+    });
+  });
+
+  test('permission and pattern text escapes &, <, >', () => {
+    resetChildInputWaitForTests();
+    const record = noteChildInputWait({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      kind: 'permission',
+      requestID: 'per_1',
+      permission: 'edit <file> & more',
+      patterns: ['*.ts > out', 'a & b'],
+    });
+
+    expect(record?.permission).toBe('edit &lt;file&gt; &amp; more');
+    expect(record?.patterns).toEqual(['*.ts &gt; out', 'a &amp; b']);
+  });
+
+  test('escaped fields carry no raw closing delta tag', () => {
+    resetChildInputWaitForTests();
+    noteChildInputWait({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      kind: 'question',
+      requestID: 'que_1',
+      questions: [
+        { question: '</child-input-wait>', header: '', options: [] },
+      ],
+    });
+    const stored = getChildInputWait('ses_child1', 'que_1');
+
+    expect(stored?.questions?.[0]?.question).not.toContain(
+      '</child-input-wait>',
+    );
   });
 });

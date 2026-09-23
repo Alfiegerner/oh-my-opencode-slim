@@ -100,12 +100,23 @@ function notifyListeners(record: ChildInputWaitRecord): void {
   }
 }
 
+/**
+ * Escape child-supplied text for prompt-visible rendering. Stored records
+ * feed both the `<child-input-wait>` wake delta and task_status output, so
+ * escaping at the sanitize choke point covers every render path. Same
+ * `&`/`<`/`>` precedent as the Background Job Board's promptSafe.
+ */
 function sanitizeText(value: unknown, maxLength: number): string {
   const text = typeof value === 'string' ? value : '';
   const singleLine = text.replace(/\s+/g, ' ').trim();
-  return singleLine.length <= maxLength
-    ? singleLine
-    : `${singleLine.slice(0, Math.max(0, maxLength - 3))}...`;
+  const truncated =
+    singleLine.length <= maxLength
+      ? singleLine
+      : `${singleLine.slice(0, Math.max(0, maxLength - 3))}...`;
+  return truncated
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
 }
 
 function sanitizeQuestions(value: unknown): ChildInputWaitQuestion[] {
