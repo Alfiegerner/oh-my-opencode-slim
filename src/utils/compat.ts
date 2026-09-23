@@ -275,6 +275,10 @@ export function crossSpawn(
     ],
     cwd: options?.cwd,
     env: options?.env as NodeJS.ProcessEnv,
+    // GUI-subsystem hosts (opencode desktop) have no console; without
+    // windowsHide every console-subsystem child allocates a visible
+    // console window per spawn.
+    windowsHide: true,
   };
 
   const proc: ChildProcess = viaCmdShell
