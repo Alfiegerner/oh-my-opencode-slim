@@ -88,6 +88,9 @@ class AcpClient {
       cwd,
       env: { ...process.env, ...config.env },
       stdio: 'pipe',
+      // Console-subsystem agents would otherwise show a console window for
+      // the whole agent run on GUI hosts.
+      windowsHide: true,
     });
     this.exitPromise = new Promise((resolve) => {
       const settle = () => {

@@ -491,6 +491,7 @@ export class CompanionManager {
       }
       const child = spawn(bin, [], {
         detached: true,
+        windowsHide: true,
         env: {
           ...process.env,
           OH_MY_OPENCODE_SLIM_COMPANION_SESSION_ID: this.id,

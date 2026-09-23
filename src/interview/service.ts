@@ -111,7 +111,11 @@ function openBrowser(url: string): void {
   }
 
   try {
-    const child = spawn(command, args, { detached: true, stdio: 'ignore' });
+    const child = spawn(command, args, {
+      detached: true,
+      windowsHide: true,
+      stdio: 'ignore',
+    });
     child.on('error', (error) => {
       log('[interview] failed to open browser:', { error: error.message, url });
     });
