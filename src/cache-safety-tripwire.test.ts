@@ -83,6 +83,10 @@ const ALLOWLIST = new Map<string, string>([
     'Date.now() timestamps event-tracked child/status bookkeeping for wake decisions (staleness bound, busy-set); the wake prompt text is a static constant and never derives from them.',
   ],
   [
+    'hooks/task-session-manager/child-input-wait.ts',
+    'Date.now() defaults the askedAt ordering key for pending child asks; timestamps are internal bookkeeping — the wake delta carries the ask content, never the timestamp.',
+  ],
+  [
     'hooks/auto-update-checker/cache.ts',
     'Date.now() and process.pid name an on-disk quarantine directory during the atomic publish transaction; the path is filesystem bookkeeping, never serialized into prompt content.',
   ],
