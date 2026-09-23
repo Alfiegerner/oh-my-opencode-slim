@@ -35,6 +35,11 @@ export interface PaneIdentity {
 /** One client-local pane, keyed by `childSessionId` in the in-process Map. */
 export interface PaneRecord extends PaneIdentity {
   status: PaneStatus;
+  /**
+   * Subagent type of the child (`agent` on the host session), remembered so
+   * the FR-11 rebuild reproduces the display name of the first creation.
+   */
+  subagentType?: string;
 }
 
 /** The four host events the client consumes (FR-3). */
@@ -57,6 +62,13 @@ export interface SessionLifecycleEvent {
   directory?: string;
   /** Present for `status` events. */
   status?: SessionRuntimeStatus;
+  /**
+   * Subagent type of a created child (the host session's `agent` field).
+   * Only the created event carries it; the core forwards it to the adapter
+   * through `PaneSpawnOptions.subagentType` so adapters can build
+   * human-readable display names without reading the environment.
+   */
+  subagentType?: string;
 }
 
 /**

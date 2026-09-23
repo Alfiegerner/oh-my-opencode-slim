@@ -46,6 +46,7 @@ import type {
   ClientPorts,
   Clock,
   ClockTimerHandle,
+  SessionListEntry,
   SessionListReader,
   SessionStatusRead,
   SessionStatusReader,
@@ -88,7 +89,10 @@ export const HOST_REPROBE_INTERVAL_MS = 5_000;
 /**
  * Low-frequency reconcile cadence (FR-7). The TUI event bus exposes no
  * reconnect signal (stage A 1.5), so a bounded periodic pass is the trigger
- * for the server-list difference compensation and the FR-8 leftover sweep.
+ * for the server-list difference compensation. The FR-8 leftover sweep is
+ * deliberately NOT on this tick: it runs once at startup and once per
+ * `unreachable → reachable` transition only, because its discovery path costs
+ * one terminal read per candidate and should not repeat every 30s.
  */
 export const RECONCILE_INTERVAL_MS = 30_000;
 
@@ -191,7 +195,7 @@ const processOnceGate = createOnceGate();
 export function detectClientAdapter(
   env: Record<string, string | undefined> = process.env,
 ): AdapterType | null {
-  if (env.CMUX_TUI_SOCKET || env.CMUX_MUX_SOCKET) return 'cmux';
+  if (env.CMUX_TUI_SOCKET || env.CMUX_MUX_SOCKET) return 'cmux-tui';
   if (env.TMUX_PANE) return 'tmux';
   if (env.ZELLIJ_PANE_ID) return 'zellij';
   if (env.HERDR_PANE_ID) return 'herdr';
@@ -265,7 +269,7 @@ export function resolveAnchoredTarget(
       return env.HERDR_PANE_ID ?? null;
     case 'kitty':
       return env.KITTY_WINDOW_ID ?? null;
-    case 'cmux':
+    case 'cmux-tui':
       return env.CMUX_TUI_TERMINAL_ID ?? env.CMUX_TUI_SOCKET ?? null;
   }
 }
@@ -347,7 +351,9 @@ export async function probeServerReachable(
  * envelopes carry none and are enriched by the wiring for held children.
  * Session ids are read from `properties.sessionID` when present and from
  * `properties.info.id` otherwise: created/deleted events use the latter
- * spelling (v1 SDK), idle/status the former.
+ * spelling (v1 SDK), idle/status the former. The created event additionally
+ * carries the child's `properties.info.agent` as `subagentType` so the core
+ * can hand it to adapters that build human-readable display names.
  */
 export function projectSessionEvent(
   type: string,
@@ -374,9 +380,19 @@ export function projectSessionEvent(
     typeof info?.directory === 'string' ? info.directory : undefined;
   const parentSessionId =
     typeof info?.parentID === 'string' ? info.parentID : undefined;
+  const subagentType =
+    typeof info?.agent === 'string' && info.agent.length > 0
+      ? info.agent
+      : undefined;
 
   if (type === 'session.created') {
-    return { kind: 'created', sessionId, parentSessionId, directory };
+    return {
+      kind: 'created',
+      sessionId,
+      parentSessionId,
+      directory,
+      ...(subagentType === undefined ? {} : { subagentType }),
+    };
   }
   if (type === 'session.deleted') {
     return { kind: 'deleted', sessionId, parentSessionId, directory };
@@ -498,8 +514,11 @@ export async function createTuiPaneWiring(
   let hostState: 'reachable' | 'unreachable' = 'unreachable';
   let nextProbeAt = 0;
   let probeInFlight: Promise<unknown> | null = null;
+  /** FR-8: a sweep is owed after startup / an `unreachable → reachable` edge. */
+  let sweepDue = false;
 
   const runProbe = async (): Promise<boolean> => {
+    const wasReachable = hostState === 'reachable';
     const reachable = await probeServerReachable(baseUrl, {
       directory,
       fetchFn: options.fetchFn,
@@ -507,6 +526,9 @@ export async function createTuiPaneWiring(
     });
     hostState = reachable ? 'reachable' : 'unreachable';
     nextProbeAt = clock.now() + HOST_REPROBE_INTERVAL_MS;
+    // The startup probe counts as a transition too: `hostState` starts
+    // unreachable, so a first success owes exactly one sweep.
+    if (reachable && !wasReachable) sweepDue = true;
     return reachable;
   };
 
@@ -573,6 +595,57 @@ export async function createTuiPaneWiring(
     logger,
   );
 
+  // FR-8 sweep capability: narrow the admitted adapter at first use (the
+  // adapter is also created per operation by the core; this instance is only
+  // used for pane scanning/closing). An unavailable adapter is not cached, so
+  // a later sweep can recover, matching the factory's policy.
+  let sweepAdapterCache: SweepAdapter | null | undefined = options.sweepAdapter;
+  const resolveSweepAdapter = (): SweepAdapter | null => {
+    if (sweepAdapterCache !== undefined) return sweepAdapterCache;
+    if (admission.adapter === null) return null;
+    const adapter = asSweepAdapter(adapterFactory.create(admission.adapter));
+    if (adapter) sweepAdapterCache = adapter;
+    return adapter;
+  };
+
+  const isProcessAlive = options.isProcessAlive ?? defaultIsProcessAlive;
+  const isSessionTerminal =
+    options.isSessionTerminal ??
+    createSessionTerminalProbe(options.client, options.statusTimeoutMs);
+
+  /** Returns true when the pass completed (even with zero candidates). */
+  const runSweep = async (): Promise<boolean> => {
+    const adapter = resolveSweepAdapter();
+    if (!adapter) return true;
+    try {
+      const stats = await sweepLeftoverPanes({
+        adapter,
+        isProcessAlive,
+        isSessionTerminal,
+        logger,
+      });
+      return !stats.scanFailed;
+    } catch {
+      // Fail-soft: leftovers stay for the documented user fallback.
+      return false;
+    }
+  };
+
+  /**
+   * FR-8 trigger: the leftover sweep runs once at startup and once per
+   * `unreachable → reachable` transition — never on the periodic reconcile
+   * tick. The cmux discovery path reads back one launch argv per terminal, so
+   * repeating it every 30s x N terminals is wasteful; crashes and reconnects
+   * bound the number of runs instead. A failed scan re-arms the owed sweep so
+   * a later tick retries (a broken daemon costs at most one scan per tick); a
+   * completed scan — including a clean empty one — is never repeated.
+   */
+  const drainDueSweep = async (): Promise<void> => {
+    if (!sweepDue || hostState !== 'reachable') return;
+    sweepDue = false;
+    if (!(await runSweep())) sweepDue = true;
+  };
+
   let disposed = false;
   const unsubscribers: Array<() => void> = [];
   /** Child ids seen in this client's directory, for directory-less events. */
@@ -599,6 +672,10 @@ export async function createTuiPaneWiring(
       logHostUnreachable(logger, onceGate, admission.adapter, event.sessionId);
       return;
     }
+    // An event may be the first thing to observe the host coming back: the
+    // owed sweep runs here, before the event itself is handled.
+    await drainDueSweep();
+    if (disposed) return;
     await lifecycle.handleEvent(event);
   };
 
@@ -616,42 +693,9 @@ export async function createTuiPaneWiring(
     }
   }
 
-  // FR-8 sweep capability: narrow the admitted adapter at first use (the
-  // adapter is also created per operation by the core; this instance is only
-  // used for pane scanning/closing). An unavailable adapter is not cached, so
-  // a later sweep can recover, matching the factory's policy.
-  let sweepAdapterCache: SweepAdapter | null | undefined = options.sweepAdapter;
-  const resolveSweepAdapter = (): SweepAdapter | null => {
-    if (sweepAdapterCache !== undefined) return sweepAdapterCache;
-    if (admission.adapter === null) return null;
-    const adapter = asSweepAdapter(adapterFactory.create(admission.adapter));
-    if (adapter) sweepAdapterCache = adapter;
-    return adapter;
-  };
-
-  const isProcessAlive = options.isProcessAlive ?? defaultIsProcessAlive;
-  const isSessionTerminal =
-    options.isSessionTerminal ??
-    createSessionTerminalProbe(options.client, options.statusTimeoutMs);
-
-  const runSweep = async (): Promise<void> => {
-    const adapter = resolveSweepAdapter();
-    if (!adapter) return;
-    try {
-      await sweepLeftoverPanes({
-        adapter,
-        isProcessAlive,
-        isSessionTerminal,
-        logger,
-      });
-    } catch {
-      // Fail-soft: leftovers stay for the documented user fallback.
-    }
-  };
-
   // FR-7 trigger: the bus has no reconnect signal, so reconcile runs once at
-  // startup and then on a low-frequency cadence (bounded server-list diff +
-  // FR-8 sweep). Disposal clears the tracked clock, stopping the chain.
+  // startup and then on a low-frequency cadence (bounded server-list diff
+  // only). Disposal clears the tracked clock, stopping the chain.
   let reconcileHandle: ClockTimerHandle | null = null;
   const scheduleReconcile = (): void => {
     if (disposed) return;
@@ -668,7 +712,7 @@ export async function createTuiPaneWiring(
     await ensureReachable();
     if (disposed) return;
     if (hostState === 'reachable') {
-      await runSweep();
+      await drainDueSweep();
       if (disposed) return;
       await lifecycle.onReconnect();
     }
@@ -942,7 +986,7 @@ function createSessionListReader(
   return {
     async listSessions(directory, parentID) {
       if (typeof fetchFn !== 'function') {
-        return { sessionIds: [], error: 'fetch unavailable' };
+        return { sessions: [], error: 'fetch unavailable' };
       }
       try {
         const response = await withTimeout(
@@ -952,24 +996,33 @@ function createSessionListReader(
           timeoutMs,
         );
         if (response.ok !== true) {
-          return { sessionIds: [], error: 'session.list failed' };
+          return { sessions: [], error: 'session.list failed' };
         }
         const data = await withTimeout(
           Promise.resolve(response.json?.()),
           timeoutMs,
         );
         if (!Array.isArray(data)) {
-          return { sessionIds: [], error: 'invalid session-list response' };
+          return { sessions: [], error: 'invalid session-list response' };
         }
-        const sessionIds: string[] = [];
+        const sessions: SessionListEntry[] = [];
         for (const entry of data) {
           if (!isRecord(entry) || entry.parentID !== parentID) continue;
-          if (typeof entry.id === 'string') sessionIds.push(entry.id);
+          if (typeof entry.id !== 'string') continue;
+          const subagentType =
+            typeof entry.agent === 'string' && entry.agent.length > 0
+              ? entry.agent
+              : undefined;
+          sessions.push(
+            subagentType === undefined
+              ? { sessionId: entry.id }
+              : { sessionId: entry.id, subagentType },
+          );
         }
-        return { sessionIds };
+        return { sessions };
       } catch (error) {
         return {
-          sessionIds: [],
+          sessions: [],
           error: error instanceof Error ? error.message : String(error),
         };
       }

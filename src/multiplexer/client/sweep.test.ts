@@ -2,6 +2,10 @@
  * FR-8 sweep logic tests: only dead-owner + terminal-child encoded panes are
  * closed; every uncertainty keeps the pane (fail-closed), and every failure
  * fails soft without aborting the pass.
+ *
+ * Candidate discovery is adapter-owned (title scan for tmux/zellij/herdr/
+ * kitty, launch-argv marker for cmux); these tests feed both shapes because
+ * the decision logic must be identical for either.
  */
 
 import { describe, expect, test } from 'bun:test';
@@ -92,6 +96,7 @@ describe('sweepLeftoverPanes (FR-8)', () => {
       skippedActiveSession: 0,
       skippedUnparsable: 0,
       closeFailures: 0,
+      scanFailed: false,
     });
     expect(logger.outcomes()).toEqual(['closed']);
   });
@@ -242,7 +247,7 @@ describe('sweepLeftoverPanes (FR-8)', () => {
     expect(stats.skippedActiveSession).toBe(1);
   });
 
-  test('a failing pane scan returns empty stats', async () => {
+  test('a failing pane scan returns fail-soft stats flagged as failed', async () => {
     const adapter = new FakeAdapter();
     adapter.listError = new Error('no multiplexer');
     const logger = new CapturingLogger();
@@ -257,8 +262,89 @@ describe('sweepLeftoverPanes (FR-8)', () => {
       skippedActiveSession: 0,
       skippedUnparsable: 0,
       closeFailures: 0,
+      scanFailed: true,
     });
     expect(logger.outcomes()).toEqual(['scan-failed']);
+  });
+});
+
+describe('cmux argv-marker candidates (tasks 4.4/4.5)', () => {
+  test('closes terminal-handle candidates discovered from argv markers', async () => {
+    const adapter = new FakeAdapter();
+    // cmux discovery yields a terminal id plus the `omosc:` token extracted
+    // from the launch argv; the sweep treats them exactly like title-scan
+    // candidates (dead owner + terminal child -> closePane(terminal id)).
+    adapter.panes = [
+      { paneId: 'term-1', title: encodePaneTitle(DEAD_PID, TERMINAL_CHILD) },
+      { paneId: 'term-2', title: encodePaneTitle(DEAD_PID, ACTIVE_CHILD) },
+    ];
+
+    const stats = await sweepLeftoverPanes(
+      makePorts(adapter, {
+        isSessionTerminal: async (child) => child === TERMINAL_CHILD,
+      }),
+    );
+
+    expect(adapter.closed).toEqual(['term-1']);
+    expect(stats).toMatchObject({
+      scanned: 2,
+      encoded: 2,
+      closed: 1,
+      skippedActiveSession: 1,
+      skippedUnparsable: 0,
+    });
+  });
+
+  test('raw argv or shell-comment fragments never parse and are never closed', async () => {
+    const adapter = new FakeAdapter();
+    // Only the extracted strict token may be handed in; anything the adapter
+    // passes through raw (the whole shell comment, an argv tail, an injected
+    // suffix) fails the strict parse and is skipped as data (NFR-5).
+    adapter.panes = [
+      { paneId: 'term-raw', title: '# omosc:999999:ses_gone' },
+      {
+        paneId: 'term-tail',
+        title: 'export OMO=1; exec sleep 9 # omosc:999999:ses_gone',
+      },
+      { paneId: 'term-injected', title: 'omosc:999999:ses_gone;rm -rf /' },
+      { paneId: 'term-blank', title: '' },
+    ];
+    const probed: string[] = [];
+
+    const stats = await sweepLeftoverPanes(
+      makePorts(adapter, {
+        isSessionTerminal: async (child) => {
+          probed.push(child);
+          return true;
+        },
+      }),
+    );
+
+    expect(adapter.closed).toEqual([]);
+    expect(probed).toEqual([]);
+    expect(stats.skippedUnparsable).toBe(4);
+    expect(stats.encoded).toBe(0);
+  });
+
+  test('a close failure on a marker candidate is counted and the pass continues', async () => {
+    const adapter = new FakeAdapter();
+    adapter.panes = [
+      { paneId: 'term-fail', title: encodePaneTitle(DEAD_PID, TERMINAL_CHILD) },
+      { paneId: 'term-ok', title: encodePaneTitle(DEAD_PID, TERMINAL_CHILD) },
+    ];
+    let calls = 0;
+    adapter.closePane = async (paneId: string): Promise<boolean> => {
+      calls += 1;
+      if (calls === 1) return false;
+      adapter.closed.push(paneId);
+      return true;
+    };
+
+    const stats = await sweepLeftoverPanes(makePorts(adapter));
+
+    expect(stats.closed).toBe(1);
+    expect(stats.closeFailures).toBe(1);
+    expect(adapter.closed).toEqual(['term-ok']);
   });
 });
 

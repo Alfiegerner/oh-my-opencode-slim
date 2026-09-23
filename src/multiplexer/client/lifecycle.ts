@@ -80,9 +80,14 @@ export class PaneLifecycle {
   private readonly idleTimers = new Map<string, ClockTimerHandle>();
   /**
    * Children this client closed on stable idle (not terminal deletion), kept
-   * so a later busy event can rebuild them (FR-11).
+   * so a later busy event can rebuild them (FR-11). The entry carries the
+   * subagent type observed at creation so the rebuild produces the same
+   * display name as the first spawn.
    */
-  private readonly closedWatch = new Map<string, { parentSessionId: string }>();
+  private readonly closedWatch = new Map<
+    string,
+    { parentSessionId: string; subagentType?: string }
+  >();
   /**
    * Activity epoch per child, bumped by every held-pane event. A close
    * decision captures the epoch before its final status read and aborts when
@@ -223,7 +228,11 @@ export class PaneLifecycle {
     // not produce a second pane (FR-6).
     if (this.spawnsInFlight.has(event.sessionId)) return;
 
-    await this.createPane(event.sessionId, event.parentSessionId);
+    await this.createPane(
+      event.sessionId,
+      event.parentSessionId,
+      event.subagentType,
+    );
   }
 
   /**
@@ -244,7 +253,14 @@ export class PaneLifecycle {
     // The route can move while the read is in flight; acting on the previous
     // parent would backfill panes for a conversation the user already left.
     if (this.displayedSessionId !== parentSessionId) return;
-    const serverChildIds = new Set(list.sessionIds);
+    const serverChildIds = new Set<string>();
+    const serverAgents = new Map<string, string>();
+    for (const entry of list.sessions) {
+      serverChildIds.add(entry.sessionId);
+      if (entry.subagentType !== undefined) {
+        serverAgents.set(entry.sessionId, entry.subagentType);
+      }
+    }
 
     // Local panes whose child is gone from the server are terminal: close.
     // Only records belonging to the parent being reconciled are judged here:
@@ -286,7 +302,11 @@ export class PaneLifecycle {
         const live = statuses?.get(childSessionId);
         if (live !== 'busy' && live !== 'retry') continue;
         if (this.spawnsInFlight.has(childSessionId)) continue;
-        await this.createPane(childSessionId, watched.parentSessionId);
+        await this.createPane(
+          childSessionId,
+          watched.parentSessionId,
+          watched.subagentType,
+        );
       }
     }
 
@@ -295,7 +315,11 @@ export class PaneLifecycle {
       if (this.panes.has(childSessionId)) continue;
       if (this.spawnsInFlight.has(childSessionId)) continue;
       if (this.closedWatch.has(childSessionId)) continue;
-      await this.createPane(childSessionId, parentSessionId);
+      await this.createPane(
+        childSessionId,
+        parentSessionId,
+        serverAgents.get(childSessionId),
+      );
     }
   }
 
@@ -351,18 +375,23 @@ export class PaneLifecycle {
     const watched = this.closedWatch.get(event.sessionId);
     if (watched === undefined) return;
 
-    await this.rebuildWatched(event.sessionId, watched.parentSessionId);
+    await this.rebuildWatched(
+      event.sessionId,
+      watched.parentSessionId,
+      watched.subagentType,
+    );
   }
 
   private async rebuildWatched(
     childSessionId: string,
     parentSessionId: string,
+    subagentType?: string,
   ): Promise<void> {
     if (parentSessionId !== this.displayedSessionId) return;
     if (this.config.adapter === null) return;
     if (this.spawnsInFlight.has(childSessionId)) return;
 
-    await this.createPane(childSessionId, parentSessionId);
+    await this.createPane(childSessionId, parentSessionId, subagentType);
   }
 
   private isOurDirectory(event: SessionLifecycleEvent): boolean {
@@ -372,6 +401,7 @@ export class PaneLifecycle {
   private async createPane(
     childSessionId: string,
     parentSessionId: string,
+    subagentType?: string,
   ): Promise<void> {
     const adapterType = this.config.adapter;
     if (adapterType === null) return;
@@ -427,6 +457,7 @@ export class PaneLifecycle {
         childSessionId,
         parentSessionId,
         serverUrl.url,
+        subagentType,
       );
       if (!result.success || !result.paneId) {
         logNoPane(this.logger, this.adapterFailureReason(result.error), {
@@ -455,6 +486,7 @@ export class PaneLifecycle {
         adapter: adapterType,
         anchoredTarget: this.resolveAnchoredTarget(),
         status: 'active',
+        ...(subagentType === undefined ? {} : { subagentType }),
       };
       this.panes.set(childSessionId, record);
       this.closedWatch.delete(childSessionId);
@@ -488,6 +520,7 @@ export class PaneLifecycle {
     childSessionId: string,
     parentSessionId: string,
     serverUrl: string,
+    subagentType?: string,
   ): Promise<PaneResult> {
     try {
       // The description doubles as the initial pane title. The wiring injects
@@ -500,7 +533,7 @@ export class PaneLifecycle {
         description,
         serverUrl,
         this.config.directory,
-        { parentSessionId },
+        { parentSessionId, subagentType },
       );
     } catch {
       return { success: false, error: 'hard' };
@@ -567,7 +600,7 @@ export class PaneLifecycle {
         parentID,
       );
     } catch {
-      return { sessionIds: [], error: 'session list read failed' };
+      return { sessions: [], error: 'session list read failed' };
     }
   }
 
@@ -664,12 +697,20 @@ export class PaneLifecycle {
       this.activityEpoch.delete(childSessionId);
       // Only idle closes are rebuildable; deleted/gone children are terminal.
       if (reason === 'idle') {
-        this.rememberClosed(childSessionId, record.parentSessionId);
+        this.rememberClosed(
+          childSessionId,
+          record.parentSessionId,
+          record.subagentType,
+        );
         // The child turned busy while this close was in flight; that edge was
         // consumed by the close, so rebuild right away instead of waiting for
         // the next event or the reconcile tick.
         if (this.busyWhileClosing.delete(childSessionId)) {
-          await this.rebuildWatched(childSessionId, record.parentSessionId);
+          await this.rebuildWatched(
+            childSessionId,
+            record.parentSessionId,
+            record.subagentType,
+          );
         }
       }
       return;
@@ -683,9 +724,15 @@ export class PaneLifecycle {
   private rememberClosed(
     childSessionId: string,
     parentSessionId: string,
+    subagentType?: string,
   ): void {
     this.closedWatch.delete(childSessionId);
-    this.closedWatch.set(childSessionId, { parentSessionId });
+    this.closedWatch.set(
+      childSessionId,
+      subagentType === undefined
+        ? { parentSessionId }
+        : { parentSessionId, subagentType },
+    );
     if (this.closedWatch.size <= MAX_REMEMBERED_CLOSED) return;
     const oldest = this.closedWatch.keys().next().value;
     if (oldest !== undefined) this.closedWatch.delete(oldest);

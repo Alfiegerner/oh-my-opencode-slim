@@ -21,6 +21,7 @@ import {
 import { encodePaneTitle } from './pane-title';
 import type { Clock, ClockTimerHandle } from './ports';
 import type { SweepAdapter, SweepPane } from './sweep';
+import { defaultIsProcessAlive } from './sweep';
 import {
   type ClientEventBus,
   createReusingAdapterFactory,
@@ -143,6 +144,8 @@ class FakeAdapter implements Multiplexer {
     description: string;
     serverUrl: string;
     directory: string;
+    parentSessionId?: string;
+    subagentType?: string;
   }> = [];
   readonly closes: string[] = [];
   /** FR-8 sweep capability: panes this fake multiplexer reports. */
@@ -168,8 +171,16 @@ class FakeAdapter implements Multiplexer {
     description: string,
     serverUrl: string,
     directory: string,
+    options?: { parentSessionId?: string; subagentType?: string },
   ): Promise<PaneResult> {
-    this.spawns.push({ sessionId, description, serverUrl, directory });
+    this.spawns.push({
+      sessionId,
+      description,
+      serverUrl,
+      directory,
+      parentSessionId: options?.parentSessionId,
+      subagentType: options?.subagentType,
+    });
     return this.spawnResult;
   }
 
@@ -188,7 +199,7 @@ interface FakeClientState {
   statuses: Record<string, { type: string }>;
   statusCalls: string[];
   statusHeaders: Array<Record<string, string> | undefined>;
-  sessions: Array<{ id: string; parentID?: string }>;
+  sessions: Array<{ id: string; parentID?: string; agent?: string }>;
   listCalls: string[];
   listHeaders: Array<Record<string, string> | undefined>;
   /** `session.get` outcomes for the FR-8 terminal probe. */
@@ -285,6 +296,7 @@ function createdEvent(
   sessionId = CHILD,
   parentSessionId = PARENT,
   directory = DIRECTORY,
+  agent?: string,
 ) {
   // Real v1 shape: `session.created` carries the id in `properties.info.id`
   // (there is no `properties.sessionID`).
@@ -292,7 +304,12 @@ function createdEvent(
     id: `evt-created-${sessionId}`,
     type: 'session.created',
     properties: {
-      info: { id: sessionId, directory, parentID: parentSessionId },
+      info: {
+        id: sessionId,
+        directory,
+        parentID: parentSessionId,
+        ...(agent === undefined ? {} : { agent }),
+      },
     },
   };
 }
@@ -400,7 +417,7 @@ async function createHarness(
     initLogging: () => {},
     stableIdleMs: 40,
     readiness: { maxAttempts: 3, retryDelayMs: 1 },
-    ownerPid: options.ownerPid ?? 4242,
+    ownerPid: options.ownerPid,
     reconcileIntervalMs: options.reconcileIntervalMs,
     sweepAdapter: options.sweepAdapter,
     isProcessAlive: options.isProcessAlive,
@@ -418,17 +435,17 @@ describe('client adapter detection (FR-9)', () => {
     expect(detectClientAdapter({ HERDR_PANE_ID: 'wP:p4' })).toBe('herdr');
     expect(detectClientAdapter({ KITTY_WINDOW_ID: '4' })).toBe('kitty');
     expect(detectClientAdapter({ CMUX_TUI_SOCKET: '/tmp/cmux.sock' })).toBe(
-      'cmux',
+      'cmux-tui',
     );
     expect(detectClientAdapter({ CMUX_MUX_SOCKET: '/tmp/cmux.sock' })).toBe(
-      'cmux',
+      'cmux-tui',
     );
   });
 
   test('prefers the cmux signal over a nested tmux pane', () => {
     expect(
       detectClientAdapter({ CMUX_TUI_SOCKET: '/s', TMUX_PANE: '%1' }),
-    ).toBe('cmux');
+    ).toBe('cmux-tui');
   });
 });
 
@@ -514,6 +531,31 @@ describe('session event projection (FR-3)', () => {
     expect(
       projectSessionEvent('session.created', { properties: { info: {} } }),
     ).toBeNull();
+  });
+
+  test('created events preserve properties.info.agent as subagentType (3.3)', () => {
+    expect(
+      projectSessionEvent(
+        'session.created',
+        createdEvent(CHILD, PARENT, DIRECTORY, 'oracle'),
+      ),
+    ).toEqual({
+      kind: 'created',
+      sessionId: CHILD,
+      parentSessionId: PARENT,
+      directory: DIRECTORY,
+      subagentType: 'oracle',
+    });
+    // A missing or blank agent stays absent; it is never invented.
+    expect(
+      projectSessionEvent('session.created', createdEvent())?.subagentType,
+    ).toBeUndefined();
+    expect(
+      projectSessionEvent(
+        'session.created',
+        createdEvent(CHILD, PARENT, DIRECTORY, ''),
+      )?.subagentType,
+    ).toBeUndefined();
   });
 
   test('status reads properties.status.type; idle carries no directory', () => {
@@ -957,7 +999,7 @@ describe('serverUrl reflection and probe (D3)', () => {
     );
     expect(resolveAnchoredTarget('kitty', { KITTY_WINDOW_ID: '4' })).toBe('4');
     expect(
-      resolveAnchoredTarget('cmux', { CMUX_TUI_TERMINAL_ID: 'term_1' }),
+      resolveAnchoredTarget('cmux-tui', { CMUX_TUI_TERMINAL_ID: 'term_1' }),
     ).toBe('term_1');
     expect(resolveAnchoredTarget('tmux', {})).toBeNull();
   });
@@ -972,6 +1014,59 @@ describe('pane title encoding at spawn (FR-8)', () => {
     const adapter = h.adapters.get('tmux');
     expect(adapter?.spawns).toHaveLength(1);
     expect(adapter?.spawns[0]?.description).toBe(`omosc:4242:${CHILD}`);
+  });
+
+  test('the created event subagent type reaches the spawn options (3.5)', async () => {
+    const h = await createHarness({ ownerPid: 4242 });
+    h.bus.emit(
+      'session.created',
+      createdEvent(CHILD, PARENT, DIRECTORY, 'oracle'),
+    );
+    await flush();
+
+    const spawn = h.adapters.get('tmux')?.spawns[0];
+    expect(spawn?.subagentType).toBe('oracle');
+    // The core never folds the type into the encoded description: adapters
+    // that need a display name compute it from the options.
+    expect(spawn?.description).toBe(`omosc:4242:${CHILD}`);
+  });
+
+  test('all four non-cmux adapters receive the byte-identical encoding (3.8)', async () => {
+    const cases: Array<[AdapterType, Record<string, string>]> = [
+      ['tmux', { TMUX_PANE: '%1' }],
+      ['zellij', { ZELLIJ_PANE_ID: '3' }],
+      ['herdr', { HERDR_PANE_ID: 'wP:p4' }],
+      ['kitty', { KITTY_WINDOW_ID: '4' }],
+    ];
+    for (const [type, env] of cases) {
+      const h = await createHarness({
+        env,
+        config: defaultConfig(type),
+        ownerPid: 4242,
+      });
+      h.bus.emit(
+        'session.created',
+        createdEvent(CHILD, PARENT, DIRECTORY, 'oracle'),
+      );
+      await flush();
+
+      const spawns = h.adapters.get(type)?.spawns ?? [];
+      expect(spawns).toHaveLength(1);
+      expect(spawns[0]?.description).toBe(`omosc:4242:${CHILD}`);
+    }
+  });
+
+  test('the default owner pid is this client process, matching the sweep probe', async () => {
+    const h = await createHarness(); // no ownerPid override
+    h.bus.emit('session.created', createdEvent());
+    await flush();
+
+    // The encoded owner pid is the process running the sweep's default
+    // liveness probe, so an owner that crashed reads as dead.
+    expect(h.adapters.get('tmux')?.spawns[0]?.description).toBe(
+      `omosc:${process.pid}:${CHILD}`,
+    );
+    expect(defaultIsProcessAlive(process.pid)).toBe(true);
   });
 });
 
@@ -1051,6 +1146,22 @@ describe('FR-7 reconcile trigger', () => {
     await flush();
 
     expect(h.adapters.get('tmux')?.spawns).toHaveLength(2);
+  });
+
+  test('backfill keeps the agent field from the session list (3.4)', async () => {
+    const state = createClientState({
+      sessions: [{ id: CHILD, parentID: PARENT, agent: 'explorer' }],
+    });
+    const h = await createHarness({ state, reconcileIntervalMs: 30_000 });
+    await flush();
+
+    // No created event ever announced the child; the startup reconcile
+    // backfilled it from the list, which carried the agent field.
+    expect(h.adapters.get('tmux')?.spawns).toHaveLength(1);
+    expect(h.adapters.get('tmux')?.spawns[0]?.subagentType).toBe('explorer');
+    expect(h.adapters.get('tmux')?.spawns[0]?.description).toBe(
+      `omosc:${process.pid}:${CHILD}`,
+    );
   });
 
   test('dispose stops the reconcile chain', async () => {
@@ -1139,7 +1250,7 @@ describe('FR-8 leftover sweep', () => {
     expect(state.getCalls).toEqual(['ses_deleted', 'ses_alive', 'ses_error']);
   });
 
-  test('periodic reconcile sweeps leftovers that appear after startup', async () => {
+  test('the periodic tick never sweeps; only startup and transitions do (4.7)', async () => {
     const state = createClientState({ getResults: { ses_gone: 'notfound' } });
     const h = await createHarness({
       state,
@@ -1150,14 +1261,58 @@ describe('FR-8 leftover sweep', () => {
     await flush();
     expect(h.adapters.get('tmux')?.closes).toEqual([]);
 
+    // A leftover appears after startup; the 30s ticks must not scan for it.
     h.adapters.get('tmux')?.panes.push({
       paneId: 'pane-late',
       title: encodePaneTitle(999, 'ses_gone'),
     });
     h.clock.advance(30_000);
     await flush();
+    h.clock.advance(30_000);
+    await flush();
 
-    expect(h.adapters.get('tmux')?.closes).toEqual(['pane-late']);
+    expect(h.adapters.get('tmux')?.closes).toEqual([]);
+    expect(state.getCalls).toEqual([]);
+  });
+
+  test('sweeps once on an unreachable→reachable transition (4.7)', async () => {
+    let reachable = false;
+    const state = createClientState({
+      getResults: { ses_gone: 'notfound' },
+      sessions: [{ id: CHILD, parentID: PARENT }],
+    });
+    const serve = fakeFetch(state);
+    const h = await createHarness({
+      state,
+      fetchFn: async (url, init) =>
+        reachable ? serve(url, init) : { ok: false },
+      ownerPid: 1000,
+      isProcessAlive: (pid) => pid !== 999,
+      reconcileIntervalMs: 30_000,
+    });
+    h.adapters.get('tmux')?.panes.push({
+      paneId: 'pane-leftover',
+      title: encodePaneTitle(999, 'ses_gone'),
+    });
+    await flush();
+    expect(h.adapters.get('tmux')?.closes).toEqual([]);
+
+    // The host comes back; the next event observes the transition and the
+    // owed sweep runs once.
+    reachable = true;
+    h.clock.advance(5_000);
+    h.bus.emit('session.created', createdEvent());
+    await flush();
+    expect(h.adapters.get('tmux')?.closes).toEqual(['pane-leftover']);
+
+    // Later ticks reconcile but never sweep again.
+    h.adapters.get('tmux')?.panes.push({
+      paneId: 'pane-later',
+      title: encodePaneTitle(999, 'ses_gone'),
+    });
+    h.clock.advance(30_000);
+    await flush();
+    expect(h.adapters.get('tmux')?.closes).toEqual(['pane-leftover']);
   });
 
   test('an unavailable sweep capability leaves panes to the user fallback', async () => {
@@ -1169,5 +1324,72 @@ describe('FR-8 leftover sweep', () => {
     await flush();
 
     expect(h.adapters.get('tmux')?.closes).toEqual([]);
+  });
+
+  test('a clean empty scan counts as done and is not retried', async () => {
+    let scans = 0;
+    const adapter: SweepAdapter = {
+      async listPanesWithTitles() {
+        scans += 1;
+        return [];
+      },
+      async closePane() {
+        return true;
+      },
+    };
+    const h = await createHarness({
+      sweepAdapter: adapter,
+      reconcileIntervalMs: 30_000,
+    });
+    await flush();
+    expect(scans).toBe(1);
+
+    h.clock.advance(30_000);
+    await flush();
+    h.clock.advance(30_000);
+    await flush();
+    expect(scans).toBe(1);
+  });
+
+  test('a failed scan re-arms the owed sweep and a later tick retries', async () => {
+    let fail = true;
+    let scans = 0;
+    const closed: string[] = [];
+    const adapter: SweepAdapter = {
+      async listPanesWithTitles() {
+        scans += 1;
+        if (fail) throw new Error('cmux terminal list failed');
+        return [
+          { paneId: 'term-leftover', title: encodePaneTitle(999, 'ses_gone') },
+        ];
+      },
+      async closePane(paneId: string) {
+        closed.push(paneId);
+        return true;
+      },
+    };
+    const state = createClientState({ getResults: { ses_gone: 'notfound' } });
+    const h = await createHarness({
+      state,
+      sweepAdapter: adapter,
+      ownerPid: 1000,
+      isProcessAlive: (pid) => pid !== 999,
+      reconcileIntervalMs: 30_000,
+    });
+    await flush();
+    // The startup sweep failed; it stays owed instead of being consumed.
+    expect(scans).toBe(1);
+    expect(closed).toEqual([]);
+
+    fail = false;
+    h.clock.advance(30_000);
+    await flush();
+    expect(scans).toBe(2);
+    expect(closed).toEqual(['term-leftover']);
+
+    // The successful retry is never repeated.
+    h.clock.advance(30_000);
+    await flush();
+    expect(scans).toBe(2);
   });
 });
