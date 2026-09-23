@@ -784,4 +784,24 @@ describe('PluginConfigSchema backgroundJobs', () => {
       ).toBe(false);
     }
   });
+
+  it('defaults childInputWake to enabled', () => {
+    const result = PluginConfigSchema.safeParse({ backgroundJobs: {} });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.backgroundJobs?.childInputWake).toBe(true);
+    }
+  });
+
+  it('accepts an explicit childInputWake override', () => {
+    const result = PluginConfigSchema.safeParse({
+      backgroundJobs: { childInputWake: false },
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.backgroundJobs?.childInputWake).toBe(false);
+    }
+  });
 });

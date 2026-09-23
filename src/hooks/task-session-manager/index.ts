@@ -37,6 +37,8 @@ import {
   stabilizeRunningTaskParts,
   updateFromInjectedCompletion,
 } from './board-injection';
+import type { ChildInputWaitNotification } from './child-input-wait';
+import { clearChildInputWaitsForSession } from './child-input-wait';
 import { handleEvent } from './event-router';
 import { createIdleReconciler } from './idle-reconciliation';
 import { createIdleSessionTokens } from './idle-session-tokens';
@@ -183,8 +185,6 @@ export function createTaskSessionManagerHook(
     hostOutcomeClock?: 'shared-unix-ms';
     backgroundJobSupervisor?: BackgroundJobSupervisor;
     backgroundTaskConcurrency?: BackgroundTaskConcurrency;
-    /** Host-truth probe: refuse unknown-alias drops when a child may still be running. */
-    hasUntrackedRunningChild?: (parentSessionID?: string) => Promise<boolean>;
     /** Shared by plugin generations for one admission runtime. */
     pendingCallTracker?: PendingCallTracker;
     getModelForAgent?: (
@@ -213,6 +213,12 @@ export function createTaskSessionManagerHook(
      *  until recovery is impossible. */
     willAttemptFallback?: (sessionID: string) => boolean;
     coordinator?: SessionLifecycle;
+    /** Surface a background child's newly opened input wait to the parent
+     * (question/permission that would otherwise park the child forever with
+     * the parent's turn already ended). */
+    onChildInputWait?: (notification: ChildInputWaitNotification) => void;
+    /** Host-truth probe: refuse unknown-alias drops when a child may still be running. */
+    hasUntrackedRunningChild?: (parentSessionID?: string) => Promise<boolean>;
     /** Test seam only; production always uses the reconciliation delay. */
     idleReconcileDelayMs?: number;
     /** Test seam only; production uses the runtime reconciliation delay. */
@@ -420,6 +426,12 @@ export function createTaskSessionManagerHook(
   });
   hasInputWait = (s) => inputWaits.hasInputWait(s);
 
+  // A background child's open question/permission must wake the parent even
+  // though the parent session itself has no input wait. The event router
+  // forwards new asks through the options.onChildInputWait dep (exactly one
+  // notification per new request id); no global subscription here, so hook
+  // instances never double-notify.
+
   if (options.coordinator) {
     options.coordinator.onSessionDeleted((sessionId) => {
       // Fallback teardown keeps process-global wait_for_user; genuine delete
@@ -468,6 +480,7 @@ export function createTaskSessionManagerHook(
       taskContextTracker.clearSession(sessionId);
       taskContextTracker.prune(backgroundJobBoard);
       pendingCallTracker.clearSession(sessionId);
+      clearChildInputWaitsForSession(sessionId);
     });
   }
 
@@ -742,6 +755,7 @@ export function createTaskSessionManagerHook(
         observeSyntheticTerminalPart: (part) =>
           observeSyntheticTerminalPart(injectionState, part),
         revivedRunTracker: options.revivedRunTracker,
+        onChildInputWait: options.onChildInputWait,
       }).then(() => runtimeStatusReconciler.schedule());
     },
   };

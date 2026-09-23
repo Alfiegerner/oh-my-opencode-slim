@@ -167,6 +167,34 @@ export function stoppedJobRecoveryReason(record: {
   return 'stopped without a terminal result';
 }
 
+/** Wake text for a background child blocked on an open question/permission.
+ * The child parks with no tokens moving and never finishes on its own; the
+ * parent's turn already ended, so without this wake nobody ever answers. */
+export const ORCHESTRATOR_CHILD_INPUT_WAKE_TEXT =
+  '<system-reminder>\nA background child task is waiting for input and cannot proceed until you answer. Review the pending request below, then answer it with the task_reply tool (task ID + request ID + your answer) or reject it. Do not respond to this reminder.\n</system-reminder>';
+
+/** Self-contained delta for a child input-wait wake (same rationale as
+ * formatStoppedJobDelta: the wake carries the facts inline). Deduplicated
+ * per (taskID, requestID) by the caller. */
+export function formatChildInputWaitDelta(record: {
+  alias: string;
+  taskID: string;
+  kind: 'question' | 'permission';
+  requestID: string;
+  detail: string;
+}): string {
+  return `<child-input-wait>\nalias: ${record.alias}\ntask: ${record.taskID}\nkind: ${record.kind}\nrequest: ${record.requestID}\n${record.detail}</child-input-wait>`;
+}
+
+/** Max child-input deltas queued per parent. Same bounding policy as the
+ * stopped-job recovery queue: oldest entries are dropped when a new
+ * distinct ask would exceed the cap, so a busy/waiting parent cannot grow
+ * an unbounded prompt. */
+export const CHILD_INPUT_QUEUE_CAP = 32;
+
+/** Max child-input deltas appended to one wake. */
+export const CHILD_INPUT_WAKE_CHUNK = 4;
+
 /** Children-mode variant (v2 degraded mode): watchdog over background
  * children and unreconciled jobs instead of the todo list. */
 export const ORCHESTRATOR_CHILDREN_WAKE_TEXT =
@@ -285,6 +313,10 @@ export type OrchestratorWakeOptions = {
    * The callback must check both the task generation and that the current
    * record is still stopped and terminal-unreconciled. */
   isStoppedJobRecoveryCurrent?: (taskID: string, generation: number) => boolean;
+  /** Revalidate a queued child input wait immediately before delivering its
+   * wake. The callback must check the ask is still open for the current run
+   * of the child task. */
+  isChildInputWaitCurrent?: (taskID: string, requestID: string) => boolean;
   /** Resolve the session's CURRENT agent/model selection at send time
    * (#1079): a lifecycle wake must continue the parent in the mode the
    * session uses now, never a hardcoded `orchestrator`. When absent or
@@ -668,6 +700,77 @@ export function createOrchestratorWakeScheduler(
    * `publicationWakeMinIntervalMs` throttle. */
   const lastPublicationWakeAt = new Map<string, number>();
 
+  /** Sessions with a background child awaiting an input-wait wake, carrying
+   * the self-contained ask deltas (see `formatChildInputWaitDelta`),
+   * deduplicated per `(taskID, requestID)`. Bounded per parent
+   * (`CHILD_INPUT_QUEUE_CAP`); each wake sends at most
+   * `CHILD_INPUT_WAKE_CHUNK` entries. Same retire-only-what-was-sent
+   * discipline as the stopped-job queue. */
+  const pendingChildInputWakes = new Map<string, Map<string, string>>();
+
+  function parseChildInputKey(
+    key: string,
+  ): { taskID: string; requestID: string } | undefined {
+    const separator = key.indexOf(':');
+    if (separator <= 0) return undefined;
+    const taskID = key.slice(0, separator);
+    const requestID = key.slice(separator + 1);
+    return taskID && requestID ? { taskID, requestID } : undefined;
+  }
+
+  /** Drop asks that resolved while queued. Repeat after every await so an
+   * ask answered during selection resolve is not sent. */
+  function pruneChildInputDeltas(
+    deltas: Map<string, string> | undefined,
+  ): boolean {
+    if (!deltas) return false;
+    const hadDetails = deltas.size > 0;
+    if (options.isChildInputWaitCurrent) {
+      for (const key of deltas.keys()) {
+        const parsed = parseChildInputKey(key);
+        if (!parsed) {
+          deltas.delete(key);
+          continue;
+        }
+        let current = false;
+        try {
+          current = options.isChildInputWaitCurrent(
+            parsed.taskID,
+            parsed.requestID,
+          );
+        } catch {
+          current = false;
+        }
+        if (!current) deltas.delete(key);
+      }
+    }
+    return hadDetails;
+  }
+
+  /** Queue an ask delta for the session's next input-wait wake. */
+  const addChildInputDelta = (
+    sessionID: string,
+    delta: string,
+    dedupeKey?: string,
+  ): void => {
+    let deltas = pendingChildInputWakes.get(sessionID);
+    if (!deltas) {
+      deltas = new Map();
+      pendingChildInputWakes.set(sessionID, deltas);
+    }
+    const key = dedupeKey ?? delta;
+    if (deltas.has(key)) {
+      deltas.set(key, delta);
+      return;
+    }
+    while (deltas.size >= CHILD_INPUT_QUEUE_CAP) {
+      const oldest = deltas.keys().next().value;
+      if (oldest === undefined) break;
+      deltas.delete(oldest);
+    }
+    deltas.set(key, delta);
+  };
+
   function parseRecoveryKey(
     key: string,
   ): { taskID: string; generation: number } | undefined {
@@ -835,6 +938,7 @@ export function createOrchestratorWakeScheduler(
     clearWakeSession(sessionID);
     pendingStoppedRecoveries.delete(sessionID);
     lastPublicationWakeAt.delete(sessionID);
+    pendingChildInputWakes.delete(sessionID);
   }
 
   function suppressArchivedSession(sessionID: string): void {
@@ -1470,6 +1574,17 @@ export function createOrchestratorWakeScheduler(
       const recoveryBatch = recoveryWake
         ? pendingStoppedRecoveries.get(sessionID)
         : undefined;
+      // A resolved ask must not cause an input-wait wake by itself: prune
+      // queued ask deltas even when no stopped-job batch is present. When
+      // neither evidenced work remains, the wake ends here.
+      const childInputDeltas = pendingChildInputWakes.get(sessionID);
+      if (childInputDeltas) {
+        const hadInputDetails = pruneChildInputDeltas(childInputDeltas);
+        if (hadInputDetails && childInputDeltas.size === 0) {
+          pendingChildInputWakes.delete(sessionID);
+          if (!recoveryBatch) return false;
+        }
+      }
       if (recoveryBatch) {
         const hadRecoveryDetails = pruneStoppedRecoveryDeltas(recoveryBatch);
         // A stale, revived, or already-reconciled detail must not cause a
@@ -1514,6 +1629,7 @@ export function createOrchestratorWakeScheduler(
       }
       // Re-prune stop facts after the selection await: a child can leave
       // stopped/unreconciled while parent generation stays put (#1079 r2).
+      // Same for asks answered while queued.
       if (recoveryBatch) {
         const hadRecoveryDetails = pruneStoppedRecoveryDeltas(recoveryBatch);
         if (
@@ -1522,6 +1638,18 @@ export function createOrchestratorWakeScheduler(
           recoveryBatch.overflowCount === 0
         ) {
           pendingStoppedRecoveries.delete(sessionID);
+          return false;
+        }
+      }
+      const liveChildInputDeltas = pendingChildInputWakes.get(sessionID);
+      if (liveChildInputDeltas) {
+        const hadInputDetails = pruneChildInputDeltas(liveChildInputDeltas);
+        if (
+          hadInputDetails &&
+          liveChildInputDeltas.size === 0 &&
+          !recoveryBatch
+        ) {
+          pendingChildInputWakes.delete(sessionID);
           return false;
         }
       }
@@ -1538,11 +1666,26 @@ export function createOrchestratorWakeScheduler(
         return false;
       }
 
-      const wakeText = recoveryWake
-        ? ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT
-        : wakeMode === 'children'
-          ? ORCHESTRATOR_CHILDREN_WAKE_TEXT
-          : ORCHESTRATOR_WAKE_TEXT;
+      // Ask wake: when only child-input deltas are queued (no stopped-job
+      // batch), the wake names the parked child instead of a stopped job.
+      // The live map is re-read (not the pre-await snapshot): an ask
+      // answered during selection resolve must not select the ask text.
+      const sendInputDeltas = pendingChildInputWakes.get(sessionID);
+      const sendInputKeys = sendInputDeltas
+        ? [...sendInputDeltas.keys()].slice(0, CHILD_INPUT_WAKE_CHUNK)
+        : [];
+      const inputDelta = sendInputKeys
+        .map((key) => sendInputDeltas?.get(key))
+        .filter((text): text is string => typeof text === 'string')
+        .join('\n');
+      const wakeText =
+        sendInputKeys.length > 0 && !recoveryBatch
+          ? ORCHESTRATOR_CHILD_INPUT_WAKE_TEXT
+          : recoveryWake
+            ? ORCHESTRATOR_STOPPED_JOB_WAKE_TEXT
+            : wakeMode === 'children'
+              ? ORCHESTRATOR_CHILDREN_WAKE_TEXT
+              : ORCHESTRATOR_WAKE_TEXT;
       // Snapshot keys/values at send time. Do not detach the map: a stop
       // arriving during promptAsync lands in the same entry and must survive
       // confirmation. After delivery, retire only the keys that were sent.
@@ -1558,7 +1701,7 @@ export function createOrchestratorWakeScheduler(
         recoveryBatch && recoveryBatch.overflowCount > 0
           ? STOPPED_RECOVERY_OVERFLOW_TEXT
           : '';
-      const recoveryDetails = [overflowDelta, recoveryDelta]
+      const recoveryDetails = [overflowDelta, recoveryDelta, inputDelta]
         .filter(Boolean)
         .join('\n');
       const body = {
@@ -1621,6 +1764,17 @@ export function createOrchestratorWakeScheduler(
           );
           if (remaining.deltas.size === 0 && remaining.overflowCount === 0) {
             pendingStoppedRecoveries.delete(sessionID);
+          } else {
+            rearmWakeProgress(sessionID);
+          }
+        }
+        // Retire only the ask keys that were sent (same discipline as
+        // stopped-job deltas): an ask arriving during promptAsync survives.
+        const remainingInput = pendingChildInputWakes.get(sessionID);
+        if (remainingInput) {
+          for (const key of sendInputKeys) remainingInput.delete(key);
+          if (remainingInput.size === 0) {
+            pendingChildInputWakes.delete(sessionID);
           } else {
             rearmWakeProgress(sessionID);
           }
@@ -1882,6 +2036,49 @@ export function createOrchestratorWakeScheduler(
     boundTrackedMap(lastPublicationWakeAt);
   }
 
+  /**
+   * Immediately evaluate an idle orchestrator after a background child asks
+   * a question or permission request. Separate from the periodic TODO wake
+   * for the same reason as the stopped-job recovery: a parked child needs
+   * an answer even when its parent has no todo. The wake carries the ask
+   * inline and answers ride the task_reply tool. Delivered with
+   * delivery:'queue' when the parent is busy, like every other wake.
+   *
+   * Ported onto the post-2.2.22 wake: the ask wake enters evaluation with
+   * reason 'recovery' (externally evidenced work whose wake condition is
+   * the event itself, like stopped-job recovery), so the children-active /
+   * no-work deferral does not hold a parked child hostage.
+   */
+  function triggerChildInputWaitWake(
+    sessionID: string,
+    delta?: string,
+    dedupeKey?: string,
+  ): void {
+    if (
+      disposed ||
+      !enabled ||
+      !capabilities.ready ||
+      !canObserveSelection(sessionID)
+    ) {
+      return;
+    }
+    if (delta) {
+      addChildInputDelta(sessionID, delta, dedupeKey);
+    } else if (!pendingChildInputWakes.has(sessionID)) {
+      pendingChildInputWakes.set(sessionID, new Map());
+    }
+    if (localSessions.get(sessionID)?.archived) {
+      return;
+    }
+    rearmWakeProgress(sessionID);
+    if (!canSchedule(sessionID)) return;
+    const state = touchLocal(sessionID);
+    clearTimer(state);
+    bumpGeneration(state);
+    state.continuousIdle = true;
+    void evaluate(sessionID, state.generation, 'recovery');
+  }
+
   async function event(input: {
     event: {
       type: string;
@@ -1907,6 +2104,7 @@ export function createOrchestratorWakeScheduler(
       disposed = true;
       pendingStoppedRecoveries.clear();
       lastPublicationWakeAt.clear();
+      pendingChildInputWakes.clear();
       lastStatusBySession.clear();
       childSessions.clear();
       childEvidence.clear();
@@ -1977,6 +2175,14 @@ export function createOrchestratorWakeScheduler(
           }
           return;
         }
+        if (pendingChildInputWakes.has(sessionID)) {
+          if (localSessions.get(sessionID)?.archived) {
+            beginContinuousIdle(sessionID);
+          } else {
+            triggerChildInputWaitWake(sessionID);
+          }
+          return;
+        }
         beginContinuousIdle(sessionID);
       }
       return;
@@ -2016,6 +2222,7 @@ export function createOrchestratorWakeScheduler(
     observeChatMessage,
     triggerStoppedJobRecovery,
     triggerTerminalPublicationWake,
+    triggerChildInputWaitWake,
     /** Clear timers when wait_for_user or fallback begins. */
     suppress,
     /** Test seam */
