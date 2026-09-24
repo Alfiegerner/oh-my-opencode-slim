@@ -185,6 +185,36 @@ describe('ForegroundFallbackManager v2 retry hook', () => {
       logSpy.mockRestore();
     }
   });
+
+  test.each([
+    ['B', 'C'],
+    ['C', 'D'],
+  ])(
+    'failed switch keeps its target retryable (next failure on %s switches to %s)',
+    async (hostModel, target) => {
+      const mgr = new ForegroundFallbackManager(
+        { orchestrator: ['test/A', 'test/B', 'test/C', 'test/D'] },
+        true,
+        { directory: '/test' } as any,
+      );
+      const event = (id: string) => ({
+        sessionID: `retry-unconsumed-${hostModel}`,
+        agent: 'orchestrator',
+        model: { providerID: 'test', id },
+        error: { message: 'rate limit' },
+        decision: { retry: false },
+      });
+      await mgr.handleV2Retry(event('B'), async () => {
+        throw new Error('foreground retry model switch timed out');
+      });
+      const switchModel = mock(async () => {});
+      await mgr.handleV2Retry(event(hostModel), switchModel);
+      expect(switchModel).toHaveBeenCalledWith(
+        `retry-unconsumed-${hostModel}`,
+        { providerID: 'test', id: target },
+      );
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

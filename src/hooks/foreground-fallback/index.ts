@@ -757,6 +757,7 @@ export class ForegroundFallbackManager {
       model: { providerID: string; id: string },
     ) => Promise<unknown>,
   ): Promise<void> {
+    let picked: string | undefined;
     try {
       const { sessionID } = event;
       if (!this.enabled || this.disposed || this.inProgress.has(sessionID))
@@ -779,6 +780,7 @@ export class ForegroundFallbackManager {
       const selected = this.selectFallbackModel(sessionID);
       if (!selected || selected === 'exhausted') return;
       const { agentName, nextModel, ref } = selected;
+      picked = nextModel;
       await withTimeout(
         switchModel(sessionID, {
           providerID: ref.providerID,
@@ -798,6 +800,9 @@ export class ForegroundFallbackManager {
         to: nextModel,
       });
     } catch (err) {
+      // Unconfirmed switch: keep the target selectable (a timed-out switch
+      // may still land; the next event's model is the host truth).
+      if (picked) this.sessionTried.get(event.sessionID)?.delete(picked);
       log(
         '[foreground-fallback] retry hook switch failed; host decision unchanged',
         { sessionID: event?.sessionID, error: stringifyError(err) },
