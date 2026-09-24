@@ -37,7 +37,6 @@ import {
   createLoopCommandHook,
   createOrchestratorWakeScheduler,
   createPhaseReminderHook,
-  createPostFileToolNudgeHook,
   createReflectCommandHook,
   createSearchPathGuardHook,
   createTaskSessionManagerHook,
@@ -338,13 +337,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   >;
   let phaseReminder: ReturnType<typeof createPhaseReminderHook>;
   let filterAvailableSkills: ReturnType<typeof createFilterAvailableSkillsHook>;
-  let postFileToolNudge: ReturnType<typeof createPostFileToolNudgeHook>;
   let applyPatch: ReturnType<typeof createApplyPatchHook>;
   let searchPathGuard: ReturnType<typeof createSearchPathGuardHook>;
   let absolutePathRescue: ReturnType<typeof createAbsolutePathRescueHook>;
   let jsonErrorRecovery: ReturnType<typeof createJsonErrorRecoveryHook>;
   let toolLoopGuard: ToolLoopGuardHook;
-  let postFileToolNudgeAfter: (i: unknown, o: unknown) => Promise<void>;
   let jsonErrorRecoveryAfter: (i: unknown, o: unknown) => Promise<void>;
   let taskSessionManagerAfter: (i: unknown, o: unknown) => Promise<void>;
   let backgroundJobBoard: BackgroundJobBoard;
@@ -893,8 +890,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       };
     };
 
-    // Both message transforms share this gate so a rejected nudge cannot be
-    // followed by a phase reminder in the same outgoing turn.
+    // Only orchestrator sessions receive phase reminders.
     const shouldInjectOrchestratorReminder = (sessionID: string) =>
       sessionMetadata.getAgent(sessionID) === 'orchestrator';
 
@@ -903,11 +899,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     });
 
     filterAvailableSkills = createFilterAvailableSkillsHook(ctx, runtime);
-
-    postFileToolNudge = createPostFileToolNudgeHook({
-      shouldInject: shouldInjectOrchestratorReminder,
-      coordinator: sessionLifecycle,
-    });
 
     applyPatch = createApplyPatchHook(ctx);
 
@@ -919,9 +910,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     toolLoopGuard = createToolLoopGuardHook();
 
     // Pre-created wrapped handlers for tool.execute.after (error-isolated)
-    postFileToolNudgeAfter = wrapPostToolHook('post-file-tool-nudge', (i, o) =>
-      postFileToolNudge['tool.execute.after'](i as never, o as never),
-    );
     jsonErrorRecoveryAfter = wrapPostToolHook('json-error-recovery', (i, o) =>
       jsonErrorRecovery['tool.execute.after'](i as never, o as never),
     );
@@ -2061,12 +2049,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         }
       }
 
-      // Repair session mappings before reminder gates; nudge metadata precedes phase dedup.
+      // Repair session mappings before the phase-reminder gate.
       await taskSessionManagerHook['experimental.chat.messages.transform'](
-        input as never,
-        typedOutput as never,
-      );
-      await postFileToolNudge['experimental.chat.messages.transform'](
         input as never,
         typedOutput as never,
       );
@@ -2082,7 +2066,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     },
 
     'tool.execute.after': async (input, output) => {
-      await postFileToolNudgeAfter(input, output);
       await jsonErrorRecoveryAfter(input, output);
       await toolLoopGuard['tool.execute.after'](
         input as never,

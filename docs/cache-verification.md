@@ -61,7 +61,7 @@ Each scenario is designed to fire specific plugin payload machinery:
 |---|---|---|
 | `plain` | phase reminder, skills filter, system transform | ✅ |
 | `tools` | tool-result growth across steps | ✅ |
-| `nudge` | post-file-tool nudge injection, phase-reminder equilibrium | extensive |
+| `nudge` | direct file read, phase reminder across subsequent turns | extensive |
 | `todos` | todowrite churn (create/update/complete across turns) | extensive |
 | `long` | sliding cache breakpoints over a six-turn history | extensive |
 | `board` | job-board trailing injection, injected completion, reconcile | extensive |

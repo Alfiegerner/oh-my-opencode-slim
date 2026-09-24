@@ -16,6 +16,7 @@ import {
   getWakeProgress,
   resetOrchestratorWakeGateForTests,
 } from './hooks/orchestrator-wake/wake-gate';
+import { PHASE_REMINDER_METADATA_KEY } from './hooks/phase-reminder';
 import pluginModuleDefault, { OhMyOpenCodeLite as plugin } from './index';
 import { readTuiSnapshot, snapshotSectionsEqual } from './tui-state';
 import { BackgroundJobCoordinator } from './utils/background-job-coordinator';
@@ -388,6 +389,61 @@ describe('plugin reload generation cleanup', () => {
   afterEach(async () => {
     process.env = originalEnv;
     await rm(projectDir, { recursive: true, force: true });
+  });
+
+  test('file read leaves the composed reminder payload byte-identical', async () => {
+    const hooks = await createHooks();
+    const sessionID = 'read-reminder-session';
+    const fixture = {
+      messages: [
+        {
+          info: {
+            id: 'user-1',
+            role: 'user',
+            agent: 'orchestrator',
+            sessionID,
+          },
+          parts: [{ type: 'text', text: 'Read the project files.' }],
+        },
+      ],
+    };
+
+    try {
+      await hooks['chat.message']?.(
+        { sessionID, agent: 'orchestrator' } as never,
+        {} as never,
+      );
+      const before = structuredClone(fixture);
+      await hooks['experimental.chat.messages.transform']?.(
+        {} as never,
+        before as never,
+      );
+
+      await hooks['tool.execute.after']?.(
+        { tool: 'read', sessionID } as never,
+        { output: 'file contents' } as never,
+      );
+      const after = structuredClone(fixture);
+      await hooks['experimental.chat.messages.transform']?.(
+        {} as never,
+        after as never,
+      );
+
+      expect(JSON.stringify(after)).toBe(JSON.stringify(before));
+      expect(
+        after.messages
+          .at(-1)
+          ?.parts.filter(
+            (part) =>
+              'metadata' in part &&
+              (part as { metadata?: Record<string, unknown> }).metadata?.[
+                PHASE_REMINDER_METADATA_KEY
+              ] === true,
+          ),
+      ).toHaveLength(1);
+    } finally {
+      await hooks.dispose?.();
+    }
   });
 
   test('v1 dispose clears the process-global wake gate progress', async () => {

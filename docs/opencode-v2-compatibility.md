@@ -390,7 +390,7 @@ currently break this plugin:
 - **Transcript user messages carry no identity.** Context-hook
   transcript user messages on live v2 hosts carry `{id, time, text,
   type}` only — no `agent`, no `sessionID`. The v1 injection gates
-  (phase-reminder, background-job-board, post-file-tool-nudge) key on
+  (phase-reminder, background-job-board) key on
   user-message `info.agent`/`info.sessionID`, so every injection would
   skip. The v2 context bridge stamps the context event's `sessionID` and
   the session's known agent (from the event, falling back to the

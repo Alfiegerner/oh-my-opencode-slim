@@ -354,8 +354,8 @@ export function createSessionContextHandler(
     if (deps.messagesTransform && Array.isArray(event.messages)) {
       // Transcript identity enrichment (v2-only): live v2 hosts carry
       // only {id, time, text, type} on transcript user messages, but the
-      // bridged v1 injection gates (phase-reminder, background-job-board,
-      // post-file-tool-nudge) key on user-message info.sessionID /
+      // bridged v1 injection gates (phase-reminder, background-job-board)
+      // key on user-message info.sessionID /
       // info.agent — without this stamp every injection skips on v2.
       // Metadata-only (envelope fields; parts/content bytes untouched)
       // and strictly absence-gated: host-provided values always win.
@@ -593,8 +593,8 @@ export function createChatHeadersBridge(
 
 /**
  * Metadata keys whose tagged synthetic parts the compaction bridge
- * strips: the plugin's content injections (phase reminders +
- * post-file-tool nudges share PHASE_REMINDER_METADATA_KEY, background
+ * strips: the plugin's content injections (phase reminders use
+ * PHASE_REMINDER_METADATA_KEY, background
  * job boards carry BACKGROUND_JOB_BOARD_METADATA_KEY). Imported from
  * their owning modules so the strip set cannot drift from the injection
  * set. Untagged synthetic parts (e.g. command-marker expansions) are
@@ -1245,8 +1245,8 @@ export function createToolExecuteBridges(
     // content as a successful output.
     const errored = e.status === 'error';
     // Map v2 Tool.Result.content (string | Content[]) -> v1 output.output
-    // string; the v1 after-hooks (postFileToolNudge, jsonErrorRecovery,
-    // taskSessionManagerAfter) read output.output to decide nudges.
+    // string; the v1 after-hooks (jsonErrorRecovery, taskSessionManagerAfter)
+    // read output.output to decide recovery and task state.
     const result = e.result as
       | {
           content?: unknown;

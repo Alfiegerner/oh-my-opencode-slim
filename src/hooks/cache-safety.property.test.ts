@@ -98,8 +98,8 @@ describe.each(BOARD_STRATEGIES)(
 
       let previous: string[] | undefined;
       for (const [turnNumber, endIndex] of turns.entries()) {
-        // Exercise cross-turn hook state: a file-tool nudge fires and a
-        // background job launches before the second turn (a real user turn,
+        // Exercise cross-turn hook state: a background job launches before
+        // the second turn (a real user turn,
         // so checkpoint mode creates a snapshot), the job is dropped before
         // the internal-initiator turn renders with an empty board, and a
         // second job launches before the fourth turn. Snapshot creation,
@@ -108,7 +108,6 @@ describe.each(BOARD_STRATEGIES)(
         // the v2.2.5 checkpoint regression rewrote them on exactly these
         // transitions.
         if (turnNumber === 1) {
-          pipeline.markFileToolPending();
           pipeline.board.registerLaunch({
             taskID: 'task-alpha',
             parentSessionID: SESSION_ID,
@@ -144,27 +143,6 @@ describe.each(BOARD_STRATEGIES)(
     });
   },
 );
-
-describe('cache-safety: turn-over-turn prefix stability', () => {
-  test('a consumed file-tool nudge is reproduced by the phase reminder on the next turn', async () => {
-    const pipeline = createPipeline();
-    const history = buildHistory();
-
-    // Register the session (turn 1), then mark a pending nudge and render
-    // turn 2: the nudge injects into the latest user message.
-    await renderTurn(pipeline, history, 0);
-    pipeline.markFileToolPending();
-    const turnWithNudge = await renderTurn(pipeline, history, 2);
-
-    // Turn 3 renders the same message as history; the phase reminder must
-    // reproduce the exact bytes the nudge produced a turn earlier.
-    const nextTurn = await renderTurn(pipeline, history, 3);
-
-    const nudgedMessage = JSON.stringify(turnWithNudge.messages[2]);
-    const historicalMessage = JSON.stringify(nextTurn.messages[2]);
-    expect(historicalMessage).toBe(nudgedMessage);
-  });
-});
 
 describe.each(BOARD_STRATEGIES)(
   'cache-safety: specialist sessions (%s)',
@@ -351,7 +329,6 @@ describe('cache-safety: pipeline drift guard', () => {
     // stay in lockstep.
     expect(orderedCalls).toEqual([
       'taskSessionManagerHook',
-      'postFileToolNudge',
       'phaseReminder',
       'filterAvailableSkills',
     ]);
@@ -359,11 +336,11 @@ describe('cache-safety: pipeline drift guard', () => {
       'await taskSessionManagerHook.injectBackgroundJobBoard(',
     );
 
-    // One handler definition plus the four dispatch calls above.
+    // One handler definition plus the three dispatch calls above.
     const literalCount = source.split(
       "'experimental.chat.messages.transform'",
     ).length;
-    expect(literalCount - 1).toBe(5);
+    expect(literalCount - 1).toBe(4);
   });
 
   test('every hook module defining a message transform is covered here', async () => {
@@ -385,7 +362,6 @@ describe('cache-safety: pipeline drift guard', () => {
     expect(hookFilesWithTransforms.sort()).toEqual([
       'filter-available-skills/index.ts',
       'phase-reminder/index.ts',
-      'post-file-tool-nudge/index.ts',
       'task-session-manager/index.ts',
     ]);
   });

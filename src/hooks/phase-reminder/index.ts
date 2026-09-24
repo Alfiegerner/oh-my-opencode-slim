@@ -56,10 +56,9 @@ export function createPhaseReminderHook(options: PhaseReminderOptions = {}) {
         return;
       }
 
-      // post-file-tool-nudge must run first so its tagged part deduplicates.
-      // Append reminder as a new, separate message part instead of mutating
-      // the user-authored text. This prevents the reminder from leaking into
-      // the UI display and chat history (issue #448).
+      // The phase reminder already covers file-tool turns (PR #790), so no
+      // separate post-file-tool injection is needed. Append it as a new part
+      // instead of mutating user text; it stays out of the UI/history (#448).
       for (const message of messages) {
         if (
           !isUserMessageWithParts(message) ||
