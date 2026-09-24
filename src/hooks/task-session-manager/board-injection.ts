@@ -83,7 +83,6 @@ export type RetainedBoardSnapshotState = {
 type RetainedTailBoard = {
   anchorId: string;
   text: string;
-  boardText: string;
 };
 
 type BoardAnchor = {
@@ -1476,16 +1475,11 @@ function injectLatestBoard(state: InjectionState, messages: unknown[]): void {
   //   so the message carrying board text is genuinely user-role (A3).
   const recordId = anchor.id;
   if (canCarryBoardPart(anchor.message)) {
-    const recorded = state.retainedTailBoards.get(sessionID)?.get(recordId);
-    const text =
-      boardMeta.terminalUnreconciledTaskIDs.length > 0
-        ? reminder
-        : recorded?.boardText === reminder
-          ? recorded.text
-          : lastComplete?.text === reminder &&
-              lastComplete.markersSince < MAX_UNCHANGED_MARKERS
-            ? UNCHANGED_BOARD_MARKER
-            : reminder;
+    const unchanged =
+      boardMeta.terminalUnreconciledTaskIDs.length === 0 &&
+      lastComplete?.text === reminder &&
+      lastComplete.markersSince < MAX_UNCHANGED_MARKERS;
+    const text = unchanged ? UNCHANGED_BOARD_MARKER : reminder;
     appendTaggedSyntheticPart(anchor.message, {
       text,
       metadataKey: state.metadataKey,
@@ -1496,7 +1490,6 @@ function injectLatestBoard(state: InjectionState, messages: unknown[]): void {
     rememberTailBoard(state, sessionID, {
       anchorId: recordId,
       text,
-      boardText: reminder,
     });
   } else {
     appendTrailingVolatileMessage(
@@ -1675,6 +1668,8 @@ function forgetTailBoard(
  * (compaction, revert) are pruned — their bytes are gone from the provider's
  * view too. Replay is skipped when the anchor already carries a board, keeping
  * the operation idempotent under repeated transforms on a shared array.
+ * Returns the last complete board still present and its subsequent marker
+ * count. Orphan markers are discarded if their full reference is absent.
  */
 function replayRetainedTailBoards(
   state: InjectionState,

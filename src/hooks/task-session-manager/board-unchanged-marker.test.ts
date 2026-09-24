@@ -169,6 +169,58 @@ describe('latest board unchanged marker', () => {
     expect(parts.at(-1)?.text).toContain('### Background Job Board');
   });
 
+  test('T6b: retrying the same tail after pruning its full reference restores a full board', async () => {
+    const { state } = setup();
+    await inject(state, [user('u1')]);
+    const second = await inject(state, [user('u1'), user('u2')]);
+    expect(isMarker(boardParts(second).at(-1)?.text)).toBe(true);
+
+    const retried = await inject(state, [user('u2')]);
+    const parts = boardParts(retried);
+    expect(parts).toHaveLength(1);
+    expect(isMarker(parts[0]?.text)).toBe(false);
+  });
+
+  test('T3b: an unchanged unreconciled Result board remains complete', async () => {
+    const { board, state } = setup();
+    board.updateStatus({
+      taskID: 'child-1',
+      state: 'completed',
+      resultSummary: 'mapped hooks',
+    });
+    const first = boardParts(await inject(state, [user('u1')])).at(-1)?.text;
+    expect(first).toContain('Result: mapped hooks');
+
+    state.terminalJobsInjectedByParent.clear();
+    state.pendingInjectedTerminalJobsByParent.clear();
+    const next = boardParts(await inject(state, [user('u1'), user('u2')])).at(
+      -1,
+    )?.text;
+    expect(next).toContain('Result: mapped hooks');
+    expect(isMarker(next)).toBe(false);
+  });
+
+  test('T6c: pruning a newer full board also drops its marker despite an older complete board', async () => {
+    const { board, state } = setup();
+    await inject(state, [user('u1')]);
+    board.registerLaunch({
+      taskID: 'child-2',
+      parentSessionID: SESSION,
+      agent: 'oracle',
+      description: 'review',
+    });
+    await inject(state, [user('u1'), user('u2')]);
+    const third = await inject(state, [user('u1'), user('u2'), user('u3')]);
+    expect(isMarker(boardParts(third).at(-1)?.text)).toBe(true);
+
+    const out = await inject(state, [user('u1'), user('u3'), user('u4')]);
+    const u3 = out.find((message) => message.info.id === 'u3');
+    const u3Board = u3?.parts.filter(
+      (part) => part.metadata?.[BACKGROUND_JOB_BOARD_METADATA_KEY] === true,
+    );
+    expect(u3Board).toHaveLength(0);
+  });
+
   test('T7: retrying the same tail preserves its previously recorded bytes', async () => {
     const { state } = setup();
     await inject(state, [user('u1')]);
