@@ -23,6 +23,7 @@ import {
 } from './config/constants';
 import { RuntimeConfig } from './config/runtime';
 import { applyOrchestratorModelConfig } from './config/strip-orchestrator-model';
+import { getBuildInfo } from './generated/build-info';
 import { HEALTH_CHECK, minimumExpectedToolCount } from './health-check';
 import {
   createAbsolutePathRescueHook,
@@ -206,7 +207,10 @@ export function sessionManagerMultiplexerConfig(
 export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   const sessionId = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15);
   initLogger(sessionId);
-  log('[plugin] oh-my-opencode-slim fork=Alfiegerner version=2.2.23-fleet.1 commit=65c4c8d2');
+  const buildInfo = getBuildInfo();
+  log(
+    `[plugin] oh-my-opencode-slim fork=Alfiegerner version=${buildInfo.version} commit=${buildInfo.commit}`,
+  );
 
   if (isPluginDisabledByEnv()) {
     log('[plugin] disabled by OH_MY_OPENCODE_SLIM_DISABLE');
