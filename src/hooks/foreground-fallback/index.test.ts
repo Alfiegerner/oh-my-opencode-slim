@@ -254,6 +254,18 @@ describe('isFailoverError', () => {
         status: 429,
       }),
     ).toBe(true);
+    expect(
+      isFailoverError({
+        type: 'provider.quota',
+        message: 'You exceeded your current quota',
+      }),
+    ).toBe(true);
+    expect(
+      isFailoverError({
+        type: 'provider.invalid-request',
+        message: 'prompt is too long',
+      }),
+    ).toBe(false);
   });
 
   test('returns true for "rate limit" in message', () => {

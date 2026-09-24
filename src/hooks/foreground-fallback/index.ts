@@ -106,6 +106,14 @@ const RETRYABLE_ERROR_PATTERNS = [
 ];
 
 const OUTAGE_STATUS_CODES = new Set([500, 502, 503, 504]);
+// v2 host classification ({type, message, status?}); status is omitted when
+// the failure carried no HTTP status (e.g. stream-level provider errors).
+const FAILOVER_ERROR_TYPES = new Set([
+  'provider.rate-limit',
+  'provider.quota',
+  'provider.auth',
+  'provider.internal',
+]);
 // (ponytail) validated against real OpenCode error shapes
 const TRANSPORT_CODES = new Set([
   'ECONNREFUSED',
@@ -193,6 +201,7 @@ export function isFailoverError(error: unknown): boolean {
     cause?: { code?: unknown };
     message?: string;
     statusCode?: number;
+    type?: unknown;
     data?: {
       code?: unknown;
       statusCode?: number;
@@ -207,7 +216,8 @@ export function isFailoverError(error: unknown): boolean {
     statusCode === 402 ||
     statusCode === 403 ||
     statusCode === 410 ||
-    (statusCode !== undefined && OUTAGE_STATUS_CODES.has(statusCode))
+    (statusCode !== undefined && OUTAGE_STATUS_CODES.has(statusCode)) ||
+    (typeof err.type === 'string' && FAILOVER_ERROR_TYPES.has(err.type))
   ) {
     return true;
   }
