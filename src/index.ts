@@ -46,12 +46,18 @@ import {
   SessionLifecycle,
   stoppedJobRecoveryReason,
 } from './hooks';
+import { stripTaggedContent } from './hooks/cache-safe-injection';
 import { processImageAttachments } from './hooks/image-hook';
 import { clearAllWakeSessions } from './hooks/orchestrator-wake/wake-gate';
+import { PHASE_REMINDER_METADATA_KEY } from './hooks/phase-reminder';
 import { createBackgroundFallbackHandoff } from './hooks/task-session-manager/fallback-observation-transfer';
 import { createRevivedRunTracker } from './hooks/task-session-manager/revived-run-tracker';
 import type { ToolLoopGuardHook } from './hooks/tool-loop-guard/hook';
-import { isMessageWithParts, type MessageWithParts } from './hooks/types';
+import {
+  findLatestUserMessage,
+  isMessageWithParts,
+  type MessageWithParts,
+} from './hooks/types';
 import { createInterviewManager } from './interview';
 import { createBuiltinMcps } from './mcp';
 import {
@@ -183,6 +189,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       });
     },
   });
+  const compactingSessionIds = new Set<string>();
   const ownedTuiActivitySessions = new Map<string, string>();
   // #1079: lifecycle continuations (orchestrator wake, terminal
   // notifications) resolve the session's CURRENT agent/model at send
@@ -602,6 +609,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     });
 
     sessionLifecycle = new SessionLifecycle(log);
+    sessionLifecycle.onSessionDeleted((sessionID) => {
+      compactingSessionIds.delete(sessionID);
+    });
 
     // Initialize auto-update checker hook
     autoUpdateChecker = createAutoUpdateCheckerHook(ctx, {
@@ -1792,6 +1802,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
     'chat.headers': chatHeadersHook['chat.headers'],
 
+    // v1 compaction requests use the same message transform as normal turns.
+    // v2 handles compaction in its separate session.compaction bridge.
+    'experimental.session.compacting': async ({ sessionID }) => {
+      compactingSessionIds.add(sessionID);
+    },
+
     // Track which agent each session uses (needed for serve-mode prompt
     // injection)
     'chat.message': async (
@@ -1997,6 +2013,13 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       output: { messages: unknown[] },
     ): Promise<void> => {
       const typedOutput = output as { messages: MessageWithParts[] };
+      // Claim the mark synchronously: overlapping requests for this session
+      // must not both strip reminders after their first asynchronous step.
+      const sessionID = findLatestUserMessage(typedOutput.messages)?.info
+        .sessionID;
+      const compacting = sessionID
+        ? compactingSessionIds.delete(sessionID)
+        : false;
 
       for (const message of typedOutput.messages) {
         if (!isMessageWithParts(message)) {
@@ -2063,6 +2086,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         typedOutput as never,
       );
       await taskSessionManagerHook.injectBackgroundJobBoard(input, typedOutput);
+      if (compacting) {
+        stripTaggedContent(typedOutput.messages, PHASE_REMINDER_METADATA_KEY);
+      }
     },
 
     'tool.execute.after': async (input, output) => {

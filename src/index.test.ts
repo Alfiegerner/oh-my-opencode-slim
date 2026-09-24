@@ -12,11 +12,14 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { stateFilePath } from './companion/manager';
 import * as wakeHooks from './hooks';
+import { isTaggedPart, stripTaggedContent } from './hooks/cache-safe-injection';
 import {
   getWakeProgress,
   resetOrchestratorWakeGateForTests,
 } from './hooks/orchestrator-wake/wake-gate';
 import { PHASE_REMINDER_METADATA_KEY } from './hooks/phase-reminder';
+import { BACKGROUND_JOB_BOARD_METADATA_KEY } from './hooks/task-session-manager';
+import type { MessageWithParts } from './hooks/types';
 import pluginModuleDefault, { OhMyOpenCodeLite as plugin } from './index';
 import { readTuiSnapshot, snapshotSectionsEqual } from './tui-state';
 import { BackgroundJobCoordinator } from './utils/background-job-coordinator';
@@ -369,6 +372,53 @@ describe('plugin reload generation cleanup', () => {
       ...pluginConfig,
     } as never);
 
+  const reminderFixture = (
+    sessionID: string,
+  ): { messages: MessageWithParts[] } => ({
+    messages: [
+      {
+        info: {
+          id: `user-${sessionID}`,
+          role: 'user',
+          agent: 'orchestrator',
+          sessionID,
+        },
+        parts: [{ type: 'text', text: 'Continue the task.' }],
+      },
+    ],
+  });
+
+  const registerOrchestrator = async (
+    hooks: Awaited<ReturnType<typeof plugin>>,
+    sessionID: string,
+  ) => {
+    await hooks['chat.message']?.(
+      { sessionID, agent: 'orchestrator' } as never,
+      {} as never,
+    );
+  };
+
+  const transform = async (
+    hooks: Awaited<ReturnType<typeof plugin>>,
+    fixture: { messages: MessageWithParts[] },
+  ) => {
+    const output = structuredClone(fixture);
+    await hooks['experimental.chat.messages.transform']?.(
+      {} as never,
+      output as never,
+    );
+    return output;
+  };
+
+  const taggedParts = (messages: MessageWithParts[], key: string) =>
+    messages.flatMap((message) =>
+      message.parts.filter((part) => isTaggedPart(part, key)),
+    );
+  const reminderParts = (messages: MessageWithParts[]) =>
+    taggedParts(messages, PHASE_REMINDER_METADATA_KEY);
+  const boardParts = (messages: MessageWithParts[]) =>
+    taggedParts(messages, BACKGROUND_JOB_BOARD_METADATA_KEY);
+
   beforeEach(async () => {
     originalEnv = { ...process.env };
     projectDir = await mkdtemp('/tmp/oh-my-opencode-slim-gens-');
@@ -441,6 +491,95 @@ describe('plugin reload generation cleanup', () => {
               ] === true,
           ),
       ).toHaveLength(1);
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('v1 compaction strips only phase reminders, preserving the job board and other content', async () => {
+    const hooks = await createHooks();
+    const sessionID = 'compact-board-session';
+    try {
+      await registerOrchestrator(hooks, sessionID);
+      await hooks['tool.execute.before']?.(
+        { tool: 'task', sessionID, callID: 'launch-1' } as never,
+        {
+          args: {
+            subagent_type: 'explorer',
+            background: true,
+            description: 'Check the job board',
+          },
+        } as never,
+      );
+      await hooks['tool.execute.after']?.(
+        { tool: 'task', sessionID, callID: 'launch-1' } as never,
+        { output: 'task_id: child-compact-1\nstate: running' } as never,
+      );
+      const fixture = reminderFixture(sessionID);
+      fixture.messages[0]?.parts.push({
+        type: 'text',
+        text: 'Preserved synthetic content',
+        synthetic: true,
+      });
+      const control = await transform(hooks, fixture);
+      expect(reminderParts(control.messages)).toHaveLength(1);
+      expect(boardParts(control.messages)).toHaveLength(1);
+
+      await hooks['experimental.session.compacting']?.(
+        { sessionID },
+        { context: [] },
+      );
+      const compacted = await transform(hooks, fixture);
+      const expected = structuredClone(control);
+      stripTaggedContent(expected.messages, PHASE_REMINDER_METADATA_KEY);
+      expect(compacted).toEqual(expected);
+      expect(reminderParts(compacted.messages)).toHaveLength(0);
+      expect(boardParts(compacted.messages)).toEqual(
+        boardParts(control.messages),
+      );
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('v1 compaction mark is consumed once; the following turn equals an unmarked control', async () => {
+    const hooks = await createHooks();
+    const sessionID = 'compact-once-session';
+    try {
+      await registerOrchestrator(hooks, sessionID);
+      const fixture = reminderFixture(sessionID);
+      const control = await transform(hooks, fixture);
+      await hooks['experimental.session.compacting']?.(
+        { sessionID },
+        { context: [] },
+      );
+      const compacted = await transform(hooks, fixture);
+      expect(reminderParts(compacted.messages)).toHaveLength(0);
+
+      const nextTurn = await transform(hooks, fixture);
+      expect(JSON.stringify(nextTurn)).toBe(JSON.stringify(control));
+      expect(reminderParts(nextTurn.messages)).toHaveLength(1);
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('v1 compaction mark does not affect another session', async () => {
+    const hooks = await createHooks();
+    const markedID = 'marked-session';
+    const otherID = 'other-session';
+    try {
+      await registerOrchestrator(hooks, markedID);
+      await registerOrchestrator(hooks, otherID);
+      await hooks['experimental.session.compacting']?.(
+        { sessionID: markedID },
+        { context: [] },
+      );
+
+      const other = await transform(hooks, reminderFixture(otherID));
+      expect(reminderParts(other.messages)).toHaveLength(1);
+      const marked = await transform(hooks, reminderFixture(markedID));
+      expect(reminderParts(marked.messages)).toHaveLength(0);
     } finally {
       await hooks.dispose?.();
     }
