@@ -111,6 +111,7 @@ import { isPluginDisabledByEnv } from './utils/env';
 import { isInternalInitiatorPart } from './utils/internal-initiator';
 import { probeJSDOM } from './utils/jsdom';
 import { initLogger, log } from './utils/logger';
+import { getClient } from './utils/opencode-client';
 import { SessionMetadataStore } from './utils/session-metadata';
 import {
   createSessionSelectionReader,
@@ -730,6 +731,42 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       backgroundJobBoard: backgroundJobCoordinator,
       backgroundJobSupervisor,
       backgroundTaskConcurrency,
+      hasUntrackedRunningChild: async (parentSessionID?: string) => {
+        if (!parentSessionID) return true;
+        try {
+          const session = getClient(ctx).session as unknown as
+            | { list?: unknown; status?: unknown }
+            | undefined;
+          // Old/mock hosts without the list API: probe unavailable, degrade
+          // to the plain unknown-alias drop instead of failing closed.
+          if (
+            typeof session?.list !== 'function' ||
+            typeof session?.status !== 'function'
+          ) {
+            return false;
+          }
+          const listed = await getClient(ctx).session.list();
+          const children = (
+            (listed.data ?? []) as Array<{ id: string; parentID?: string }>
+          ).filter((s) => s.parentID === parentSessionID);
+          if (children.length === 0) return false;
+          // Children the board already tracks are guarded by the known-task
+          // refusals upstream; only untracked ones can duplicate silently.
+          const tracked = new Set(
+            backgroundJobCoordinator.list().map((j) => j.taskID),
+          );
+          const untracked = children.filter((c) => !tracked.has(c.id));
+          if (untracked.length === 0) return false;
+          const status = await getClient(ctx).session.status();
+          const map = (status.data ?? {}) as Record<string, { type?: string }>;
+          return untracked.some((c) => {
+            const t = map[c.id]?.type;
+            return t === 'busy' || t === 'retry';
+          });
+        } catch {
+          return true;
+        }
+      },
       pendingCallTracker: admissionRuntimeLease.pendingCallTracker,
       getModelForAgent: (agentType: string, parentSessionID?: string) =>
         // Admission must use the config after the host has merged all of its
