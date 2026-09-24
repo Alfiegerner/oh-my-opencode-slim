@@ -484,9 +484,12 @@ uses the `question` tool as the blocking boundary instead.
 
 ### Background Job Board Injection
 
-By default, `latest` freezes one board snapshot per eligible turn and replays
-earlier snapshots without a cap; it does not replace prior boards. Snapshots
-disappear on process restart, compaction, revert, or session deletion.
+By default, `latest` freezes one board part per eligible turn and replays
+earlier parts without a cap; it does not replace prior boards. When the board
+has not changed and contains no new terminal result, it freezes a short
+"unchanged" marker instead, refreshing the full board every tenth turn.
+Terminal results always get a full board. Retained parts disappear on process
+restart, compaction, revert, or session deletion.
 
 For long-lived processes, opt in to the bounded, checkpoint-compatible strategy:
 
