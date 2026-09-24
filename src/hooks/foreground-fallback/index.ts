@@ -758,16 +758,16 @@ export class ForegroundFallbackManager {
     ) => Promise<unknown>,
   ): Promise<void> {
     try {
-      if (!this.enabled || this.disposed) return;
+      const { sessionID } = event;
+      if (!this.enabled || this.disposed || this.inProgress.has(sessionID))
+        return;
+      if (!isFailoverError(event.error)) return;
       if (this.initialRetryDelayMs > 0) {
         log('[foreground-fallback] retry hook skipped initial delay', {
-          sessionID: event.sessionID,
+          sessionID,
         });
         return;
       }
-      const { sessionID } = event;
-      if (this.inProgress.has(sessionID) || !isFailoverError(event.error))
-        return;
       const from = `${event.model.providerID}/${event.model.id}`;
       if (
         this.sessionTried.get(sessionID)?.has(from) &&
@@ -778,27 +778,24 @@ export class ForegroundFallbackManager {
       this.sessionModel.set(sessionID, from);
       const selected = this.selectFallbackModel(sessionID);
       if (!selected || selected === 'exhausted') return;
+      const { agentName, nextModel, ref } = selected;
       await withTimeout(
         switchModel(sessionID, {
-          providerID: selected.ref.providerID,
-          id: selected.ref.modelID,
+          providerID: ref.providerID,
+          id: ref.modelID,
         }),
         HOST_CALL_TIMEOUT_MS,
         'foreground retry model switch timed out',
       );
       if (this.disposed) return;
       event.decision = { retry: true, delay: this.retryDelayMs };
-      this.sessionModel.set(sessionID, selected.nextModel);
-      this.onSessionModelChanged?.(sessionID, selected.nextModel);
-      this.showFallbackToast(
-        selected.agentName,
-        selected.nextModel,
-        event.error,
-      );
+      this.sessionModel.set(sessionID, nextModel);
+      this.onSessionModelChanged?.(sessionID, nextModel);
+      this.showFallbackToast(agentName, nextModel, event.error);
       log('[foreground-fallback] retry hook switched model in place', {
         sessionID,
         from,
-        to: selected.nextModel,
+        to: nextModel,
       });
     } catch (err) {
       log(
@@ -1034,15 +1031,7 @@ export class ForegroundFallbackManager {
     return false;
   }
 
-  private selectFallbackModel(sessionID: string):
-    | {
-        agentName: string | undefined;
-        currentModel: string | undefined;
-        nextModel: string;
-        ref: { providerID: string; modelID: string };
-      }
-    | 'exhausted'
-    | undefined {
+  private selectFallbackModel(sessionID: string) {
     const observedModel = this.sessionModel.get(sessionID);
     let currentModel = observedModel;
     const agentName = this.sessionAgent.get(sessionID);
@@ -1129,7 +1118,7 @@ export class ForegroundFallbackManager {
             currentModel,
             tried: [...tried],
           });
-          return 'exhausted';
+          return 'exhausted' as const;
         }
         this.chainExhaustion.set(sessionID, 1);
         log('[foreground-fallback] resetting tried set for re-fallback', {
@@ -1151,7 +1140,7 @@ export class ForegroundFallbackManager {
           agentName,
           tried: [...tried],
         });
-        return 'exhausted';
+        return 'exhausted' as const;
       }
     }
     tried.add(nextModel);

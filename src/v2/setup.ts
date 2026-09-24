@@ -1755,11 +1755,7 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
           const reg = await (
             ctx.session.hook as unknown as (
               name: 'retry',
-              cb: (
-                event: Parameters<
-                  ForegroundFallbackManager['handleV2Retry']
-                >[0],
-              ) => Promise<void>,
+              cb: (event: never) => Promise<void>,
             ) => ReturnType<V2Context['session']['hook']>
           )('retry', (event) =>
             retryHook(event, (id, model) =>
