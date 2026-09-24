@@ -71,18 +71,12 @@ export type RetainedBoardSnapshotState = {
  * every later request once that anchor is no longer the tail, so a board that
  * was sent on a message the provider has cached never disappears.
  *
- * Only ONE placement is ever retained: a board that rode as a trailing PART on
- * a USER anchor (`anchorRole: 'user'`). That is the only shape that can be
- * reproduced later without inserting a message mid-array (A1) or grafting board
- * text onto a non-user message (A3). `anchorRole` stays a plain string so
- * legacy in-memory entries recorded by an earlier build (notably `'assistant'`,
- * which was replayed by splicing a synthetic message directly after the anchor
- * and could orphan a tool call from its result) are recognized and dropped
- * instead of replayed.
+ * Only a board that rode as a trailing PART on a USER anchor is retained:
+ * it can be reproduced without inserting a message mid-array (A1) or grafting
+ * board text onto a non-user message (A3).
  */
 type RetainedTailBoard = {
   anchorId: string;
-  anchorRole: string;
   text: string;
 };
 
@@ -1484,7 +1478,6 @@ function injectLatestBoard(state: InjectionState, messages: unknown[]): void {
     // so the bytes the provider just cached for this message never change.
     rememberTailBoard(state, sessionID, {
       anchorId: recordId,
-      anchorRole: 'user',
       text: reminder,
     });
   } else {
@@ -1693,15 +1686,9 @@ function replayRetainedTailBoards(
     }
     if (hasTaggedPart(anchor, state.metadataKey)) continue;
 
-    // A5: only the trailing-PART-on-a-user-anchor placement is replayable. A
-    // board recorded against an assistant anchor (legacy state from an earlier
-    // build) was reproduced by splicing a synthetic message after the anchor —
-    // which lands between an assistant `task` tool_call and its tool_result and
-    // invalidates the whole request. A board whose anchor is no longer a user
-    // message cannot take the part path either. Both are dropped: one lost
-    // board (a bounded cache bust on that message) is preferable to a hard
-    // AI_InvalidPromptError on every request.
-    if (board.anchorRole !== 'user' || !canCarryBoardPart(anchor)) {
+    // A5: a board whose anchor is no longer a user message cannot take the
+    // replayable trailing-part path. Drop it rather than invalidating the turn.
+    if (!canCarryBoardPart(anchor)) {
       perSession.delete(anchorId);
       continue;
     }
