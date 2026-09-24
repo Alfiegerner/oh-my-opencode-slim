@@ -1991,7 +1991,7 @@ describe('ForegroundFallbackManager session.status', () => {
         expect(calls).toEqual(['promote', 'abort', 'promptAsync']);
         expect(logSpy).not.toHaveBeenCalledWith(
           '[foreground-fallback] promoted foreground task waiter to background',
-          expect.anything(),
+          expect.objectContaining({ sessionID: 'child' }),
         );
         expect(logSpy).toHaveBeenCalledWith(
           '[foreground-fallback] foreground waiter promotion failed; continuing fallback',
@@ -2068,6 +2068,7 @@ describe('ForegroundFallbackManager session.status', () => {
     const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(async () => {
       throw new Error('unexpected fetch');
     });
+    fetchSpy.mockClear();
     const logSpy = spyOn(logger, 'log').mockImplementation(() => {});
     try {
       await runWaiterFallback('sess-v2-child', 'sess-v2-parent', calls, {
