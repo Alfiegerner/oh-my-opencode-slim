@@ -28,6 +28,7 @@ import {
   CHAT_INITIATOR_HEADER_NAME,
   isCopilotProvider,
 } from '../hooks/chat-headers';
+import type { ForegroundFallbackManager } from '../hooks/foreground-fallback';
 import { PHASE_REMINDER_METADATA_KEY } from '../hooks/phase-reminder';
 import { BACKGROUND_JOB_BOARD_METADATA_KEY } from '../hooks/task-session-manager/board-injection';
 import { OhMyOpenCodeLite } from '../index';
@@ -1741,6 +1742,34 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       );
       disposers.push(() => compactionReg.dispose());
       log('[v2] compaction bridge registered (session.compaction)');
+
+      const retryHook = v1Hooks['v2.session.retry'] as
+        | ForegroundFallbackManager['handleV2Retry']
+        | undefined;
+      const switchModel = ctx.session.switchModel;
+      // Without switchModel the retry hook must not register: it would mask
+      // the deferred fallback path on hosts that can't switch in place.
+      if (
+        typeof retryHook === 'function' &&
+        typeof switchModel === 'function'
+      ) {
+        try {
+          const reg = await (
+            ctx.session.hook as unknown as (
+              name: 'retry',
+              cb: (event: never) => Promise<void>,
+            ) => ReturnType<V2Context['session']['hook']>
+          )('retry', (event) =>
+            retryHook(event, (id, model) =>
+              switchModel.call(ctx.session, { sessionID: id, model }),
+            ),
+          );
+          disposers.push(() => reg.dispose());
+          log('[v2] retry hook registered');
+        } catch (err) {
+          log('[v2] retry hook registration failed', String(err));
+        }
+      }
 
       // ── Tool execute hooks ──
       try {

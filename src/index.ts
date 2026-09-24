@@ -1113,6 +1113,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
   return {
     name: 'oh-my-opencode-slim',
+    'v2.session.retry':
+      foregroundFallback.handleV2Retry.bind(foregroundFallback),
 
     agent: agents,
 

@@ -90,10 +90,13 @@ export function responseError(response: unknown): unknown {
 
 /** Normalize an unknown error payload to a displayable message string. */
 export function stringifyError(error: unknown): string {
-  if (error instanceof Error) return error.message;
+  if (error instanceof Error && error.message) return error.message;
   if (typeof error === 'string') return error;
   try {
-    return JSON.stringify(error);
+    if (error instanceof Error)
+      return JSON.stringify({ name: error.name, ...(error as object) });
+    const serialized = JSON.stringify(error);
+    return serialized ?? String(error);
   } catch {
     return String(error);
   }

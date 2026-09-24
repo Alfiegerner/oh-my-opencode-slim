@@ -3,6 +3,7 @@ import type { PluginInput } from '@opencode-ai/plugin';
 import {
   extractChildTerminalEvidence,
   fetchChildTranscript,
+  stringifyError,
 } from './child-transcript';
 
 function message(overrides: {
@@ -26,6 +27,17 @@ function message(overrides: {
     parts: overrides.parts ?? [{ type: 'text', text: 'the answer' }],
   };
 }
+
+test('stringifyError never throws on unserializable empty-message errors', () => {
+  const error = Object.assign(new Error(''), { name: 'E', self: {} });
+  error.self = error;
+  expect(stringifyError(error)).toBe('E');
+});
+
+test('stringifyError never returns undefined for unserializable values', () => {
+  expect(typeof stringifyError(undefined)).toBe('string');
+  expect(typeof stringifyError(Symbol('cause'))).toBe('string');
+});
 
 describe('extractChildTerminalEvidence', () => {
   test('trailing assistant with text is ready', () => {

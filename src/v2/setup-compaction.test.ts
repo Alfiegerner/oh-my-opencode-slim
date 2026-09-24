@@ -273,7 +273,10 @@ describe('createV2Setup compaction hook', () => {
     await rm(fixtureRoot, { recursive: true, force: true });
   });
 
-  function makeCtx(options?: { rejectCompaction?: boolean }): {
+  function makeCtx(options?: {
+    rejectCompaction?: boolean;
+    switchModel?: boolean;
+  }): {
     ctx: V2Context;
     hooks: string[];
     rejected: string[];
@@ -324,6 +327,7 @@ describe('createV2Setup compaction hook', () => {
           }
           return { dispose: () => {} };
         },
+        switchModel: options?.switchModel ? async () => {} : undefined,
       },
       event: { subscribe: () => neverIterable() },
     } as unknown as V2Context;
@@ -335,6 +339,20 @@ describe('createV2Setup compaction hook', () => {
       getContextCb: () => contextCb,
     };
   }
+
+  test.each([true, false])(
+    'registers the retry hook only with switchModel (%p)',
+    async (switchModel) => {
+      const { ctx, hooks } = makeCtx({ switchModel });
+      const cleanup = await createV2Setup()(ctx);
+      try {
+        expect(hooks.includes('retry')).toBe(switchModel);
+      } finally {
+        await cleanup();
+      }
+    },
+    20_000,
+  );
 
   test('registers the compaction hook; the registered callback strips tagged parts', async () => {
     const { ctx, hooks, getCompactionCb, getContextCb } = makeCtx();

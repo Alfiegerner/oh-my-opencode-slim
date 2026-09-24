@@ -1,5 +1,14 @@
-import { beforeEach, describe, expect, jest, mock, test } from 'bun:test';
+import {
+  beforeEach,
+  describe,
+  expect,
+  jest,
+  mock,
+  spyOn,
+  test,
+} from 'bun:test';
 import { isInternalInitiatorPart } from '../../utils';
+import * as logger from '../../utils/logger';
 import { SessionLifecycle } from '../session-lifecycle';
 import { ForegroundFallbackManager, isFailoverError } from './index';
 
@@ -100,6 +109,116 @@ function makeChains(
   };
 }
 
+const retryMgr = (
+  ids: string[],
+  onChanged?: (sessionID: string, model: string) => void,
+): ForegroundFallbackManager =>
+  new ForegroundFallbackManager(
+    { orchestrator: ids.map((id) => `test/${id}`) },
+    true,
+    { directory: '/test' } as any,
+    3,
+    undefined,
+    onChanged,
+  );
+
+const retryEvent = (
+  sessionID: string,
+  id: string,
+  decision?: { retry: boolean; delay?: number },
+) => ({
+  sessionID,
+  agent: 'orchestrator',
+  model: { providerID: 'test', id },
+  error: { message: 'rate limit' },
+  decision,
+});
+
+describe('ForegroundFallbackManager v2 retry hook', () => {
+  test.each([{ retry: true, delay: 2000 }, { retry: false }])(
+    'switches in place without abort or re-prompt (initial decision %p)',
+    async (decision) => {
+      const { mocks } = createMockClient();
+      const onChanged = mock();
+      const mgr = retryMgr(['A', 'B'], onChanged);
+      const switchModel = mock(async () => {});
+      const event = retryEvent('c', 'A', { ...decision });
+      await mgr.handleV2Retry(event, switchModel);
+      expect(switchModel).toHaveBeenCalledWith('c', {
+        providerID: 'test',
+        id: 'B',
+      });
+      expect(event.decision).toEqual({ retry: true, delay: 500 });
+      expect(mocks.abort).not.toHaveBeenCalled();
+      expect(mocks.promptAsync).not.toHaveBeenCalled();
+      expect(onChanged).toHaveBeenCalledWith('c', 'test/B');
+      await mgr.handleV2Retry(
+        retryEvent('c', 'A', { ...decision }),
+        switchModel,
+      );
+      expect(switchModel).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  test.each([
+    ['B', 'C'],
+    ['C', 'D'],
+  ])(
+    'failed switch keeps its target retryable (next failure on %s switches to %s)',
+    async (hostModel, target) => {
+      const { mocks } = createMockClient();
+      const mgr = retryMgr(['A', 'B', 'C', 'D']);
+      const sessionID = 'retry-unconsumed';
+      const decision = { retry: false };
+      const failed = retryEvent(sessionID, 'B', decision);
+      await mgr.handleV2Retry(failed, () =>
+        Promise.reject(new Error('switch denied')),
+      );
+      expect(failed.decision).toBe(decision);
+      expect(mocks.abort).not.toHaveBeenCalled();
+      expect(mocks.promptAsync).not.toHaveBeenCalled();
+      const switchModel = mock(async () => {});
+      await mgr.handleV2Retry(retryEvent(sessionID, hostModel), switchModel);
+      expect(switchModel).toHaveBeenCalledWith(sessionID, {
+        providerID: 'test',
+        id: target,
+      });
+    },
+  );
+
+  test.each([
+    { kind: 'reconciles B', advance: false, calls: ['test/B'] },
+    { kind: 'does not roll C back to B', advance: true, calls: ['test/C'] },
+  ])('late-landing switch $kind', async ({ advance, calls }) => {
+    jest.useFakeTimers();
+    try {
+      const observed: string[] = [];
+      const mgr = retryMgr(
+        ['A', 'B', 'C'],
+        (_sid, model) => void observed.push(model),
+      );
+      const sid = 'retry-late-landing';
+      const { promise: switchRequest, resolve: resolveSwitch } =
+        Promise.withResolvers<void>();
+      const pending = mgr.handleV2Retry(
+        retryEvent(sid, 'A'),
+        () => switchRequest,
+      );
+      jest.advanceTimersByTime(2_500);
+      await pending;
+      expect(observed).toEqual([]);
+      if (advance)
+        await mgr.handleV2Retry(retryEvent(sid, 'B'), async () => {});
+      // A late B must reconcile only if no later retry has advanced to C.
+      resolveSwitch();
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      expect(observed).toEqual(calls);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
+
 // ---------------------------------------------------------------------------
 // isFailoverError
 // ---------------------------------------------------------------------------
@@ -122,29 +241,24 @@ describe('isFailoverError', () => {
     expect(isFailoverError({ data: { statusCode: 429 } })).toBe(true);
   });
 
-  test('falls back on v2 provider errors with a top-level 429 status', () => {
-    expect(
-      isFailoverError({
-        type: 'provider.quota',
-        message: 'rpm exhausted',
-        status: 429,
-      }),
-    ).toBe(true);
-    expect(
-      isFailoverError({
-        type: 'provider.rate-limit',
-        message: 'inference exceeds tpm/rpm limit',
-        status: 429,
-      }),
-    ).toBe(true);
-    expect(
-      isFailoverError({
-        type: 'provider.error',
-        message: 'invalid request',
-        status: 400,
-      }),
-    ).toBe(false);
-  });
+  test.each([
+    ['provider.quota', 'rpm exhausted', 429, true],
+    ['provider.rate-limit', 'inference exceeds tpm/rpm limit', 429, true],
+    ['provider.quota', 'You exceeded your current quota', undefined, true],
+    ['provider.invalid-request', 'prompt is too long', undefined, false],
+    ['provider.error', 'invalid request', 400, false],
+  ])(
+    'classifies v2 provider error %s (issue #1283)',
+    (type, message, status, expected) => {
+      expect(
+        isFailoverError({
+          type,
+          message,
+          ...(status === undefined ? {} : { status }),
+        }),
+      ).toBe(expected);
+    },
+  );
 
   test('returns true for "rate limit" in message', () => {
     expect(isFailoverError({ message: 'Rate limit exceeded' })).toBe(true);
@@ -1039,6 +1153,7 @@ describe('ForegroundFallbackManager session.error', () => {
    * message.updated → session.error sequence that triggers a fallback
    * attempt on 'sess-1'. */
   async function runFallbackScenario(options?: {
+    v2?: boolean;
     promptAsyncImpl?: () => Promise<unknown>;
     abortImpl?: () => Promise<unknown>;
     messagesData?: unknown[];
@@ -1054,7 +1169,7 @@ describe('ForegroundFallbackManager session.error', () => {
     mgr = new ForegroundFallbackManager(
       makeChains(),
       true,
-      { directory: '/test' } as any,
+      { directory: '/test', hostFlavor: options?.v2 ? 'v2' : undefined } as any,
       3,
       undefined,
       options?.modelChanged,
@@ -1535,52 +1650,55 @@ describe('ForegroundFallbackManager session.error', () => {
     expect(showToast).not.toHaveBeenCalled();
   });
 
-  test('typed no-switchModel rejection is not treated as a busy session', async () => {
-    // Hosts without session.switchModel reject the required-switch replay
-    // with V2SwitchModelUnavailableError; aborting + retrying cannot fix a
-    // missing host capability, so the error must surface after ONE call.
-    const switchErr = new Error(
+  const noSwitch = Object.assign(
+    new Error(
       '[v2] host provides no session.switchModel; cannot switch model for fallback prompt',
-    );
-    switchErr.name = 'V2SwitchModelUnavailableError';
-    const { mocks } = createMockClient({
-      promptAsyncImpl: async () => {
-        throw switchErr;
-      },
-    });
-    const onModelChanged = mock();
-    const mgr = new ForegroundFallbackManager(
-      makeChains(),
-      true,
-      { directory: '/test', hostFlavor: 'v2' } as any,
-      3,
-      undefined,
-      onModelChanged,
-    );
-
-    await mgr.handleEvent({
-      type: 'message.updated',
-      properties: {
-        info: {
-          sessionID: 'sess-noswitch',
-          providerID: 'anthropic',
-          modelID: 'claude-opus-4-5',
-          role: 'assistant',
-        },
-      },
-    });
-    await mgr.handleEvent({
-      type: 'session.error',
-      properties: {
-        sessionID: 'sess-noswitch',
-        error: { message: 'Rate limit exceeded' },
-      },
-    });
-
-    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
-    expect(mocks.abort).not.toHaveBeenCalled();
-    expect(onModelChanged).not.toHaveBeenCalled();
+    ),
+    { name: 'V2SwitchModelUnavailableError' },
+  );
+  const conflict = Object.assign(new Error(''), {
+    name: 'Session.SyntheticConflictError',
+    _tag: 'Session.SyntheticConflictError',
+    inputID: 'msg_omos_existing',
   });
+  test.each([
+    ['missing switchModel', noSwitch, /host provides no session\.switchModel/],
+    [
+      'synthetic id conflict',
+      conflict,
+      /"_tag":"Session\.SyntheticConflictError","inputID":"msg_omos_existing"/,
+    ],
+  ])(
+    'v2 %s rejection is final and reports its cause',
+    async (_kind, error, detail) => {
+      const { calls, handoff } = handoffMock();
+      const onModelChanged = mock();
+      const logSpy = spyOn(logger, 'log').mockImplementation(() => {});
+      try {
+        const mocks = await runFallbackScenario({
+          v2: true,
+          handoff,
+          modelChanged: onModelChanged,
+          messagesData: taskPrompt,
+          promptAsyncImpl: async () => {
+            throw error;
+          },
+        });
+
+        expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+        expect(mocks.abort).not.toHaveBeenCalled();
+        expect(onModelChanged).not.toHaveBeenCalled();
+        expect(calls.reject).toEqual([['sess-1', undefined]]);
+        expect(calls.settleUnresolved).toEqual([]);
+        expect(logSpy).toHaveBeenCalledWith(
+          '[foreground-fallback] fallback attempt failed',
+          expect.objectContaining({ error: expect.stringMatching(detail) }),
+        );
+      } finally {
+        logSpy.mockRestore();
+      }
+    },
+  );
 
   test('shows a toast when fallback switches models on a transient error', async () => {
     const { mocks } = createMockClient();
@@ -1953,9 +2071,14 @@ describe('ForegroundFallbackManager session.status', () => {
     expect(calls).toEqual(['abort', 'promptAsync']);
   });
 
-  test('waiter promotion failure is fail-soft: abort and fallback still proceed', async () => {
-    const calls: string[] = [];
+  async function runWaiterFallback(
+    sessionID: string,
+    parentSessionID: string,
+    calls: string[],
+    overrides?: Parameters<typeof createMockClient>[0],
+  ): Promise<void> {
     createMockClient({
+      ...overrides,
       abortImpl: async () => {
         calls.push('abort');
       },
@@ -1963,48 +2086,60 @@ describe('ForegroundFallbackManager session.status', () => {
         calls.push('promptAsync');
         return {};
       },
-      postImpl: async () => {
-        throw new Error('no experimental endpoint on this host');
-      },
     });
-    const mgr = new ForegroundFallbackManager(
-      makeChains(),
-      true,
-      { directory: '/test' } as any,
-      3,
-    );
-
+    const input = { directory: '/test' } as any;
+    const mgr = new ForegroundFallbackManager(makeChains(), true, input, 3);
+    mgr.registerSessionAgent(sessionID, 'orchestrator');
     await mgr.handleEvent({
       type: 'session.created',
-      properties: {
-        info: {
-          id: 'sess-promote-fails',
-          parentID: 'sess-promote-fails-parent',
-        },
-      },
+      properties: { info: { id: sessionID, parentID: parentSessionID } },
     });
-
-    await mgr.handleEvent({
-      type: 'message.updated',
-      properties: {
-        info: {
-          sessionID: 'sess-promote-fails',
-          providerID: 'anthropic',
-          modelID: 'claude-opus-4-5',
-        },
-      },
-    });
-
     await mgr.handleEvent({
       type: 'session.status',
       properties: {
-        sessionID: 'sess-promote-fails',
-        status: { type: 'retry', attempt: 1, message: 'rate limit' },
+        sessionID,
+        status: { type: 'retry', message: 'rate limit' },
       },
     });
+  }
 
-    expect(calls).toEqual(['abort', 'promptAsync']);
-  });
+  test.each([
+    ['transport exception', false, 'endpoint missing'],
+    ['SDK error envelope', true, '{"message":"endpoint missing"}'],
+  ] as const)(
+    'waiter promotion failure (%s) is fail-soft: abort and fallback still proceed',
+    async (_kind, envelope, error) => {
+      const calls: string[] = [];
+      const logSpy = spyOn(logger, 'log').mockImplementation(() => {});
+      try {
+        await runWaiterFallback('child', 'parent', calls, {
+          postImpl: async () => {
+            calls.push('promote');
+            if (envelope) {
+              return { error: { message: 'endpoint missing' } };
+            }
+            throw new Error(error);
+          },
+        });
+        expect(calls).toEqual(['promote', 'abort', 'promptAsync']);
+        expect(logSpy).not.toHaveBeenCalledWith(
+          '[foreground-fallback] promoted foreground task waiter to background',
+          expect.objectContaining({ sessionID: 'child' }),
+        );
+        expect(logSpy).toHaveBeenCalledWith(
+          '[foreground-fallback] foreground waiter promotion failed; continuing fallback',
+          {
+            sessionID: 'child',
+            parentSessionID: 'parent',
+            transport: 'sdk',
+            error,
+          },
+        );
+      } finally {
+        logSpy.mockRestore();
+      }
+    },
+  );
 
   test('promotes the waiter before the busy-session abort in execFallback too', async () => {
     const calls: string[] = [];
@@ -2061,66 +2196,31 @@ describe('ForegroundFallbackManager session.status', () => {
     expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
   });
 
-  test('promotes via serverUrl fetch when the client exposes no _client (v2)', async () => {
+  test('v2 without post reports promotion unavailable without network calls', async () => {
     const calls: string[] = [];
-    const fetchTargets: string[] = [];
-    createMockClient({
-      includePostClient: false,
-      abortImpl: async () => {
-        calls.push('abort');
-      },
-      promptAsyncImpl: async () => {
-        calls.push('promptAsync');
-        return {};
-      },
+    const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      throw new Error('unexpected fetch');
     });
-    const mgr = new ForegroundFallbackManager(
-      makeChains(),
-      true,
-      {
-        directory: '/test',
-        serverUrl: new URL('http://127.0.0.1:4096'),
-      } as any,
-      3,
-    );
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async (input: unknown) => {
-      fetchTargets.push(String(input));
-      calls.push('promote');
-      return new Response(null, { status: 200 });
-    }) as typeof fetch;
+    fetchSpy.mockClear();
+    const logSpy = spyOn(logger, 'log').mockImplementation(() => {});
     try {
-      await mgr.handleEvent({
-        type: 'session.created',
-        properties: {
-          info: { id: 'sess-v2-child', parentID: 'sess-v2-parent' },
-        },
+      await runWaiterFallback('sess-v2-child', 'sess-v2-parent', calls, {
+        includePostClient: false,
       });
-      await mgr.handleEvent({
-        type: 'message.updated',
-        properties: {
-          info: {
-            sessionID: 'sess-v2-child',
-            providerID: 'anthropic',
-            modelID: 'claude-opus-4-5',
-          },
-        },
-      });
-      await mgr.handleEvent({
-        type: 'session.status',
-        properties: {
+      expect(fetchSpy).toHaveBeenCalledTimes(0);
+      expect(calls).toEqual(['abort', 'promptAsync']);
+      expect(logSpy).toHaveBeenCalledWith(
+        '[foreground-fallback] foreground waiter promotion unavailable on this host; continuing fallback',
+        {
           sessionID: 'sess-v2-child',
-          status: { type: 'retry', attempt: 1, message: 'rate limit' },
+          parentSessionID: 'sess-v2-parent',
+          transport: 'none',
         },
-      });
+      );
     } finally {
-      globalThis.fetch = originalFetch;
+      fetchSpy.mockRestore();
+      logSpy.mockRestore();
     }
-
-    expect(calls).toEqual(['promote', 'abort', 'promptAsync']);
-    expect(fetchTargets[0]).toBe(
-      'http://127.0.0.1:4096/experimental/session/sess-v2-parent/background',
-    );
   });
 
   test('does not abort through a stale client when disposed during promotion', async () => {
