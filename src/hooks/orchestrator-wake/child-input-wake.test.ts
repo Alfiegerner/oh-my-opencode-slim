@@ -1,5 +1,6 @@
 import { describe, expect, mock, test } from 'bun:test';
 import {
+  CHILD_INPUT_OVERFLOW_TEXT,
   CHILD_INPUT_QUEUE_CAP,
   CHILD_INPUT_WAKE_CHUNK,
   createOrchestratorWakeScheduler,
@@ -134,5 +135,72 @@ describe('child input-wait wake', () => {
   test('queue is bounded and each wake sends a chunk', async () => {
     expect(CHILD_INPUT_QUEUE_CAP).toBe(32);
     expect(CHILD_INPUT_WAKE_CHUNK).toBe(4);
+  });
+
+  test('overflowing the queue keeps an overflow marker telling the parent to run task_status', async () => {
+    resetOrchestratorWakeGateForTests();
+    const promptAsync = mock(async () => ({}));
+    const session = v1Session(promptAsync);
+    const scheduler = makeScheduler(session);
+
+    for (let i = 0; i < CHILD_INPUT_QUEUE_CAP + 1; i++) {
+      scheduler.triggerChildInputWaitWake(
+        'parent-1',
+        formatChildInputWaitDelta({
+          alias: `fix-${i}`,
+          taskID: `ses_child${i}`,
+          kind: 'question',
+          requestID: `que_${i}`,
+          detail: `request: que_${i}\nkind: question\nquestion: Q${i}`,
+        }),
+        `ses_child${i}:que_${i}`,
+      );
+    }
+    await flush();
+
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    const call = promptAsync.mock.calls[0]?.[0] as {
+      body: { parts: Array<{ text: string }> };
+    };
+    const text = call.body.parts[0]?.text ?? '';
+    // Oldest delta (ses_child0) was evicted; the overflow marker survives
+    // and directs the parent to the remaining open requests.
+    expect(text).not.toContain('task: ses_child0\n');
+    expect(text).toContain('task: ses_child1\n');
+    expect(text).toContain(CHILD_INPUT_OVERFLOW_TEXT);
+    expect(text).toContain('task_status');
+    expect(text.match(/<child-input-wait>/g)?.length).toBe(
+      CHILD_INPUT_WAKE_CHUNK,
+    );
+  });
+
+  test('the overflow marker keeps waking when retained details go stale', async () => {
+    resetOrchestratorWakeGateForTests();
+    const promptAsync = mock(async () => ({}));
+    const session = v1Session(promptAsync);
+    let current = true;
+    const scheduler = makeScheduler(session, {
+      isChildInputWaitCurrent: () => current,
+    });
+
+    for (let i = 0; i < CHILD_INPUT_QUEUE_CAP + 1; i++) {
+      scheduler.triggerChildInputWaitWake(
+        'parent-1',
+        delta(`ses_child${i}`, `que_${i}`),
+        `ses_child${i}:que_${i}`,
+      );
+    }
+    // All retained asks resolve while queued; the overflow count alone
+    // must still produce a wake carrying the marker.
+    current = false;
+    scheduler.triggerChildInputWaitWake('parent-1');
+    await flush();
+
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    const call = promptAsync.mock.calls[0]?.[0] as {
+      body: { parts: Array<{ text: string }> };
+    };
+    const text = call.body.parts[0]?.text ?? '';
+    expect(text).toContain(CHILD_INPUT_OVERFLOW_TEXT);
   });
 });

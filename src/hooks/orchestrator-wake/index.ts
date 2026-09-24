@@ -173,6 +173,13 @@ export const CHILD_INPUT_QUEUE_CAP = 32;
 /** Max child-input deltas appended to one wake. */
 export const CHILD_INPUT_WAKE_CHUNK = 4;
 
+/** Asks that overflow the bounded child-input queue still produce a
+ * durable, actionable signal. The parent runs task_status for the remaining
+ * open requests whose inline details were coalesced. Same overflow-marker
+ * discipline as the stopped-job recovery queue. */
+export const CHILD_INPUT_OVERFLOW_TEXT =
+  '<child-input-wait-overflow>\nAdditional background child input requests were queued beyond the inline detail limit. Run task_status for the remaining open requests and answer them with task_reply.\n</child-input-wait-overflow>';
+
 /** Children-mode variant (v2 degraded mode): watchdog over background
  * children and unreconciled jobs instead of the todo list. */
 export const ORCHESTRATOR_CHILDREN_WAKE_TEXT =
@@ -645,13 +652,20 @@ export function createOrchestratorWakeScheduler(
    * delivery. */
   const pendingStoppedRecoveries = new Map<string, PendingStoppedRecovery>();
 
+  type PendingChildInput = {
+    deltas: Map<string, string>;
+    /** Number of ask details coalesced beyond the bounded queue. */
+    overflowCount: number;
+  };
+
   /** Sessions with a background child awaiting an input-wait wake, carrying
    * the self-contained ask deltas (see `formatChildInputWaitDelta`),
    * deduplicated per `(taskID, requestID)`. Bounded per parent
    * (`CHILD_INPUT_QUEUE_CAP`); each wake sends at most
-   * `CHILD_INPUT_WAKE_CHUNK` entries. Same retire-only-what-was-sent
-   * discipline as the stopped-job queue. */
-  const pendingChildInputWakes = new Map<string, Map<string, string>>();
+   * `CHILD_INPUT_WAKE_CHUNK` entries. Overflow is represented by a durable
+   * count and an inline signal rather than being silently discarded. Same
+   * retire-only-what-was-sent discipline as the stopped-job queue. */
+  const pendingChildInputWakes = new Map<string, PendingChildInput>();
 
   function parseChildInputKey(
     key: string,
@@ -666,15 +680,15 @@ export function createOrchestratorWakeScheduler(
   /** Drop asks that resolved while queued. Repeat after every await so an
    * ask answered during selection resolve is not sent. */
   function pruneChildInputDeltas(
-    deltas: Map<string, string> | undefined,
+    batch: PendingChildInput | undefined,
   ): boolean {
-    if (!deltas) return false;
-    const hadDetails = deltas.size > 0;
+    if (!batch) return false;
+    const hadDetails = batch.deltas.size > 0;
     if (options.isChildInputWaitCurrent) {
-      for (const key of deltas.keys()) {
+      for (const key of batch.deltas.keys()) {
         const parsed = parseChildInputKey(key);
         if (!parsed) {
-          deltas.delete(key);
+          batch.deltas.delete(key);
           continue;
         }
         let current = false;
@@ -686,7 +700,7 @@ export function createOrchestratorWakeScheduler(
         } catch {
           current = false;
         }
-        if (!current) deltas.delete(key);
+        if (!current) batch.deltas.delete(key);
       }
     }
     return hadDetails;
@@ -698,22 +712,23 @@ export function createOrchestratorWakeScheduler(
     delta: string,
     dedupeKey?: string,
   ): void => {
-    let deltas = pendingChildInputWakes.get(sessionID);
-    if (!deltas) {
-      deltas = new Map();
-      pendingChildInputWakes.set(sessionID, deltas);
+    let batch = pendingChildInputWakes.get(sessionID);
+    if (!batch) {
+      batch = { deltas: new Map(), overflowCount: 0 };
+      pendingChildInputWakes.set(sessionID, batch);
     }
     const key = dedupeKey ?? delta;
-    if (deltas.has(key)) {
-      deltas.set(key, delta);
+    if (batch.deltas.has(key)) {
+      batch.deltas.set(key, delta);
       return;
     }
-    while (deltas.size >= CHILD_INPUT_QUEUE_CAP) {
-      const oldest = deltas.keys().next().value;
+    while (batch.deltas.size >= CHILD_INPUT_QUEUE_CAP) {
+      const oldest = batch.deltas.keys().next().value;
       if (oldest === undefined) break;
-      deltas.delete(oldest);
+      batch.deltas.delete(oldest);
+      batch.overflowCount += 1;
     }
-    deltas.set(key, delta);
+    batch.deltas.set(key, delta);
   };
 
   function parseRecoveryKey(
@@ -1481,14 +1496,20 @@ export function createOrchestratorWakeScheduler(
         }
       }
 
-      // A resolved ask must not cause an input-wait wake by itself.
+      // A resolved ask must not cause an input-wait wake by itself. An
+      // overflow marker remains actionable even when all retained details
+      // have since gone stale.
       const childInputDeltas =
         recoveryWake === 'child-input'
           ? pendingChildInputWakes.get(sessionID)
           : undefined;
       if (childInputDeltas) {
         const hadInputDetails = pruneChildInputDeltas(childInputDeltas);
-        if (hadInputDetails && childInputDeltas.size === 0) {
+        if (
+          hadInputDetails &&
+          childInputDeltas.deltas.size === 0 &&
+          childInputDeltas.overflowCount === 0
+        ) {
           pendingChildInputWakes.delete(sessionID);
           return;
         }
@@ -1537,7 +1558,11 @@ export function createOrchestratorWakeScheduler(
       }
       if (childInputDeltas) {
         const hadInputDetails = pruneChildInputDeltas(childInputDeltas);
-        if (hadInputDetails && childInputDeltas.size === 0) {
+        if (
+          hadInputDetails &&
+          childInputDeltas.deltas.size === 0 &&
+          childInputDeltas.overflowCount === 0
+        ) {
           pendingChildInputWakes.delete(sessionID);
           return;
         }
@@ -1579,13 +1604,23 @@ export function createOrchestratorWakeScheduler(
           ? STOPPED_RECOVERY_OVERFLOW_TEXT
           : '';
       const sentInputKeys = childInputDeltas
-        ? [...childInputDeltas.keys()].slice(0, CHILD_INPUT_WAKE_CHUNK)
+        ? [...childInputDeltas.deltas.keys()].slice(0, CHILD_INPUT_WAKE_CHUNK)
         : [];
+      const sentInputOverflowCount = childInputDeltas?.overflowCount ?? 0;
       const inputDelta = sentInputKeys
-        .map((key) => childInputDeltas?.get(key))
+        .map((key) => childInputDeltas?.deltas.get(key))
         .filter((text): text is string => typeof text === 'string')
         .join('\n');
-      const recoveryDetails = [overflowDelta, recoveryDelta, inputDelta]
+      const inputOverflowDelta =
+        childInputDeltas && childInputDeltas.overflowCount > 0
+          ? CHILD_INPUT_OVERFLOW_TEXT
+          : '';
+      const recoveryDetails = [
+        overflowDelta,
+        recoveryDelta,
+        inputOverflowDelta,
+        inputDelta,
+      ]
         .filter(Boolean)
         .join('\n');
       const body = {
@@ -1656,8 +1691,15 @@ export function createOrchestratorWakeScheduler(
       if (recoveryWake === 'child-input') {
         const remaining = pendingChildInputWakes.get(sessionID);
         if (remaining) {
-          for (const key of sentInputKeys) remaining.delete(key);
-          if (remaining.size === 0) {
+          for (const key of sentInputKeys) remaining.deltas.delete(key);
+          remaining.overflowCount = Math.max(
+            0,
+            remaining.overflowCount - sentInputOverflowCount,
+          );
+          if (
+            remaining.deltas.size === 0 &&
+            remaining.overflowCount === 0
+          ) {
             pendingChildInputWakes.delete(sessionID);
           } else {
             rearmWakeProgress(sessionID);
@@ -1822,7 +1864,10 @@ export function createOrchestratorWakeScheduler(
     if (delta) {
       addChildInputDelta(sessionID, delta, dedupeKey);
     } else if (!pendingChildInputWakes.has(sessionID)) {
-      pendingChildInputWakes.set(sessionID, new Map());
+      pendingChildInputWakes.set(sessionID, {
+        deltas: new Map(),
+        overflowCount: 0,
+      });
     }
     if (localSessions.get(sessionID)?.archived) {
       return;
