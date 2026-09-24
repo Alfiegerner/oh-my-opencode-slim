@@ -1747,6 +1747,8 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         | ForegroundFallbackManager['handleV2Retry']
         | undefined;
       const switchModel = ctx.session.switchModel;
+      // Without switchModel the retry hook must not register: it would mask
+      // the deferred fallback path on hosts that can't switch in place.
       if (
         typeof retryHook === 'function' &&
         typeof switchModel === 'function'
