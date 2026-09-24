@@ -18,7 +18,7 @@
  */
 
 import type { PluginInput } from '@opencode-ai/plugin';
-import { responseError } from '../../utils/child-transcript';
+import { responseError, stringifyError } from '../../utils/child-transcript';
 import { isRecord } from '../../utils/guards';
 import { createInternalAgentTextPart } from '../../utils/internal-initiator';
 import { log } from '../../utils/logger';
@@ -871,18 +871,16 @@ export class ForegroundFallbackManager {
    * without a replacement model only races owners that manage their own
    * lifecycle (e.g. CouncilManager for councillor) and produces noise.
    */
-  /** Promote a foreground task() waiter to background BEFORE the abort
-   *  below settles the child's job as "cancelled": the host resolves the
-   *  parent's wait via backgroundResult, so the waiting tool returns
-   *  "Background task started", its after-hook attributes the child, and
-   *  the fallback replay runs on a tracked session instead of orphaning
-   *  a headless run. Fail-soft by design: unknown host endpoint, missing
-   *  experimental flag, or transport failure degrade to the previous
-   *  behavior ("Task cancelled" + untracked replay). Order-critical:
-   *  must precede the abort. */
+  /** Promote a foreground task() waiter through the v1 SDK before abort
+   *  settles the child's job as "cancelled". The parent's wait then resolves
+   *  via backgroundResult and the fallback replay stays tracked. On v2,
+   *  no supported transport exists; never request an unknown loopback URL.
+   *  Missing transport or promotion failure degrades to the previous behavior
+   *  ("Task cancelled" + untracked replay). Must precede the abort. */
   private async promoteForegroundWaiter(sessionID: string): Promise<void> {
     const parentSessionID = this.sessionParent.get(sessionID);
     if (!parentSessionID) return;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       const client = getClient(this.input) as unknown as {
         _client?: {
@@ -893,44 +891,43 @@ export class ForegroundFallbackManager {
         };
       };
       const post = client._client?.post;
-      const request: Promise<unknown> =
-        typeof post === 'function'
-          ? post.call(client._client, {
-              url: '/experimental/session/{sessionID}/background',
-              path: { sessionID: parentSessionID },
-            })
-          : // v2 plugin inputs carry no _client: hit the server URL
-            // directly. Same host, same endpoint, same fail-soft envelope.
-            fetch(
-              new URL(
-                `/experimental/session/${encodeURIComponent(parentSessionID)}/background`,
-                this.input.serverUrl,
-              ),
-              { method: 'POST' },
-            );
-      let timeout: ReturnType<typeof setTimeout> | undefined;
-      try {
-        await Promise.race([
-          request,
-          new Promise((_, reject) => {
-            timeout = setTimeout(
-              () => reject(new Error('foreground waiter promotion timed out')),
-              PROMOTE_WAITER_TIMEOUT_MS,
-            );
-          }),
-        ]);
-      } finally {
-        clearTimeout(timeout);
+      if (typeof post !== 'function') {
+        log(
+          '[foreground-fallback] foreground waiter promotion unavailable on this host; continuing fallback',
+          { sessionID, parentSessionID, transport: 'none' },
+        );
+        return;
       }
+      const result = await Promise.race([
+        post.call(client._client, {
+          url: '/experimental/session/{sessionID}/background',
+          path: { sessionID: parentSessionID },
+        }),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error('foreground waiter promotion timed out')),
+            PROMOTE_WAITER_TIMEOUT_MS,
+          );
+        }),
+      ]);
+      const err = responseError(result);
+      if (err !== undefined) throw new Error(stringifyError(err));
       log(
         '[foreground-fallback] promoted foreground task waiter to background',
-        { sessionID, parentSessionID },
+        { sessionID, parentSessionID, transport: 'sdk' },
       );
-    } catch {
+    } catch (err) {
       log(
         '[foreground-fallback] foreground waiter promotion failed; continuing fallback',
-        { sessionID },
+        {
+          sessionID,
+          parentSessionID,
+          transport: 'sdk',
+          error: stringifyError(err),
+        },
       );
+    } finally {
+      clearTimeout(timeout);
     }
   }
 

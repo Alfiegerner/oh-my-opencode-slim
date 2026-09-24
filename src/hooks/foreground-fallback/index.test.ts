@@ -1,5 +1,14 @@
-import { beforeEach, describe, expect, jest, mock, test } from 'bun:test';
+import {
+  beforeEach,
+  describe,
+  expect,
+  jest,
+  mock,
+  spyOn,
+  test,
+} from 'bun:test';
 import { isInternalInitiatorPart } from '../../utils';
+import * as logger from '../../utils/logger';
 import { SessionLifecycle } from '../session-lifecycle';
 import { ForegroundFallbackManager, isFailoverError } from './index';
 
@@ -1929,9 +1938,14 @@ describe('ForegroundFallbackManager session.status', () => {
     expect(calls).toEqual(['abort', 'promptAsync']);
   });
 
-  test('waiter promotion failure is fail-soft: abort and fallback still proceed', async () => {
-    const calls: string[] = [];
+  async function runWaiterFallback(
+    sessionID: string,
+    parentSessionID: string,
+    calls: string[],
+    overrides?: Parameters<typeof createMockClient>[0],
+  ): Promise<void> {
     createMockClient({
+      ...overrides,
       abortImpl: async () => {
         calls.push('abort');
       },
@@ -1939,48 +1953,60 @@ describe('ForegroundFallbackManager session.status', () => {
         calls.push('promptAsync');
         return {};
       },
-      postImpl: async () => {
-        throw new Error('no experimental endpoint on this host');
-      },
     });
-    const mgr = new ForegroundFallbackManager(
-      makeChains(),
-      true,
-      { directory: '/test' } as any,
-      3,
-    );
-
+    const input = { directory: '/test' } as any;
+    const mgr = new ForegroundFallbackManager(makeChains(), true, input, 3);
+    mgr.registerSessionAgent(sessionID, 'orchestrator');
     await mgr.handleEvent({
       type: 'session.created',
-      properties: {
-        info: {
-          id: 'sess-promote-fails',
-          parentID: 'sess-promote-fails-parent',
-        },
-      },
+      properties: { info: { id: sessionID, parentID: parentSessionID } },
     });
-
-    await mgr.handleEvent({
-      type: 'message.updated',
-      properties: {
-        info: {
-          sessionID: 'sess-promote-fails',
-          providerID: 'anthropic',
-          modelID: 'claude-opus-4-5',
-        },
-      },
-    });
-
     await mgr.handleEvent({
       type: 'session.status',
       properties: {
-        sessionID: 'sess-promote-fails',
-        status: { type: 'retry', attempt: 1, message: 'rate limit' },
+        sessionID,
+        status: { type: 'retry', message: 'rate limit' },
       },
     });
+  }
 
-    expect(calls).toEqual(['abort', 'promptAsync']);
-  });
+  test.each([
+    ['transport exception', false, 'endpoint missing'],
+    ['SDK error envelope', true, '{"message":"endpoint missing"}'],
+  ] as const)(
+    'waiter promotion failure (%s) is fail-soft: abort and fallback still proceed',
+    async (_kind, envelope, error) => {
+      const calls: string[] = [];
+      const logSpy = spyOn(logger, 'log').mockImplementation(() => {});
+      try {
+        await runWaiterFallback('child', 'parent', calls, {
+          postImpl: async () => {
+            calls.push('promote');
+            if (envelope) {
+              return { error: { message: 'endpoint missing' } };
+            }
+            throw new Error(error);
+          },
+        });
+        expect(calls).toEqual(['promote', 'abort', 'promptAsync']);
+        expect(logSpy).not.toHaveBeenCalledWith(
+          '[foreground-fallback] promoted foreground task waiter to background',
+          expect.anything(),
+        );
+        expect(logSpy).toHaveBeenCalledWith(
+          '[foreground-fallback] foreground waiter promotion failed; continuing fallback',
+          {
+            sessionID: 'child',
+            parentSessionID: 'parent',
+            transport: 'sdk',
+            error,
+          },
+        );
+      } finally {
+        logSpy.mockRestore();
+      }
+    },
+  );
 
   test('promotes the waiter before the busy-session abort in execFallback too', async () => {
     const calls: string[] = [];
@@ -2037,66 +2063,30 @@ describe('ForegroundFallbackManager session.status', () => {
     expect(mocks.promptAsync).toHaveBeenCalledTimes(2);
   });
 
-  test('promotes via serverUrl fetch when the client exposes no _client (v2)', async () => {
+  test('v2 without post reports promotion unavailable without network calls', async () => {
     const calls: string[] = [];
-    const fetchTargets: string[] = [];
-    createMockClient({
-      includePostClient: false,
-      abortImpl: async () => {
-        calls.push('abort');
-      },
-      promptAsyncImpl: async () => {
-        calls.push('promptAsync');
-        return {};
-      },
+    const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      throw new Error('unexpected fetch');
     });
-    const mgr = new ForegroundFallbackManager(
-      makeChains(),
-      true,
-      {
-        directory: '/test',
-        serverUrl: new URL('http://127.0.0.1:4096'),
-      } as any,
-      3,
-    );
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async (input: unknown) => {
-      fetchTargets.push(String(input));
-      calls.push('promote');
-      return new Response(null, { status: 200 });
-    }) as typeof fetch;
+    const logSpy = spyOn(logger, 'log').mockImplementation(() => {});
     try {
-      await mgr.handleEvent({
-        type: 'session.created',
-        properties: {
-          info: { id: 'sess-v2-child', parentID: 'sess-v2-parent' },
-        },
+      await runWaiterFallback('sess-v2-child', 'sess-v2-parent', calls, {
+        includePostClient: false,
       });
-      await mgr.handleEvent({
-        type: 'message.updated',
-        properties: {
-          info: {
-            sessionID: 'sess-v2-child',
-            providerID: 'anthropic',
-            modelID: 'claude-opus-4-5',
-          },
-        },
-      });
-      await mgr.handleEvent({
-        type: 'session.status',
-        properties: {
+      expect(fetchSpy).toHaveBeenCalledTimes(0);
+      expect(calls).toEqual(['abort', 'promptAsync']);
+      expect(logSpy).toHaveBeenCalledWith(
+        '[foreground-fallback] foreground waiter promotion unavailable on this host; continuing fallback',
+        {
           sessionID: 'sess-v2-child',
-          status: { type: 'retry', attempt: 1, message: 'rate limit' },
+          parentSessionID: 'sess-v2-parent',
+          transport: 'none',
         },
-      });
+      );
     } finally {
-      globalThis.fetch = originalFetch;
+      fetchSpy.mockRestore();
+      logSpy.mockRestore();
     }
-
-    expect(calls).toEqual(['promote', 'abort', 'promptAsync']);
-    expect(fetchTargets[0]).toBe(
-      'http://127.0.0.1:4096/experimental/session/sess-v2-parent/background',
-    );
   });
 
   test('does not abort through a stale client when disposed during promotion', async () => {
