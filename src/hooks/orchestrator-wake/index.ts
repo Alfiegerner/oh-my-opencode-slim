@@ -948,14 +948,19 @@ export function createOrchestratorWakeScheduler(
   }
 
   function canSchedule(sessionID: string): boolean {
-    if (!enabled) return false;
-    if (!capabilities.ready) return false;
-    if (!canObserveSelection(sessionID)) return false;
-    if (localSessions.get(sessionID)?.archived) return false;
-    if (options.hasInputWait(sessionID)) return false;
-    if (options.isFallbackInProgress?.(sessionID)) return false;
-    if (getWakeProgress(sessionID).stopped) return false;
-    return true;
+    return canScheduleVeto(sessionID) === undefined;
+  }
+
+  /** canSchedule with a veto reason for diagnostics logs (logging-only). */
+  function canScheduleVeto(sessionID: string): string | undefined {
+    if (!enabled) return 'disabled';
+    if (!capabilities.ready) return 'not-ready';
+    if (!canObserveSelection(sessionID)) return 'unmanaged';
+    if (localSessions.get(sessionID)?.archived) return 'archived';
+    if (options.hasInputWait(sessionID)) return 'input-wait';
+    if (options.isFallbackInProgress?.(sessionID)) return 'fallback';
+    if (getWakeProgress(sessionID).stopped) return 'stopped';
+    return undefined;
   }
 
   function schedule(sessionID: string): void {
@@ -1823,7 +1828,14 @@ export function createOrchestratorWakeScheduler(
       return;
     }
     rearmWakeProgress(sessionID);
-    if (!canSchedule(sessionID)) return;
+    const veto = canScheduleVeto(sessionID);
+    if (veto) {
+      log('[orchestrator-wake] child-input wake deferred', {
+        sessionID,
+        veto,
+      });
+      return;
+    }
     const state = touchLocal(sessionID);
     clearTimer(state);
     bumpGeneration(state);
@@ -1909,9 +1921,15 @@ export function createOrchestratorWakeScheduler(
     }
 
     if (isInputWaitAskEvent(type)) {
-      if (canObserveSelection(sessionID)) {
+      const observed = canObserveSelection(sessionID);
+      if (observed) {
         suppress(sessionID);
       }
+      log('[orchestrator-wake] ask observed', {
+        sessionID,
+        type,
+        suppressed: observed,
+      });
       return;
     }
 

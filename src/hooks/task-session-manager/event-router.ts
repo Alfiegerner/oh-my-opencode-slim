@@ -23,6 +23,7 @@ import {
   clearChildInputWait,
   clearChildInputWaitsForSession,
   getChildInputWait,
+  listChildInputWaits,
   noteChildInputWait,
 } from './child-input-wait';
 import type {
@@ -922,6 +923,7 @@ function routeChildInputWait(
         parentSessionID: record.parentSessionID,
         kind: record.kind,
         requestID: record.requestID,
+        waitsSize: listChildInputWaits().length,
       });
     }
     return;
