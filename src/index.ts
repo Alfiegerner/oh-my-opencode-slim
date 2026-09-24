@@ -2015,8 +2015,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       const typedOutput = output as { messages: MessageWithParts[] };
       // Claim the mark synchronously: overlapping requests for this session
       // must not both strip reminders after their first asynchronous step.
-      const sessionID = findLatestUserMessage(typedOutput.messages)?.info
-        .sessionID;
+      const sessionID =
+        findLatestUserMessage(typedOutput.messages)?.info.sessionID ??
+        typedOutput.messages.find(isMessageWithParts)?.info.sessionID;
       const compacting = sessionID
         ? compactingSessionIds.delete(sessionID)
         : false;

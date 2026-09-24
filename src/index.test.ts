@@ -385,6 +385,24 @@ describe('plugin reload generation cleanup', () => {
         },
         parts: [{ type: 'text', text: 'Continue the task.' }],
       },
+      {
+        info: {
+          id: `assistant-${sessionID}`,
+          role: 'assistant',
+          agent: 'orchestrator',
+          sessionID,
+        },
+        parts: [{ type: 'text', text: 'Working on it.' }],
+      },
+      {
+        info: {
+          id: `user-followup-${sessionID}`,
+          role: 'user',
+          agent: 'orchestrator',
+          sessionID,
+        },
+        parts: [{ type: 'text', text: 'Take the next step.' }],
+      },
     ],
   });
 
@@ -522,7 +540,7 @@ describe('plugin reload generation cleanup', () => {
         synthetic: true,
       });
       const control = await transform(hooks, fixture);
-      expect(reminderParts(control.messages)).toHaveLength(1);
+      expect(reminderParts(control.messages)).toHaveLength(2);
       expect(boardParts(control.messages)).toHaveLength(1);
 
       await hooks['experimental.session.compacting']?.(
@@ -558,7 +576,7 @@ describe('plugin reload generation cleanup', () => {
 
       const nextTurn = await transform(hooks, fixture);
       expect(JSON.stringify(nextTurn)).toBe(JSON.stringify(control));
-      expect(reminderParts(nextTurn.messages)).toHaveLength(1);
+      expect(reminderParts(nextTurn.messages)).toHaveLength(2);
     } finally {
       await hooks.dispose?.();
     }
@@ -577,9 +595,33 @@ describe('plugin reload generation cleanup', () => {
       );
 
       const other = await transform(hooks, reminderFixture(otherID));
-      expect(reminderParts(other.messages)).toHaveLength(1);
+      expect(reminderParts(other.messages)).toHaveLength(2);
       const marked = await transform(hooks, reminderFixture(markedID));
       expect(reminderParts(marked.messages)).toHaveLength(0);
+    } finally {
+      await hooks.dispose?.();
+    }
+  });
+
+  test('v1 compaction without user messages consumes the session mark', async () => {
+    const hooks = await createHooks();
+    const sessionID = 'assistant-only-compaction';
+    try {
+      await registerOrchestrator(hooks, sessionID);
+      await hooks['experimental.session.compacting']?.(
+        { sessionID },
+        { context: [] },
+      );
+      await transform(hooks, {
+        messages: [
+          {
+            info: { id: 'assistant-only', role: 'assistant', sessionID },
+            parts: [{ type: 'text', text: 'Compaction context.' }],
+          },
+        ],
+      });
+      const resumed = await transform(hooks, reminderFixture(sessionID));
+      expect(reminderParts(resumed.messages)).toHaveLength(2);
     } finally {
       await hooks.dispose?.();
     }

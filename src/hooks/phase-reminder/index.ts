@@ -1,9 +1,8 @@
 /**
- * Phase reminder to append after each latest user message.
- *
- * Keeping this at the tail preserves immediate workflow guidance without
- * mutating the cached system prompt or prepending request-local content ahead
- * of the user's actual turn.
+ * Appends the reminder to every eligible orchestrator user message in the session.
+ * Historical copies are re-appended deterministically because reminders are not
+ * persisted; dropping them would rewrite already-cached prefix bytes every turn
+ * (PR #790). Do not make this tail-only.
  */
 import { PHASE_REMINDER } from '../../config/constants';
 import { isInternalInitiatorPart } from '../../utils';
@@ -56,9 +55,8 @@ export function createPhaseReminderHook(options: PhaseReminderOptions = {}) {
         return;
       }
 
-      // The phase reminder already covers file-tool turns (PR #790), so no
-      // separate post-file-tool injection is needed. Append it as a new part
-      // instead of mutating user text; it stays out of the UI/history (#448).
+      // Append as a separate part instead of mutating user-authored text;
+      // the reminder stays out of the UI display and history (issue #448).
       for (const message of messages) {
         if (
           !isUserMessageWithParts(message) ||
