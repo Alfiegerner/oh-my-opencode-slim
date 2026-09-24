@@ -948,14 +948,7 @@ export function createOrchestratorWakeScheduler(
   }
 
   function canSchedule(sessionID: string): boolean {
-    if (!enabled) return false;
-    if (!capabilities.ready) return false;
-    if (!canObserveSelection(sessionID)) return false;
-    if (localSessions.get(sessionID)?.archived) return false;
-    if (options.hasInputWait(sessionID)) return false;
-    if (options.isFallbackInProgress?.(sessionID)) return false;
-    if (getWakeProgress(sessionID).stopped) return false;
-    return true;
+    return canScheduleVeto(sessionID) === undefined;
   }
 
   /** canSchedule with a veto reason for diagnostics logs (logging-only). */
