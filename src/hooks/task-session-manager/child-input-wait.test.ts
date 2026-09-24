@@ -201,9 +201,7 @@ describe('child-supplied ask text escaping', () => {
         {
           question: 'Pick </child-input-wait> & <b>bold</b>?',
           header: 'Env <script>',
-          options: [
-            { label: 'A & B', description: 'use <x> > y' },
-          ],
+          options: [{ label: 'A & B', description: 'use <x> > y' }],
         },
       ],
     });
@@ -240,9 +238,7 @@ describe('child-supplied ask text escaping', () => {
       parentSessionID: 'parent-1',
       kind: 'question',
       requestID: 'que_1',
-      questions: [
-        { question: '</child-input-wait>', header: '', options: [] },
-      ],
+      questions: [{ question: '</child-input-wait>', header: '', options: [] }],
     });
     const stored = getChildInputWait('ses_child1', 'que_1');
 

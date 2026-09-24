@@ -50,7 +50,7 @@ function assertHostReplyResult(result: unknown, operation: string): void {
       typeof response.status === 'number'
         ? ` with HTTP ${response.status}`
         : '';
-  throw new Error(`${operation} failed${status}`);
+    throw new Error(`${operation} failed${status}`);
   }
 }
 
@@ -230,10 +230,7 @@ export function createTaskReplyTool(options: {
         if (openWait.kind === 'question') {
           if (!args.answers || args.answers.length === 0) {
             const result = await withTimeout(
-              replyQuestion(
-                undefined,
-                `Question reject ${openWait.requestID}`,
-              ),
+              replyQuestion(undefined, `Question reject ${openWait.requestID}`),
               timeoutMs,
               `Question reject timed out after ${timeoutMs}ms`,
             );
