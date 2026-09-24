@@ -390,7 +390,7 @@ currently break this plugin:
 - **Transcript user messages carry no identity.** Context-hook
   transcript user messages on live v2 hosts carry `{id, time, text,
   type}` only — no `agent`, no `sessionID`. The v1 injection gates
-  (phase-reminder, background-job-board, post-file-tool-nudge) key on
+  (phase-reminder, background-job-board) key on
   user-message `info.agent`/`info.sessionID`, so every injection would
   skip. The v2 context bridge stamps the context event's `sessionID` and
   the session's known agent (from the event, falling back to the
@@ -420,7 +420,11 @@ currently break this plugin:
   mutates only system/messages, and cache hints ride
   `ContentPart.cache`. Adoption status: the **compaction hook is
   adopted** — the plugin strips its tagged synthetic parts from the
-  compaction input; **child-session permission rules are applied** —
+  compaction input (phase reminders and job boards). On v1, the
+  `experimental.session.compacting` hook instead marks the next message
+  transform for that session; it strips only phase reminders after the
+  transform, leaving the job board untouched. The v2 adapter does not forward
+  this v1 hook; **child-session permission rules are applied** —
   plugin-managed child sessions receive exact-match task-policy rules
   once at creation via `ctx.session.update({sessionID, permissions})`
   (`createPermissionRulesBridge` in `src/v2/setup.ts`; exact-match

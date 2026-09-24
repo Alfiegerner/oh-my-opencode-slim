@@ -18,7 +18,6 @@ import { isTaggedPart } from './cache-safe-injection';
 import { createFilterAvailableSkillsHook } from './filter-available-skills';
 import { processImageAttachments } from './image-hook';
 import { createPhaseReminderHook } from './phase-reminder';
-import { createPostFileToolNudgeHook } from './post-file-tool-nudge';
 import { SessionLifecycle } from './session-lifecycle';
 import {
   BACKGROUND_JOB_BOARD_METADATA_KEY,
@@ -41,7 +40,6 @@ export interface PipelineOptions {
 
 export interface Pipeline {
   run: (output: TransformOutput) => Promise<void>;
-  markFileToolPending: () => void;
   board: BackgroundJobBoard;
 }
 
@@ -87,11 +85,6 @@ export function createPipeline(options: PipelineOptions = {}): Pipeline {
     },
   );
 
-  const postFileToolNudge = createPostFileToolNudgeHook({
-    shouldInject: shouldInjectOrchestratorReminder,
-    coordinator: lifecycle,
-  });
-
   const phaseReminder = createPhaseReminderHook({
     shouldInject: shouldInjectOrchestratorReminder,
   });
@@ -122,10 +115,6 @@ export function createPipeline(options: PipelineOptions = {}): Pipeline {
       {} as never,
       output as never,
     );
-    await postFileToolNudge['experimental.chat.messages.transform'](
-      {} as never,
-      output as never,
-    );
     await phaseReminder['experimental.chat.messages.transform'](
       {} as never,
       output as never,
@@ -142,7 +131,6 @@ export function createPipeline(options: PipelineOptions = {}): Pipeline {
 
   return {
     run,
-    markFileToolPending: () => lifecycle.markPending(SESSION_ID),
     board,
   };
 }

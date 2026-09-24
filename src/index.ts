@@ -37,7 +37,6 @@ import {
   createLoopCommandHook,
   createOrchestratorWakeScheduler,
   createPhaseReminderHook,
-  createPostFileToolNudgeHook,
   createReflectCommandHook,
   createSearchPathGuardHook,
   createTaskSessionManagerHook,
@@ -47,12 +46,18 @@ import {
   SessionLifecycle,
   stoppedJobRecoveryReason,
 } from './hooks';
+import { stripTaggedContent } from './hooks/cache-safe-injection';
 import { processImageAttachments } from './hooks/image-hook';
 import { clearAllWakeSessions } from './hooks/orchestrator-wake/wake-gate';
+import { PHASE_REMINDER_METADATA_KEY } from './hooks/phase-reminder';
 import { createBackgroundFallbackHandoff } from './hooks/task-session-manager/fallback-observation-transfer';
 import { createRevivedRunTracker } from './hooks/task-session-manager/revived-run-tracker';
 import type { ToolLoopGuardHook } from './hooks/tool-loop-guard/hook';
-import { isMessageWithParts, type MessageWithParts } from './hooks/types';
+import {
+  findLatestUserMessage,
+  isMessageWithParts,
+  type MessageWithParts,
+} from './hooks/types';
 import { createInterviewManager } from './interview';
 import { createBuiltinMcps } from './mcp';
 import {
@@ -184,6 +189,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       });
     },
   });
+  const compactingSessionIds = new Set<string>();
   const ownedTuiActivitySessions = new Map<string, string>();
   // #1079: lifecycle continuations (orchestrator wake, terminal
   // notifications) resolve the session's CURRENT agent/model at send
@@ -338,13 +344,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
   >;
   let phaseReminder: ReturnType<typeof createPhaseReminderHook>;
   let filterAvailableSkills: ReturnType<typeof createFilterAvailableSkillsHook>;
-  let postFileToolNudge: ReturnType<typeof createPostFileToolNudgeHook>;
   let applyPatch: ReturnType<typeof createApplyPatchHook>;
   let searchPathGuard: ReturnType<typeof createSearchPathGuardHook>;
   let absolutePathRescue: ReturnType<typeof createAbsolutePathRescueHook>;
   let jsonErrorRecovery: ReturnType<typeof createJsonErrorRecoveryHook>;
   let toolLoopGuard: ToolLoopGuardHook;
-  let postFileToolNudgeAfter: (i: unknown, o: unknown) => Promise<void>;
   let jsonErrorRecoveryAfter: (i: unknown, o: unknown) => Promise<void>;
   let taskSessionManagerAfter: (i: unknown, o: unknown) => Promise<void>;
   let backgroundJobBoard: BackgroundJobBoard;
@@ -605,6 +609,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     });
 
     sessionLifecycle = new SessionLifecycle(log);
+    sessionLifecycle.onSessionDeleted((sessionID) => {
+      compactingSessionIds.delete(sessionID);
+    });
 
     // Initialize auto-update checker hook
     autoUpdateChecker = createAutoUpdateCheckerHook(ctx, {
@@ -893,8 +900,7 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       };
     };
 
-    // Both message transforms share this gate so a rejected nudge cannot be
-    // followed by a phase reminder in the same outgoing turn.
+    // Only orchestrator sessions receive phase reminders.
     const shouldInjectOrchestratorReminder = (sessionID: string) =>
       sessionMetadata.getAgent(sessionID) === 'orchestrator';
 
@@ -903,11 +909,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     });
 
     filterAvailableSkills = createFilterAvailableSkillsHook(ctx, runtime);
-
-    postFileToolNudge = createPostFileToolNudgeHook({
-      shouldInject: shouldInjectOrchestratorReminder,
-      coordinator: sessionLifecycle,
-    });
 
     applyPatch = createApplyPatchHook(ctx);
 
@@ -919,9 +920,6 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
     toolLoopGuard = createToolLoopGuardHook();
 
     // Pre-created wrapped handlers for tool.execute.after (error-isolated)
-    postFileToolNudgeAfter = wrapPostToolHook('post-file-tool-nudge', (i, o) =>
-      postFileToolNudge['tool.execute.after'](i as never, o as never),
-    );
     jsonErrorRecoveryAfter = wrapPostToolHook('json-error-recovery', (i, o) =>
       jsonErrorRecovery['tool.execute.after'](i as never, o as never),
     );
@@ -1804,6 +1802,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
 
     'chat.headers': chatHeadersHook['chat.headers'],
 
+    // v1 compaction requests use the same message transform as normal turns.
+    // v2 handles compaction in its separate session.compaction bridge.
+    'experimental.session.compacting': async ({ sessionID }) => {
+      compactingSessionIds.add(sessionID);
+    },
+
     // Track which agent each session uses (needed for serve-mode prompt
     // injection)
     'chat.message': async (
@@ -1834,6 +1838,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         parts?: unknown[];
       },
     ) => {
+      // A fresh user message proves no compaction transform is coming for a
+      // pending mark (the host runs compacting → transform back to back):
+      // drop it so a stale mark can never strip reminders from an ordinary
+      // turn. Fails safe — worst case the summary keeps the boilerplate,
+      // which is the pre-change behavior.
+      compactingSessionIds.delete(input.sessionID);
       const rawAgent = input.agent ?? output?.message?.agent;
       const agent = rawAgent
         ? resolveRuntimeAgentName(runtime, rawAgent)
@@ -2009,6 +2019,14 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       output: { messages: unknown[] },
     ): Promise<void> => {
       const typedOutput = output as { messages: MessageWithParts[] };
+      // Claim the mark synchronously: overlapping requests for this session
+      // must not both strip reminders after their first asynchronous step.
+      const sessionID =
+        findLatestUserMessage(typedOutput.messages)?.info.sessionID ??
+        typedOutput.messages.find(isMessageWithParts)?.info.sessionID;
+      const compacting = sessionID
+        ? compactingSessionIds.delete(sessionID)
+        : false;
 
       for (const message of typedOutput.messages) {
         if (!isMessageWithParts(message)) {
@@ -2061,12 +2079,8 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         }
       }
 
-      // Repair session mappings before reminder gates; nudge metadata precedes phase dedup.
+      // Repair session mappings before the phase-reminder gate.
       await taskSessionManagerHook['experimental.chat.messages.transform'](
-        input as never,
-        typedOutput as never,
-      );
-      await postFileToolNudge['experimental.chat.messages.transform'](
         input as never,
         typedOutput as never,
       );
@@ -2079,10 +2093,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         typedOutput as never,
       );
       await taskSessionManagerHook.injectBackgroundJobBoard(input, typedOutput);
+      if (compacting) {
+        stripTaggedContent(typedOutput.messages, PHASE_REMINDER_METADATA_KEY);
+      }
     },
 
     'tool.execute.after': async (input, output) => {
-      await postFileToolNudgeAfter(input, output);
       await jsonErrorRecoveryAfter(input, output);
       await toolLoopGuard['tool.execute.after'](
         input as never,
