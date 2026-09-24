@@ -1714,52 +1714,78 @@ describe('ForegroundFallbackManager session.error', () => {
     expect(showToast).not.toHaveBeenCalled();
   });
 
-  test('typed no-switchModel rejection is not treated as a busy session', async () => {
-    // Hosts without session.switchModel reject the required-switch replay
-    // with V2SwitchModelUnavailableError; aborting + retrying cannot fix a
-    // missing host capability, so the error must surface after ONE call.
-    const switchErr = new Error(
-      '[v2] host provides no session.switchModel; cannot switch model for fallback prompt',
-    );
-    switchErr.name = 'V2SwitchModelUnavailableError';
-    const { mocks } = createMockClient({
-      promptAsyncImpl: async () => {
-        throw switchErr;
-      },
-    });
-    const onModelChanged = mock();
-    const mgr = new ForegroundFallbackManager(
-      makeChains(),
-      true,
-      { directory: '/test', hostFlavor: 'v2' } as any,
-      3,
-      undefined,
-      onModelChanged,
-    );
-
-    await mgr.handleEvent({
-      type: 'message.updated',
-      properties: {
-        info: {
-          sessionID: 'sess-noswitch',
-          providerID: 'anthropic',
-          modelID: 'claude-opus-4-5',
-          role: 'assistant',
+  test.each([
+    {
+      kind: 'missing switchModel',
+      error: Object.assign(
+        new Error(
+          '[v2] host provides no session.switchModel; cannot switch model for fallback prompt',
+        ),
+        { name: 'V2SwitchModelUnavailableError' },
+      ),
+      detail: /host provides no session\.switchModel/,
+    },
+    {
+      kind: 'synthetic id conflict',
+      error: Object.assign(new Error(''), {
+        name: 'Session.SyntheticConflictError',
+        _tag: 'Session.SyntheticConflictError',
+        inputID: 'msg_omos_existing',
+      }),
+      detail:
+        /"_tag":"Session\.SyntheticConflictError","inputID":"msg_omos_existing"/,
+    },
+  ])(
+    'v2 $kind rejection is final and reports its cause',
+    async ({ error, detail }) => {
+      const { mocks } = createMockClient({
+        promptAsyncImpl: async () => {
+          throw error;
         },
-      },
-    });
-    await mgr.handleEvent({
-      type: 'session.error',
-      properties: {
-        sessionID: 'sess-noswitch',
-        error: { message: 'Rate limit exceeded' },
-      },
-    });
+      });
+      const onModelChanged = mock();
+      const logSpy = spyOn(logger, 'log').mockImplementation(() => {});
+      try {
+        const mgr = new ForegroundFallbackManager(
+          makeChains(),
+          true,
+          { directory: '/test', hostFlavor: 'v2' } as any,
+          3,
+          undefined,
+          onModelChanged,
+        );
 
-    expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
-    expect(mocks.abort).not.toHaveBeenCalled();
-    expect(onModelChanged).not.toHaveBeenCalled();
-  });
+        await mgr.handleEvent({
+          type: 'message.updated',
+          properties: {
+            info: {
+              sessionID: 'sess-noswitch',
+              providerID: 'anthropic',
+              modelID: 'claude-opus-4-5',
+              role: 'assistant',
+            },
+          },
+        });
+        await mgr.handleEvent({
+          type: 'session.error',
+          properties: {
+            sessionID: 'sess-noswitch',
+            error: { message: 'Rate limit exceeded' },
+          },
+        });
+
+        expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
+        expect(mocks.abort).not.toHaveBeenCalled();
+        expect(onModelChanged).not.toHaveBeenCalled();
+        expect(logSpy).toHaveBeenCalledWith(
+          '[foreground-fallback] fallback attempt failed',
+          expect.objectContaining({ error: expect.stringMatching(detail) }),
+        );
+      } finally {
+        logSpy.mockRestore();
+      }
+    },
+  );
 
   test('shows a toast when fallback switches models on a transient error', async () => {
     const { mocks } = createMockClient();

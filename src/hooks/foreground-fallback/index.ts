@@ -319,16 +319,6 @@ const FALLBACK_IN_PROGRESS_KEY = Symbol.for(
   'oh-my-opencode-slim.foreground-fallback.in-progress',
 );
 
-/** Error name stamped by the v2 client shim's promptAsync when the host
- * provides no session.switchModel while the replay declared
- * `modelSwitch: 'required'`. Duck-typed by name (mirroring the hostFlavor
- * convention) so this v1 hook stays decoupled from the v2 adapter module. */
-const V2_SWITCH_MODEL_UNAVAILABLE_ERROR = 'V2SwitchModelUnavailableError';
-
-function isSwitchModelUnavailableError(err: unknown): err is Error {
-  return err instanceof Error && err.name === V2_SWITCH_MODEL_UNAVAILABLE_ERROR;
-}
-
 function getProcessFallbacksInProgress(): Set<string> {
   const globalWithStore = globalThis as typeof globalThis & {
     [FALLBACK_IN_PROGRESS_KEY]?: Set<string>;
@@ -1381,15 +1371,17 @@ export class ForegroundFallbackManager {
       try {
         promptResult = await promptAsync(promptBody);
       } catch (promptErr) {
-        if (isSwitchModelUnavailableError(promptErr)) {
-          // Explicit typed refusal: the host cannot switch models at
-          // all, so aborting and retrying cannot help (same missing
-          // capability on every attempt). Nothing was admitted.
+        if (isV2Host) {
+          // v2 steer delivery does not reject with BusyError: any rejected
+          // replay is final, not a signal to retry. An abort cannot make
+          // the admission succeed and may kill a promoted background job.
+          // Preserve the cause rather than misreporting it as busy.
           withdrawHandoff();
           throw promptErr;
         }
         log('[foreground-fallback] promptAsync on busy session, aborting', {
           sessionID,
+          error: stringifyError(promptErr),
         });
         await this.promoteForegroundWaiter(sessionID);
         // Same stale-generation fence as the failover abort above.
@@ -1476,7 +1468,7 @@ export class ForegroundFallbackManager {
     } catch (err) {
       log('[foreground-fallback] fallback attempt failed', {
         sessionID,
-        error: err instanceof Error ? err.message : String(err),
+        error: stringifyError(err),
       });
     }
   }
