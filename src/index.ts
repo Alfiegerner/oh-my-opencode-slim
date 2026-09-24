@@ -1838,6 +1838,12 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
         parts?: unknown[];
       },
     ) => {
+      // A fresh user message proves no compaction transform is coming for a
+      // pending mark (the host runs compacting → transform back to back):
+      // drop it so a stale mark can never strip reminders from an ordinary
+      // turn. Fails safe — worst case the summary keeps the boilerplate,
+      // which is the pre-change behavior.
+      compactingSessionIds.delete(input.sessionID);
       const rawAgent = input.agent ?? output?.message?.agent;
       const agent = rawAgent
         ? resolveRuntimeAgentName(runtime, rawAgent)
