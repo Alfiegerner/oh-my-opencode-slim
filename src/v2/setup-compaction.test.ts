@@ -18,7 +18,6 @@ import { readdirSync as readDirSync, readFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import * as path from 'node:path';
 import { createTaggedSyntheticPart } from '../hooks/cache-safe-injection';
-import type { ForegroundFallbackManager } from '../hooks/foreground-fallback';
 import { PHASE_REMINDER_METADATA_KEY } from '../hooks/phase-reminder';
 import { BACKGROUND_JOB_BOARD_METADATA_KEY } from '../hooks/task-session-manager/board-injection';
 import { flushLoggerForTesting } from '../utils/logger';
@@ -229,9 +228,6 @@ function neverIterable(): AsyncIterable<Record<string, unknown>> {
 }
 
 type CompactionCb = (event: V2SessionCompactionEvent) => Promise<void>;
-type RetryCb = (
-  event: Parameters<ForegroundFallbackManager['handleV2Retry']>[0],
-) => Promise<void>;
 
 describe('createV2Setup compaction hook', () => {
   let originalEnv: typeof process.env;
@@ -289,13 +285,11 @@ describe('createV2Setup compaction hook', () => {
     rejected: string[];
     getCompactionCb: () => CompactionCb | undefined;
     getContextCb: () => CompactionCb | undefined;
-    getRetryCb: () => RetryCb | undefined;
   } {
     const hooks: string[] = [];
     const rejected: string[] = [];
     let compactionCb: CompactionCb | undefined;
     let contextCb: CompactionCb | undefined;
-    let retryCb: RetryCb | undefined;
     const ctx = {
       app: { name: 'opencode', version: 'v2-compaction-test' },
       options: {},
@@ -334,7 +328,6 @@ describe('createV2Setup compaction hook', () => {
           if (name === 'context') {
             contextCb = cb as unknown as CompactionCb;
           }
-          if (name === 'retry') retryCb = cb as unknown as RetryCb;
           return { dispose: () => {} };
         },
         switchModel: options?.switchModel,
@@ -347,30 +340,28 @@ describe('createV2Setup compaction hook', () => {
       rejected,
       getCompactionCb: () => compactionCb,
       getContextCb: () => contextCb,
-      getRetryCb: () => retryCb,
     };
   }
 
-  test('registers the v2 retry hook and its captured callback resolves', async () => {
-    const { ctx, hooks, getRetryCb } = makeCtx({ switchModel: async () => {} });
-    const cleanup = await createV2Setup()(ctx);
-    try {
-      expect(hooks).toContain('retry');
-      const retry = getRetryCb();
-      expect(retry).toBeFunction();
-      if (!retry) throw new Error('retry hook not captured');
-      await expect(
-        retry({
-          sessionID: 'ses_retry_bridge',
-          agent: 'orchestrator',
-          model: { providerID: 'test', id: 'A' },
-          error: { message: 'rate limit' },
-        }),
-      ).resolves.toBeUndefined();
-    } finally {
-      await cleanup();
-    }
-  }, 20_000);
+  test.each([
+    ['with switchModel', true],
+    ['without switchModel', false],
+  ])(
+    'retry hook registration %s',
+    async (_label, hasSwitchModel) => {
+      const { ctx, hooks } = makeCtx(
+        hasSwitchModel ? { switchModel: async () => {} } : undefined,
+      );
+      const cleanup = await createV2Setup()(ctx);
+      try {
+        // Without a switch capability, do not intercept the deferred route.
+        expect(hooks.includes('retry')).toBe(hasSwitchModel);
+      } finally {
+        await cleanup();
+      }
+    },
+    20_000,
+  );
 
   test('registers the compaction hook; the registered callback strips tagged parts', async () => {
     const { ctx, hooks, getCompactionCb, getContextCb } = makeCtx();

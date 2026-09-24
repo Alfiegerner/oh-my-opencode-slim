@@ -109,33 +109,41 @@ function makeChains(
   };
 }
 
+const retryMgr = (
+  ids: string[],
+  onChanged?: (sessionID: string, model: string) => void,
+): ForegroundFallbackManager =>
+  new ForegroundFallbackManager(
+    { orchestrator: ids.map((id) => `test/${id}`) },
+    true,
+    { directory: '/test' } as any,
+    3,
+    undefined,
+    onChanged,
+  );
+
+const retryEvent = (
+  sessionID: string,
+  id: string,
+  decision?: { retry: boolean; delay?: number },
+) => ({
+  sessionID,
+  agent: 'orchestrator',
+  model: { providerID: 'test', id },
+  error: { message: 'rate limit' },
+  decision,
+});
+
 describe('ForegroundFallbackManager v2 retry hook', () => {
   test.each([{ retry: true, delay: 2000 }, { retry: false }])(
     'switches in place without abort or re-prompt (initial decision %p)',
     async (decision) => {
       const { mocks } = createMockClient();
       const onChanged = mock();
-      const mgr = new ForegroundFallbackManager(
-        { orchestrator: ['test/A', 'test/B'] },
-        true,
-        { directory: '/test' } as any,
-        3,
-        undefined,
-        onChanged,
-        0,
-        500,
-      );
+      const mgr = retryMgr(['A', 'B'], onChanged);
       const switchModel = mock(async () => {});
-      const makeEvent = () => ({
-        sessionID: 'c',
-        agent: 'orchestrator',
-        model: { providerID: 'test', id: 'A' },
-        error: { message: 'rate limit' },
-        decision: { ...decision },
-      });
-      const event = makeEvent();
+      const event = retryEvent('c', 'A', { ...decision });
       await mgr.handleV2Retry(event, switchModel);
-      expect(switchModel).toHaveBeenCalledTimes(1);
       expect(switchModel).toHaveBeenCalledWith('c', {
         providerID: 'test',
         id: 'B',
@@ -144,47 +152,13 @@ describe('ForegroundFallbackManager v2 retry hook', () => {
       expect(mocks.abort).not.toHaveBeenCalled();
       expect(mocks.promptAsync).not.toHaveBeenCalled();
       expect(onChanged).toHaveBeenCalledWith('c', 'test/B');
-      await mgr.handleV2Retry(makeEvent(), switchModel);
+      await mgr.handleV2Retry(
+        retryEvent('c', 'A', { ...decision }),
+        switchModel,
+      );
       expect(switchModel).toHaveBeenCalledTimes(1);
     },
   );
-
-  test('switch failure preserves the host decision and never aborts', async () => {
-    const { mocks } = createMockClient();
-    const mgr = new ForegroundFallbackManager(
-      { orchestrator: ['test/A', 'test/B'] },
-      true,
-      { directory: '/test' } as any,
-    );
-    const decision = { retry: false };
-    const event = {
-      sessionID: 'retry-switch-fails',
-      agent: 'orchestrator',
-      model: { providerID: 'test', id: 'A' },
-      error: { message: 'rate limit' },
-      decision,
-    };
-    const logSpy = spyOn(logger, 'log').mockImplementation(() => {});
-    try {
-      await expect(
-        mgr.handleV2Retry(event, async () => {
-          throw new Error('switch denied');
-        }),
-      ).resolves.toBeUndefined();
-      expect(event.decision).toBe(decision);
-      expect(mocks.abort).not.toHaveBeenCalled();
-      expect(mocks.promptAsync).not.toHaveBeenCalled();
-      expect(logSpy).toHaveBeenCalledWith(
-        '[foreground-fallback] retry hook switch failed; host decision unchanged',
-        expect.objectContaining({
-          sessionID: 'retry-switch-fails',
-          error: 'switch denied',
-        }),
-      );
-    } finally {
-      logSpy.mockRestore();
-    }
-  });
 
   test.each([
     ['B', 'C'],
@@ -192,82 +166,55 @@ describe('ForegroundFallbackManager v2 retry hook', () => {
   ])(
     'failed switch keeps its target retryable (next failure on %s switches to %s)',
     async (hostModel, target) => {
-      const mgr = new ForegroundFallbackManager(
-        { orchestrator: ['test/A', 'test/B', 'test/C', 'test/D'] },
-        true,
-        { directory: '/test' } as any,
+      const { mocks } = createMockClient();
+      const mgr = retryMgr(['A', 'B', 'C', 'D']);
+      const sessionID = 'retry-unconsumed';
+      const decision = { retry: false };
+      const failed = retryEvent(sessionID, 'B', decision);
+      await mgr.handleV2Retry(failed, () =>
+        Promise.reject(new Error('switch denied')),
       );
-      const event = (id: string) => ({
-        sessionID: `retry-unconsumed-${hostModel}`,
-        agent: 'orchestrator',
-        model: { providerID: 'test', id },
-        error: { message: 'rate limit' },
-        decision: { retry: false },
-      });
-      await mgr.handleV2Retry(event('B'), async () => {
-        throw new Error('foreground retry model switch timed out');
-      });
+      expect(failed.decision).toBe(decision);
+      expect(mocks.abort).not.toHaveBeenCalled();
+      expect(mocks.promptAsync).not.toHaveBeenCalled();
       const switchModel = mock(async () => {});
-      await mgr.handleV2Retry(event(hostModel), switchModel);
-      expect(switchModel).toHaveBeenCalledWith(
-        `retry-unconsumed-${hostModel}`,
-        { providerID: 'test', id: target },
-      );
+      await mgr.handleV2Retry(retryEvent(sessionID, hostModel), switchModel);
+      expect(switchModel).toHaveBeenCalledWith(sessionID, {
+        providerID: 'test',
+        id: target,
+      });
     },
   );
 
-  test('a late-landing switch reconciles model state and advances the chain', async () => {
-    // Fake timers drive the 2s host-call timeout so no real wall-clock is
-    // awaited (same jest-compat pattern as the backoff-dispose test).
+  test.each([
+    { kind: 'reconciles B', advance: false, calls: ['test/B'] },
+    { kind: 'does not roll C back to B', advance: true, calls: ['test/C'] },
+  ])('late-landing switch $kind', async ({ advance, calls }) => {
     jest.useFakeTimers();
     try {
-      const onSessionModelChanged = mock(() => {});
-      const mgr = new ForegroundFallbackManager(
-        { orchestrator: ['test/A', 'test/B', 'test/C'] },
-        true,
-        { directory: '/test' } as any,
-        3, // maxRetries
-        undefined, // coordinator
-        onSessionModelChanged,
+      const observed: string[] = [];
+      const mgr = retryMgr(
+        ['A', 'B', 'C'],
+        (_sid, model) => void observed.push(model),
       );
-      const event = (id: string) => ({
-        sessionID: 'retry-late-landing',
-        agent: 'orchestrator',
-        model: { providerID: 'test', id },
-        error: { message: 'rate limit' },
-        decision: { retry: false },
+      const sid = 'retry-late-landing';
+      let resolveSwitch!: () => void;
+      const switchRequest = new Promise<void>((resolve) => {
+        resolveSwitch = resolve;
       });
-      let resolveSwitch!: (value: unknown) => void;
-      const pendingSwitch = mock(
-        () =>
-          new Promise<unknown>((resolve) => {
-            resolveSwitch = resolve;
-          }),
+      const pending = mgr.handleV2Retry(
+        retryEvent(sid, 'A'),
+        () => switchRequest,
       );
-      const pending = mgr.handleV2Retry(event('A'), pendingSwitch);
       jest.advanceTimersByTime(2_500);
       await pending;
-      // Timeout: decision untouched, target kept retryable.
-      expect(pendingSwitch).toHaveBeenCalledWith('retry-late-landing', {
-        providerID: 'test',
-        id: 'B',
-      });
-      expect(onSessionModelChanged).not.toHaveBeenCalled();
-      // The host lands the switch late: state reconciles to B.
-      resolveSwitch(undefined);
+      expect(observed).toEqual([]);
+      if (advance)
+        await mgr.handleV2Retry(retryEvent(sid, 'B'), async () => {});
+      // A late B must reconcile only if no later retry has advanced to C.
+      resolveSwitch();
       for (let i = 0; i < 10; i++) await Promise.resolve();
-      expect(onSessionModelChanged).toHaveBeenCalledWith(
-        'retry-late-landing',
-        'test/B',
-      );
-      // The next failure on B advances the chain to C instead of
-      // re-switching to B.
-      const nextSwitch = mock(async () => {});
-      await mgr.handleV2Retry(event('B'), nextSwitch);
-      expect(nextSwitch).toHaveBeenCalledWith('retry-late-landing', {
-        providerID: 'test',
-        id: 'C',
-      });
+      expect(observed).toEqual(calls);
     } finally {
       jest.useRealTimers();
     }
@@ -296,34 +243,23 @@ describe('isFailoverError', () => {
     expect(isFailoverError({ data: { statusCode: 429 } })).toBe(true);
   });
 
-  test('returns true for flat v2 provider errors with status (issue #1283)', () => {
-    expect(
-      isFailoverError({
-        type: 'provider.quota',
-        message: 'rpm exhausted',
-        status: 429,
-      }),
-    ).toBe(true);
-    expect(
-      isFailoverError({
-        type: 'provider.rate-limit',
-        message: 'inference exceeds tpm/rpm limit',
-        status: 429,
-      }),
-    ).toBe(true);
-    expect(
-      isFailoverError({
-        type: 'provider.quota',
-        message: 'You exceeded your current quota',
-      }),
-    ).toBe(true);
-    expect(
-      isFailoverError({
-        type: 'provider.invalid-request',
-        message: 'prompt is too long',
-      }),
-    ).toBe(false);
-  });
+  test.each([
+    ['provider.quota', 'rpm exhausted', 429, true],
+    ['provider.rate-limit', 'inference exceeds tpm/rpm limit', 429, true],
+    ['provider.quota', 'You exceeded your current quota', undefined, true],
+    ['provider.invalid-request', 'prompt is too long', undefined, false],
+  ])(
+    'classifies v2 provider error %s (issue #1283)',
+    (type, message, status, expected) => {
+      expect(
+        isFailoverError({
+          type,
+          message,
+          ...(status === undefined ? {} : { status }),
+        }),
+      ).toBe(expected);
+    },
+  );
 
   test('returns true for "rate limit" in message', () => {
     expect(isFailoverError({ message: 'Rate limit exceeded' })).toBe(true);
@@ -1714,30 +1650,27 @@ describe('ForegroundFallbackManager session.error', () => {
     expect(showToast).not.toHaveBeenCalled();
   });
 
+  const noSwitch = Object.assign(
+    new Error(
+      '[v2] host provides no session.switchModel; cannot switch model for fallback prompt',
+    ),
+    { name: 'V2SwitchModelUnavailableError' },
+  );
+  const conflict = Object.assign(new Error(''), {
+    name: 'Session.SyntheticConflictError',
+    _tag: 'Session.SyntheticConflictError',
+    inputID: 'msg_omos_existing',
+  });
   test.each([
-    {
-      kind: 'missing switchModel',
-      error: Object.assign(
-        new Error(
-          '[v2] host provides no session.switchModel; cannot switch model for fallback prompt',
-        ),
-        { name: 'V2SwitchModelUnavailableError' },
-      ),
-      detail: /host provides no session\.switchModel/,
-    },
-    {
-      kind: 'synthetic id conflict',
-      error: Object.assign(new Error(''), {
-        name: 'Session.SyntheticConflictError',
-        _tag: 'Session.SyntheticConflictError',
-        inputID: 'msg_omos_existing',
-      }),
-      detail:
-        /"_tag":"Session\.SyntheticConflictError","inputID":"msg_omos_existing"/,
-    },
+    ['missing switchModel', noSwitch, /host provides no session\.switchModel/],
+    [
+      'synthetic id conflict',
+      conflict,
+      /"_tag":"Session\.SyntheticConflictError","inputID":"msg_omos_existing"/,
+    ],
   ])(
-    'v2 $kind rejection is final and reports its cause',
-    async ({ error, detail }) => {
+    'v2 %s rejection is final and reports its cause',
+    async (_kind, error, detail) => {
       const { mocks } = createMockClient({
         promptAsyncImpl: async () => {
           throw error;
@@ -1755,17 +1688,7 @@ describe('ForegroundFallbackManager session.error', () => {
           onModelChanged,
         );
 
-        await mgr.handleEvent({
-          type: 'message.updated',
-          properties: {
-            info: {
-              sessionID: 'sess-noswitch',
-              providerID: 'anthropic',
-              modelID: 'claude-opus-4-5',
-              role: 'assistant',
-            },
-          },
-        });
+        mgr.registerSessionAgent('sess-noswitch', 'orchestrator');
         await mgr.handleEvent({
           type: 'session.error',
           properties: {

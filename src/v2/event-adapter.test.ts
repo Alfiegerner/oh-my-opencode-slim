@@ -63,7 +63,6 @@ describe('mapV2EventToV1', () => {
     };
     const mapped = mapV2EventToV1(event);
     expect(mapped).toEqual([event]);
-    expect(mapped.some((e) => e.type === 'session.status')).toBe(false);
   });
 
   test('v2.0.7 location.shutdown (config reload) stays passthrough-only', () => {
