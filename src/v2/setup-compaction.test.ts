@@ -275,10 +275,7 @@ describe('createV2Setup compaction hook', () => {
 
   function makeCtx(options?: {
     rejectCompaction?: boolean;
-    switchModel?: (input: {
-      sessionID: string;
-      model: { providerID: string; id: string };
-    }) => Promise<unknown>;
+    switchModel?: boolean;
   }): {
     ctx: V2Context;
     hooks: string[];
@@ -330,7 +327,7 @@ describe('createV2Setup compaction hook', () => {
           }
           return { dispose: () => {} };
         },
-        switchModel: options?.switchModel,
+        switchModel: options?.switchModel ? async () => {} : undefined,
       },
       event: { subscribe: () => neverIterable() },
     } as unknown as V2Context;
@@ -343,19 +340,13 @@ describe('createV2Setup compaction hook', () => {
     };
   }
 
-  test.each([
-    ['with switchModel', true],
-    ['without switchModel', false],
-  ])(
-    'retry hook registration %s',
-    async (_label, hasSwitchModel) => {
-      const { ctx, hooks } = makeCtx(
-        hasSwitchModel ? { switchModel: async () => {} } : undefined,
-      );
+  test.each([true, false])(
+    'registers the retry hook only with switchModel (%p)',
+    async (switchModel) => {
+      const { ctx, hooks } = makeCtx({ switchModel });
       const cleanup = await createV2Setup()(ctx);
       try {
-        // Without a switch capability, do not intercept the deferred route.
-        expect(hooks.includes('retry')).toBe(hasSwitchModel);
+        expect(hooks.includes('retry')).toBe(switchModel);
       } finally {
         await cleanup();
       }

@@ -198,10 +198,8 @@ describe('ForegroundFallbackManager v2 retry hook', () => {
         (_sid, model) => void observed.push(model),
       );
       const sid = 'retry-late-landing';
-      let resolveSwitch!: () => void;
-      const switchRequest = new Promise<void>((resolve) => {
-        resolveSwitch = resolve;
-      });
+      const { promise: switchRequest, resolve: resolveSwitch } =
+        Promise.withResolvers<void>();
       const pending = mgr.handleV2Retry(
         retryEvent(sid, 'A'),
         () => switchRequest,
@@ -1154,6 +1152,7 @@ describe('ForegroundFallbackManager session.error', () => {
    * message.updated → session.error sequence that triggers a fallback
    * attempt on 'sess-1'. */
   async function runFallbackScenario(options?: {
+    v2?: boolean;
     promptAsyncImpl?: () => Promise<unknown>;
     abortImpl?: () => Promise<unknown>;
     messagesData?: unknown[];
@@ -1169,7 +1168,7 @@ describe('ForegroundFallbackManager session.error', () => {
     mgr = new ForegroundFallbackManager(
       makeChains(),
       true,
-      { directory: '/test' } as any,
+      { directory: '/test', hostFlavor: options?.v2 ? 'v2' : undefined } as any,
       3,
       undefined,
       options?.modelChanged,
@@ -1671,35 +1670,25 @@ describe('ForegroundFallbackManager session.error', () => {
   ])(
     'v2 %s rejection is final and reports its cause',
     async (_kind, error, detail) => {
-      const { mocks } = createMockClient({
-        promptAsyncImpl: async () => {
-          throw error;
-        },
-      });
+      const { calls, handoff } = handoffMock();
       const onModelChanged = mock();
       const logSpy = spyOn(logger, 'log').mockImplementation(() => {});
       try {
-        const mgr = new ForegroundFallbackManager(
-          makeChains(),
-          true,
-          { directory: '/test', hostFlavor: 'v2' } as any,
-          3,
-          undefined,
-          onModelChanged,
-        );
-
-        mgr.registerSessionAgent('sess-noswitch', 'orchestrator');
-        await mgr.handleEvent({
-          type: 'session.error',
-          properties: {
-            sessionID: 'sess-noswitch',
-            error: { message: 'Rate limit exceeded' },
+        const mocks = await runFallbackScenario({
+          v2: true,
+          handoff,
+          modelChanged: onModelChanged,
+          messagesData: taskPrompt,
+          promptAsyncImpl: async () => {
+            throw error;
           },
         });
 
         expect(mocks.promptAsync).toHaveBeenCalledTimes(1);
         expect(mocks.abort).not.toHaveBeenCalled();
         expect(onModelChanged).not.toHaveBeenCalled();
+        expect(calls.reject).toEqual([['sess-1', undefined]]);
+        expect(calls.settleUnresolved).toEqual([]);
         expect(logSpy).toHaveBeenCalledWith(
           '[foreground-fallback] fallback attempt failed',
           expect.objectContaining({ error: expect.stringMatching(detail) }),

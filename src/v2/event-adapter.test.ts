@@ -61,8 +61,7 @@ describe('mapV2EventToV1', () => {
       type: 'session.retry.scheduled',
       properties: { sessionID: 's' },
     };
-    const mapped = mapV2EventToV1(event);
-    expect(mapped).toEqual([event]);
+    expect(mapV2EventToV1(event)).toEqual([event]);
   });
 
   test('v2.0.7 location.shutdown (config reload) stays passthrough-only', () => {
