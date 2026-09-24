@@ -163,8 +163,11 @@ const PROVIDER_OUTAGE_PATTERNS = [
 function extractStatusCode(error: {
   statusCode?: unknown;
   data?: { statusCode?: unknown };
+  status?: unknown;
 }): number | undefined {
-  const value = error.statusCode ?? error.data?.statusCode;
+  // v2 hosts surface provider errors flat ({type, message, status});
+  // v1 uses statusCode / data.statusCode (issue #1283).
+  const value = error.statusCode ?? error.data?.statusCode ?? error.status;
   return typeof value === 'number' ? value : undefined;
 }
 

@@ -239,6 +239,23 @@ describe('isFailoverError', () => {
     expect(isFailoverError({ data: { statusCode: 429 } })).toBe(true);
   });
 
+  test('returns true for flat v2 provider errors with status (issue #1283)', () => {
+    expect(
+      isFailoverError({
+        type: 'provider.quota',
+        message: 'rpm exhausted',
+        status: 429,
+      }),
+    ).toBe(true);
+    expect(
+      isFailoverError({
+        type: 'provider.rate-limit',
+        message: 'inference exceeds tpm/rpm limit',
+        status: 429,
+      }),
+    ).toBe(true);
+  });
+
   test('returns true for "rate limit" in message', () => {
     expect(isFailoverError({ message: 'Rate limit exceeded' })).toBe(true);
   });
