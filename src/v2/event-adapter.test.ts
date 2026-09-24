@@ -55,6 +55,17 @@ describe('mapV2EventToV1', () => {
     expect(out[0]).toBe(ev);
   });
 
+  test('does not map session.retry.scheduled into a v1 retry status', () => {
+    // Mapping it to session.status retry would reactivate the broken abort path.
+    const event = {
+      type: 'session.retry.scheduled',
+      properties: { sessionID: 's' },
+    };
+    const mapped = mapV2EventToV1(event);
+    expect(mapped).toEqual([event]);
+    expect(mapped.some((e) => e.type === 'session.status')).toBe(false);
+  });
+
   test('v2.0.7 location.shutdown (config reload) stays passthrough-only', () => {
     // Ephemeral host event (payload under `data`, live framing) published
     // when `opencode reload` tears down and rebuilds every location.

@@ -744,6 +744,70 @@ export class ForegroundFallbackManager {
     }
   }
 
+  async handleV2Retry(
+    event: {
+      sessionID: string;
+      agent?: string;
+      model: { providerID: string; id: string };
+      error: unknown;
+      decision?: { retry: boolean; delay?: number };
+    },
+    switchModel: (
+      sessionID: string,
+      model: { providerID: string; id: string },
+    ) => Promise<unknown>,
+  ): Promise<void> {
+    try {
+      if (!this.enabled || this.disposed) return;
+      if (this.initialRetryDelayMs > 0) {
+        log('[foreground-fallback] retry hook skipped initial delay', {
+          sessionID: event.sessionID,
+        });
+        return;
+      }
+      const { sessionID } = event;
+      if (this.inProgress.has(sessionID) || !isFailoverError(event.error))
+        return;
+      const from = `${event.model.providerID}/${event.model.id}`;
+      if (
+        this.sessionTried.get(sessionID)?.has(from) &&
+        this.sessionModel.get(sessionID) !== from
+      )
+        return;
+      if (event.agent) this.registerSessionAgent(sessionID, event.agent);
+      this.sessionModel.set(sessionID, from);
+      const selected = this.selectFallbackModel(sessionID);
+      if (!selected || selected === 'exhausted') return;
+      await withTimeout(
+        switchModel(sessionID, {
+          providerID: selected.ref.providerID,
+          id: selected.ref.modelID,
+        }),
+        HOST_CALL_TIMEOUT_MS,
+        'foreground retry model switch timed out',
+      );
+      if (this.disposed) return;
+      event.decision = { retry: true, delay: this.retryDelayMs };
+      this.sessionModel.set(sessionID, selected.nextModel);
+      this.onSessionModelChanged?.(sessionID, selected.nextModel);
+      this.showFallbackToast(
+        selected.agentName,
+        selected.nextModel,
+        event.error,
+      );
+      log('[foreground-fallback] retry hook switched model in place', {
+        sessionID,
+        from,
+        to: selected.nextModel,
+      });
+    } catch (err) {
+      log(
+        '[foreground-fallback] retry hook switch failed; host decision unchanged',
+        { sessionID: event?.sessionID, error: stringifyError(err) },
+      );
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Retry budget
   // ---------------------------------------------------------------------------

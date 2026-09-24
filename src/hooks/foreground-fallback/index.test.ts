@@ -109,6 +109,84 @@ function makeChains(
   };
 }
 
+describe('ForegroundFallbackManager v2 retry hook', () => {
+  test.each([{ retry: true, delay: 2000 }, { retry: false }])(
+    'switches in place without abort or re-prompt (initial decision %p)',
+    async (decision) => {
+      const { mocks } = createMockClient();
+      const onChanged = mock();
+      const mgr = new ForegroundFallbackManager(
+        { orchestrator: ['test/A', 'test/B'] },
+        true,
+        { directory: '/test' } as any,
+        3,
+        undefined,
+        onChanged,
+        0,
+        500,
+      );
+      const switchModel = mock(async () => {});
+      const makeEvent = () => ({
+        sessionID: 'c',
+        agent: 'orchestrator',
+        model: { providerID: 'test', id: 'A' },
+        error: { message: 'rate limit' },
+        decision: { ...decision },
+      });
+      const event = makeEvent();
+      await mgr.handleV2Retry(event, switchModel);
+      expect(switchModel).toHaveBeenCalledTimes(1);
+      expect(switchModel).toHaveBeenCalledWith('c', {
+        providerID: 'test',
+        id: 'B',
+      });
+      expect(event.decision).toEqual({ retry: true, delay: 500 });
+      expect(mocks.abort).not.toHaveBeenCalled();
+      expect(mocks.promptAsync).not.toHaveBeenCalled();
+      expect(onChanged).toHaveBeenCalledWith('c', 'test/B');
+      await mgr.handleV2Retry(makeEvent(), switchModel);
+      expect(switchModel).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  test('switch failure preserves the host decision and never aborts', async () => {
+    const { mocks } = createMockClient();
+    const mgr = new ForegroundFallbackManager(
+      { orchestrator: ['test/A', 'test/B'] },
+      true,
+      { directory: '/test' } as any,
+    );
+    const decision = { retry: false };
+    const event = {
+      sessionID: 'retry-switch-fails',
+      agent: 'orchestrator',
+      model: { providerID: 'test', id: 'A' },
+      error: { message: 'rate limit' },
+      decision,
+    };
+    const logSpy = spyOn(logger, 'log').mockImplementation(() => {});
+    try {
+      await expect(
+        mgr.handleV2Retry(event, async () => {
+          throw new Error('switch denied');
+        }),
+      ).resolves.toBeUndefined();
+      expect(event.decision).toBe(decision);
+      expect(mocks.abort).not.toHaveBeenCalled();
+      expect(mocks.promptAsync).not.toHaveBeenCalled();
+      expect(logSpy).toHaveBeenCalledWith(
+        '[foreground-fallback] retry hook switch failed; host decision unchanged',
+        expect.objectContaining({
+          sessionID: 'retry-switch-fails',
+          error: 'switch denied',
+        }),
+      );
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+});
+
 // ---------------------------------------------------------------------------
 // isFailoverError
 // ---------------------------------------------------------------------------
