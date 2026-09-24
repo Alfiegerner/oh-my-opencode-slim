@@ -122,6 +122,30 @@ describe('isFailoverError', () => {
     expect(isFailoverError({ data: { statusCode: 429 } })).toBe(true);
   });
 
+  test('falls back on v2 provider errors with a top-level 429 status', () => {
+    expect(
+      isFailoverError({
+        type: 'provider.quota',
+        message: 'rpm exhausted',
+        status: 429,
+      }),
+    ).toBe(true);
+    expect(
+      isFailoverError({
+        type: 'provider.rate-limit',
+        message: 'inference exceeds tpm/rpm limit',
+        status: 429,
+      }),
+    ).toBe(true);
+    expect(
+      isFailoverError({
+        type: 'provider.error',
+        message: 'invalid request',
+        status: 400,
+      }),
+    ).toBe(false);
+  });
+
   test('returns true for "rate limit" in message', () => {
     expect(isFailoverError({ message: 'Rate limit exceeded' })).toBe(true);
   });

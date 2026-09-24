@@ -161,9 +161,10 @@ const PROVIDER_OUTAGE_PATTERNS = [
 
 function extractStatusCode(error: {
   statusCode?: unknown;
+  status?: unknown;
   data?: { statusCode?: unknown };
 }): number | undefined {
-  const value = error.statusCode ?? error.data?.statusCode;
+  const value = error.statusCode ?? error.data?.statusCode ?? error.status;
   return typeof value === 'number' ? value : undefined;
 }
 
