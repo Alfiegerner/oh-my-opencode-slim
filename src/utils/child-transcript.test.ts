@@ -34,6 +34,11 @@ test('stringifyError never throws on unserializable empty-message errors', () =>
   expect(stringifyError(error)).toBe('E');
 });
 
+test('stringifyError never returns undefined for unserializable values', () => {
+  expect(typeof stringifyError(undefined)).toBe('string');
+  expect(typeof stringifyError(Symbol('cause'))).toBe('string');
+});
+
 describe('extractChildTerminalEvidence', () => {
   test('trailing assistant with text is ready', () => {
     const evidence = extractChildTerminalEvidence({

@@ -95,7 +95,8 @@ export function stringifyError(error: unknown): string {
   try {
     if (error instanceof Error)
       return JSON.stringify({ name: error.name, ...(error as object) });
-    return JSON.stringify(error);
+    const serialized = JSON.stringify(error);
+    return serialized ?? String(error);
   } catch {
     return String(error);
   }

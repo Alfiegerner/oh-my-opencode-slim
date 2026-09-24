@@ -10,7 +10,7 @@
  * `prompt_tokens_details.cached_tokens`).
  *
  * The scenarios are designed to trigger this plugin's payload-touching
- * machinery on purpose — phase reminders, the post-file-tool nudge, todo
+ * machinery on purpose — phase reminders, direct file reads, todo
  * churn, background job board injection/reconciliation, repeated specialist
  * delegation with session reuse — so each injection path is validated
  * against a real provider, including the subagent child sessions it spawns.
@@ -140,8 +140,8 @@ const SCENARIOS: Scenario[] = [
   },
   {
     name: 'nudge',
-    description: 'direct file read arms the post-file-tool nudge',
-    triggers: 'post-file-tool-nudge injection, then phase-reminder equilibrium',
+    description: 'direct file read followed by phase reminders',
+    triggers: 'direct file read, phase reminder across subsequent turns',
     turns: (nonce) => [
       {
         text: `Cache smoke probe ${nonce}. Do not delegate: use your read tool yourself on package.json and reply with only its "name" value.`,

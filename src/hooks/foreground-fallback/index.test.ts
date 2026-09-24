@@ -246,6 +246,7 @@ describe('isFailoverError', () => {
     ['provider.rate-limit', 'inference exceeds tpm/rpm limit', 429, true],
     ['provider.quota', 'You exceeded your current quota', undefined, true],
     ['provider.invalid-request', 'prompt is too long', undefined, false],
+    ['provider.error', 'invalid request', 400, false],
   ])(
     'classifies v2 provider error %s (issue #1283)',
     (type, message, status, expected) => {

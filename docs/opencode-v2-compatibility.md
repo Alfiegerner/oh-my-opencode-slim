@@ -10,9 +10,11 @@ requires OpenCode v2.0.7+ on v2 hosts; older v2 hosts are unsupported.
 The adapter targets the v2 plugin API surface (see
 [The v2 plugin API surface](#the-v2-plugin-api-surface-this-adapter-uses)),
 and the compile-time mirror guard below is pinned to `@opencode/plugin`
-2.0.12 (revalidated: `bun run typecheck` passes against 2.0.12 with no
-official-surface drift from the audited 2.0.7 pin; live host verification
-remains the v2.0.7 baseline above).
+2.0.15 (revalidated: `bun run typecheck` passes against 2.0.15 with no
+official session-hook surface drift from the 2.0.12 pin. Transitive
+`@opencode/schema` 2.0.15 adds `session.metadata.updated`; the event
+adapter ignores unknown event types, so no new mapping is required.
+Live host verification remains the v2.0.7 baseline above).
 
 ## How it works
 
@@ -99,7 +101,7 @@ orchestrator-wake children-driven degraded mode are exercised end-to-end
 on the stable host — live mock-driven re-verification on 2026-09-09
 included a queued wake firing after 60 s of parent idle with a stalled
 background child). v2 conformance is compile-time-pinned by the
-mirror-conformance guard against the `@opencode/plugin` 2.0.12
+mirror-conformance guard against the `@opencode/plugin` 2.0.15
 devDependency and exercised by the mock-driven bridge tests. Every v2
 API the adapter touches is
 capability-probed at runtime (`typeof ctx.mcp?.transform === 'function'`,
@@ -390,7 +392,7 @@ currently break this plugin:
 - **Transcript user messages carry no identity.** Context-hook
   transcript user messages on live v2 hosts carry `{id, time, text,
   type}` only — no `agent`, no `sessionID`. The v1 injection gates
-  (phase-reminder, background-job-board, post-file-tool-nudge) key on
+  (phase-reminder, background-job-board) key on
   user-message `info.agent`/`info.sessionID`, so every injection would
   skip. The v2 context bridge stamps the context event's `sessionID` and
   the session's known agent (from the event, falling back to the
@@ -420,7 +422,11 @@ currently break this plugin:
   mutates only system/messages, and cache hints ride
   `ContentPart.cache`. Adoption status: the **compaction hook is
   adopted** — the plugin strips its tagged synthetic parts from the
-  compaction input; **child-session permission rules are applied** —
+  compaction input (phase reminders and job boards). On v1, the
+  `experimental.session.compacting` hook instead marks the next message
+  transform for that session; it strips only phase reminders after the
+  transform, leaving the job board untouched. The v2 adapter does not forward
+  this v1 hook; **child-session permission rules are applied** —
   plugin-managed child sessions receive exact-match task-policy rules
   once at creation via `ctx.session.update({sessionID, permissions})`
   (`createPermissionRulesBridge` in `src/v2/setup.ts`; exact-match

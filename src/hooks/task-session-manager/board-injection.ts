@@ -48,6 +48,11 @@ import { extractTaskSummary, isLateCancelledTaskError } from './status-utils';
 export const BACKGROUND_JOB_BOARD_METADATA_KEY =
   'oh-my-opencode-slim.backgroundJobBoard';
 
+const UNCHANGED_BOARD_MARKER = formatSystemReminder(
+  '### Background Job Board unchanged since the last full snapshot.',
+);
+const MAX_UNCHANGED_MARKERS = 9;
+
 const BACKGROUND_COMPLETION_COMPLETED = /^Background task completed: /;
 const BACKGROUND_COMPLETION_FAILED = /^Background task failed: /;
 
@@ -71,18 +76,12 @@ export type RetainedBoardSnapshotState = {
  * every later request once that anchor is no longer the tail, so a board that
  * was sent on a message the provider has cached never disappears.
  *
- * Only ONE placement is ever retained: a board that rode as a trailing PART on
- * a USER anchor (`anchorRole: 'user'`). That is the only shape that can be
- * reproduced later without inserting a message mid-array (A1) or grafting board
- * text onto a non-user message (A3). `anchorRole` stays a plain string so
- * legacy in-memory entries recorded by an earlier build (notably `'assistant'`,
- * which was replayed by splicing a synthetic message directly after the anchor
- * and could orphan a tool call from its result) are recognized and dropped
- * instead of replayed.
+ * Only a board that rode as a trailing PART on a USER anchor is retained:
+ * it can be reproduced without inserting a message mid-array (A1) or grafting
+ * board text onto a non-user message (A3).
  */
 type RetainedTailBoard = {
   anchorId: string;
-  anchorRole: string;
   text: string;
 };
 
@@ -1392,9 +1391,10 @@ function injectLatestBoard(state: InjectionState, messages: unknown[]): void {
   // (internal-initiator turn, empty board): an already-sent board must stay put
   // regardless of the current turn. The current tail anchor is skipped — its
   // board is (re)placed fresh below.
-  if (sessionID !== undefined) {
-    replayRetainedTailBoards(state, sessionID, messages, anchorId);
-  }
+  const lastComplete =
+    sessionID !== undefined
+      ? replayRetainedTailBoards(state, sessionID, messages, anchorId)
+      : undefined;
 
   if (!trigger) return;
   if (trigger.info.agent && trigger.info.agent !== 'orchestrator') return;
@@ -1475,8 +1475,13 @@ function injectLatestBoard(state: InjectionState, messages: unknown[]): void {
   //   so the message carrying board text is genuinely user-role (A3).
   const recordId = anchor.id;
   if (canCarryBoardPart(anchor.message)) {
+    const unchanged =
+      boardMeta.terminalUnreconciledTaskIDs.length === 0 &&
+      lastComplete?.text === reminder &&
+      lastComplete.markersSince < MAX_UNCHANGED_MARKERS;
+    const text = unchanged ? UNCHANGED_BOARD_MARKER : reminder;
     appendTaggedSyntheticPart(anchor.message, {
-      text: reminder,
+      text,
       metadataKey: state.metadataKey,
     });
     // Recording the placement under the tail's anchor id lets the NEXT request
@@ -1484,8 +1489,7 @@ function injectLatestBoard(state: InjectionState, messages: unknown[]): void {
     // so the bytes the provider just cached for this message never change.
     rememberTailBoard(state, sessionID, {
       anchorId: recordId,
-      anchorRole: 'user',
-      text: reminder,
+      text,
     });
   } else {
     appendTrailingVolatileMessage(
@@ -1664,15 +1668,18 @@ function forgetTailBoard(
  * (compaction, revert) are pruned — their bytes are gone from the provider's
  * view too. Replay is skipped when the anchor already carries a board, keeping
  * the operation idempotent under repeated transforms on a shared array.
+ * Returns the last complete board still present and its subsequent marker
+ * count. Orphan markers are discarded if their full reference is absent.
  */
 function replayRetainedTailBoards(
   state: InjectionState,
   sessionID: string,
   messages: unknown[],
   currentAnchorId: string | undefined,
-): void {
+): { text: string; markersSince: number } | undefined {
   const perSession = state.retainedTailBoards.get(sessionID);
   if (!perSession || perSession.size === 0) return;
+  let lastComplete: { text: string; markersSince: number } | undefined;
 
   const anchorById = new Map<string, MessageWithParts>();
   for (const anchor of boardAnchors(messages, state.metadataKey)) {
@@ -1689,30 +1696,39 @@ function replayRetainedTailBoards(
       // Anchor gone from history (compaction/revert): its bytes are no longer
       // in the provider's view, so stop tracking it.
       perSession.delete(anchorId);
+      if (board.text !== UNCHANGED_BOARD_MARKER) lastComplete = undefined;
       continue;
     }
-    if (hasTaggedPart(anchor, state.metadataKey)) continue;
 
-    // A5: only the trailing-PART-on-a-user-anchor placement is replayable. A
-    // board recorded against an assistant anchor (legacy state from an earlier
-    // build) was reproduced by splicing a synthetic message after the anchor —
-    // which lands between an assistant `task` tool_call and its tool_result and
-    // invalidates the whole request. A board whose anchor is no longer a user
-    // message cannot take the part path either. Both are dropped: one lost
-    // board (a bounded cache bust on that message) is preferable to a hard
-    // AI_InvalidPromptError on every request.
-    if (board.anchorRole !== 'user' || !canCarryBoardPart(anchor)) {
+    // A5: a board whose anchor is no longer a user message cannot take the
+    // replayable trailing-part path. Drop it rather than invalidating the turn.
+    if (!canCarryBoardPart(anchor)) {
+      perSession.delete(anchorId);
+      if (board.text !== UNCHANGED_BOARD_MARKER) lastComplete = undefined;
+      continue;
+    }
+    if (board.text === UNCHANGED_BOARD_MARKER && !lastComplete) {
+      // Its full reference was pruned by compaction/revert; never replay an
+      // orphan marker into the new history.
       perSession.delete(anchorId);
       continue;
     }
 
-    appendTaggedSyntheticPart(anchor, {
-      text: board.text,
-      metadataKey: state.metadataKey,
-    });
+    if (!hasTaggedPart(anchor, state.metadataKey)) {
+      appendTaggedSyntheticPart(anchor, {
+        text: board.text,
+        metadataKey: state.metadataKey,
+      });
+    }
+    if (board.text === UNCHANGED_BOARD_MARKER) {
+      if (lastComplete) lastComplete.markersSince += 1;
+    } else {
+      lastComplete = { text: board.text, markersSince: 0 };
+    }
   }
 
   if (perSession.size === 0) state.retainedTailBoards.delete(sessionID);
+  return lastComplete;
 }
 
 /**
