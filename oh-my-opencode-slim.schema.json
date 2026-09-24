@@ -2033,7 +2033,7 @@
             "zellij",
             "herdr",
             "kitty",
-            "cmux",
+            "cmux-tui",
             "none"
           ]
         },
@@ -2053,6 +2053,11 @@
           "type": "number",
           "minimum": 20,
           "maximum": 80
+        },
+        "cmux_tui_binary": {
+          "description": "Explicit path to the cmux-tui binary. When unset, the adapter probes PATH for `cmux-tui` first and falls back to `cmux`.",
+          "type": "string",
+          "minLength": 1
         }
       }
     },
@@ -2093,7 +2098,7 @@
       "properties": {
         "strategy": {
           "default": "latest",
-          "description": "Board injection strategy. \"latest\" replaces prior board messages; \"checkpoint-compatible\" preserves them and appends only changed board snapshots.",
+          "description": "Board injection strategy. \"latest\" retains and replays one frozen board part per eligible turn without a cap; unchanged boards use a short marker for up to nine turns, then a full board. \"checkpoint-compatible\" appends only changed snapshots with a bounded cache epoch.",
           "type": "string",
           "enum": [
             "latest",

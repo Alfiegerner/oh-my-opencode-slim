@@ -118,7 +118,7 @@ export const MultiplexerTypeSchema = z.enum([
   'zellij',
   'herdr',
   'kitty',
-  'cmux',
+  'cmux-tui',
   'none',
 ]);
 export type MultiplexerType = z.infer<typeof MultiplexerTypeSchema>;
@@ -144,6 +144,14 @@ const MultiplexerMainPaneSizeSchema = z
   .max(MULTIPLEXER_MAIN_PANE_SIZE_MAX);
 
 /**
+ * Explicit cmux-tui binary path. Shared by `MultiplexerConfigStrictSchema`
+ * and the sanitizer's per-key check so validation and sanitization can never
+ * drift apart (a drift here let an invalid value reject the whole config
+ * layer instead of dropping the one bad key).
+ */
+const MultiplexerCmuxTuiBinarySchema = z.string().min(1);
+
+/**
  * Multiplexer keys accepted by versions before 2.4.x but no longer
  * supported. `zellij_pane_mode` selected the removed agent-tab placement;
  * zellij panes now always open in the tab containing the parent pane.
@@ -159,12 +167,18 @@ export const MULTIPLEXER_DEPRECATED_KEY_MESSAGE =
 
 export const MULTIPLEXER_INVALID_VALUE_MESSAGE =
   'Invalid multiplexer config value; pane management is disabled. Expected ' +
-  'type (auto|tmux|zellij|herdr|kitty|cmux|none), layout ' +
+  'type (auto|tmux|zellij|herdr|kitty|cmux-tui|none), layout ' +
   '(main-horizontal|main-vertical|tiled|even-horizontal|even-vertical), ' +
   'main_pane_size (20-80).';
 
+export const MULTIPLEXER_RENAMED_TYPE_MESSAGE =
+  'multiplexer.type "cmux" was renamed to "cmux-tui"; update your config.';
+
 /** Multiplexer diagnostics are emitted at most once per process. */
-export type MultiplexerDiagnosticKind = 'deprecated-key' | 'invalid-value';
+export type MultiplexerDiagnosticKind =
+  | 'deprecated-key'
+  | 'invalid-value'
+  | 'renamed-type';
 
 const emittedMultiplexerDiagnostics = new Set<MultiplexerDiagnosticKind>();
 
@@ -211,6 +225,13 @@ function invalidMultiplexerKeys(config: Record<string, unknown>): string[] {
   ) {
     invalid.push('main_pane_size');
   }
+  if (
+    'cmux_tui_binary' in config &&
+    !MultiplexerCmuxTuiBinarySchema.optional().safeParse(config.cmux_tui_binary)
+      .success
+  ) {
+    invalid.push('cmux_tui_binary');
+  }
   return invalid;
 }
 
@@ -221,9 +242,13 @@ function invalidMultiplexerKeys(config: Record<string, unknown>): string[] {
  * - a present `zellij_pane_mode` key is dropped with a once-per-process
  *   deprecation warning; the remaining multiplexer config and the rest of the
  *   plugin config keep working;
- * - an invalid `type` / `layout` / `main_pane_size` value (or a non-object
- *   `multiplexer` value) disables pane management (`type: "none"`) with a
- *   once-per-process diagnostic instead of failing the whole plugin config.
+ * - an invalid `type` / `layout` / `main_pane_size` / `cmux_tui_binary`
+ *   value (or a non-object `multiplexer` value) disables pane management
+ *   (`type: "none"`) with a once-per-process diagnostic instead of failing
+ *   the whole plugin config;
+ * - the old `cmux` type value is a hard rename to `cmux-tui` (no alias): it
+ *   goes through the same invalid-value path, plus a specific
+ *   once-per-process diagnostic naming the replacement.
  */
 export function sanitizeMultiplexerConfig(value: unknown): unknown {
   if (value === undefined) {
@@ -250,6 +275,12 @@ export function sanitizeMultiplexerConfig(value: unknown): unknown {
     for (const key of deprecated) {
       delete sanitized[key];
     }
+  }
+
+  if (sanitized.type === 'cmux') {
+    // Hard rename, no alias: `cmux` stays invalid, but the user gets a
+    // specific hint instead of only the generic invalid-value message.
+    emitMultiplexerDiagnostic('renamed-type', MULTIPLEXER_RENAMED_TYPE_MESSAGE);
   }
 
   const invalid = invalidMultiplexerKeys(sanitized);
@@ -283,6 +314,10 @@ export const MultiplexerConfigStrictSchema = z.object({
   main_pane_size: MultiplexerMainPaneSizeSchema.default(
     MULTIPLEXER_MAIN_PANE_SIZE_DEFAULT,
   ), // percentage
+  cmux_tui_binary: MultiplexerCmuxTuiBinarySchema.optional().describe(
+    'Explicit path to the cmux-tui binary. When unset, the adapter probes ' +
+      'PATH for `cmux-tui` first and falls back to `cmux`.',
+  ),
 });
 
 // Multiplexer integration configuration (new unified config)
@@ -406,7 +441,7 @@ export const BackgroundJobsConfigSchema = z.object({
     .enum(['latest', 'checkpoint-compatible'])
     .default('latest')
     .describe(
-      'Board injection strategy. "latest" replaces prior board messages; "checkpoint-compatible" preserves them and appends only changed board snapshots.',
+      'Board injection strategy. "latest" retains and replays one frozen board part per eligible turn without a cap; unchanged boards use a short marker for up to nine turns, then a full board. "checkpoint-compatible" appends only changed snapshots with a bounded cache epoch.',
     ),
   maxSessionsPerAgent: z.number().int().min(1).max(10).default(2),
   maxContextLines: z.number().int().min(0).max(500_000).default(50_000),

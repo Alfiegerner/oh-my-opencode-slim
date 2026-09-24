@@ -69,10 +69,7 @@ export function resolveOpencodeExecutable(): string {
  */
 export function buildShellLaunchArgs(command: string): string[] {
   const shell = process.env.SHELL || '/bin/sh';
-  const name = (shell.split(/[/\\]/).at(-1) ?? 'sh').replace(
-    /\.(exe|EXE)$/,
-    '',
-  );
+  const name = shellName(shell);
 
   if (name === 'nu' || name === 'fish') {
     return [shell, '-c', command];
@@ -106,6 +103,23 @@ export function buildShellLaunchArgs(command: string): string[] {
   return [shell, '-c', command];
 }
 
+/** Resolved basename of a shell path, without a `.exe` suffix. */
+function shellName(shell: string): string {
+  return (shell.split(/[/\\]/).at(-1) ?? 'sh').replace(/\.(exe|EXE)$/, '');
+}
+
+/**
+ * Whether the resolved interactive shell treats `#` as a comment. Adapters
+ * that prefix a POSIX comment data marker to a command must omit it when the
+ * shell has no `#` comments (only `cmd` today). Reuses the same shell-name
+ * resolution as `buildShellLaunchArgs` so the two can never disagree.
+ */
+export function shellSupportsHashComments(
+  shell = process.env.SHELL || '/bin/sh',
+): boolean {
+  return shellName(shell) !== 'cmd';
+}
+
 export function resolveHostOpencodeBinary(
   options: {
     override?: string;
@@ -134,13 +148,25 @@ export function resolveHostOpencodeBinary(
   return null;
 }
 
+/**
+ * Log prefix of one `findBinary` probe: `[<binaryName>]` by default. Callers
+ * that probe a differently named distribution binary (cmux probes `cmux` as a
+ * legacy fallback while its logs are prefixed `[cmux-tui]`) pass `logPrefix`.
+ */
+export function findBinaryLogPrefix(
+  binaryName: string,
+  logPrefix?: string,
+): string {
+  return `[${logPrefix ?? binaryName}]`;
+}
+
 export async function findBinary(
   binaryName: string,
-  options: { verify?: boolean } = {},
+  options: { verify?: boolean; logPrefix?: string } = {},
 ): Promise<string | null> {
   const isWindows = process.platform === 'win32';
   const cmd = isWindows ? 'where' : 'which';
-  const logPrefix = `[${binaryName}]`;
+  const logPrefix = findBinaryLogPrefix(binaryName, options.logPrefix);
 
   try {
     const proc = crossSpawn([cmd, binaryName], {
@@ -163,7 +189,7 @@ export async function findBinary(
       return null;
     }
 
-    log(`${logPrefix} findBinary: found`, { path });
+    log(`${logPrefix} findBinary: found ${path}`);
 
     // Verify the binary works if requested
     if (options.verify) {

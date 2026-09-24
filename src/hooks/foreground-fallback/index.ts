@@ -18,14 +18,16 @@
  */
 
 import type { PluginInput } from '@opencode-ai/plugin';
-import { responseError } from '../../utils/child-transcript';
+import { responseError, stringifyError } from '../../utils/child-transcript';
 import { isRecord } from '../../utils/guards';
 import { createInternalAgentTextPart } from '../../utils/internal-initiator';
 import { log } from '../../utils/logger';
 import { getClient } from '../../utils/opencode-client';
 import {
   abortSessionWithTimeout,
+  OperationTimeoutError,
   parseModelReference,
+  withTimeout,
 } from '../../utils/session';
 import type { SessionLifecycle } from '../session-lifecycle';
 import { isReplayableUserMessage, partsFromReplayMessage } from '../types';
@@ -105,6 +107,14 @@ const RETRYABLE_ERROR_PATTERNS = [
 ];
 
 const OUTAGE_STATUS_CODES = new Set([500, 502, 503, 504]);
+// v2 host classification ({type, message, status?}); status is omitted when
+// the failure carried no HTTP status (e.g. stream-level provider errors).
+const FAILOVER_ERROR_TYPES = new Set([
+  'provider.rate-limit',
+  'provider.quota',
+  'provider.auth',
+  'provider.internal',
+]);
 // (ponytail) validated against real OpenCode error shapes
 const TRANSPORT_CODES = new Set([
   'ECONNREFUSED',
@@ -161,9 +171,12 @@ const PROVIDER_OUTAGE_PATTERNS = [
 
 function extractStatusCode(error: {
   statusCode?: unknown;
+  status?: unknown;
   data?: { statusCode?: unknown };
 }): number | undefined {
-  const value = error.statusCode ?? error.data?.statusCode;
+  // v2 hosts surface provider errors flat ({type, message, status});
+  // v1 uses statusCode / data.statusCode (issue #1283).
+  const value = error.statusCode ?? error.data?.statusCode ?? error.status;
   return typeof value === 'number' ? value : undefined;
 }
 
@@ -189,6 +202,7 @@ export function isFailoverError(error: unknown): boolean {
     cause?: { code?: unknown };
     message?: string;
     statusCode?: number;
+    type?: unknown;
     data?: {
       code?: unknown;
       statusCode?: number;
@@ -203,7 +217,8 @@ export function isFailoverError(error: unknown): boolean {
     statusCode === 402 ||
     statusCode === 403 ||
     statusCode === 410 ||
-    (statusCode !== undefined && OUTAGE_STATUS_CODES.has(statusCode))
+    (statusCode !== undefined && OUTAGE_STATUS_CODES.has(statusCode)) ||
+    (typeof err.type === 'string' && FAILOVER_ERROR_TYPES.has(err.type))
   ) {
     return true;
   }
@@ -294,10 +309,8 @@ export function isInlineFailoverError(error: unknown): boolean {
 /** Prevent re-triggering within this window for the same session. */
 const DEDUP_WINDOW_MS = 5_000;
 const REPROMPT_DELAY_MS = 500;
-/** Ceiling on the waiter-promotion round-trip: a hung transport must not
- *  stall the fallback abort below, or the broken session stays busy and
- *  the fallback never arrives — a variant of the bug being fixed. */
-const PROMOTE_WAITER_TIMEOUT_MS = 2_000;
+/** Ceiling on host calls: a hung transport must not stall fallback. */
+const HOST_CALL_TIMEOUT_MS = 2_000;
 /** Transcript tail size for the fallback replay read: the replay only needs
  *  the last replayable user message plus the trailing message id (handoff
  *  baseline), never the full history. */
@@ -305,16 +318,6 @@ const FALLBACK_REPLAY_TAIL_MESSAGES = 50;
 const FALLBACK_IN_PROGRESS_KEY = Symbol.for(
   'oh-my-opencode-slim.foreground-fallback.in-progress',
 );
-
-/** Error name stamped by the v2 client shim's promptAsync when the host
- * provides no session.switchModel while the replay declared
- * `modelSwitch: 'required'`. Duck-typed by name (mirroring the hostFlavor
- * convention) so this v1 hook stays decoupled from the v2 adapter module. */
-const V2_SWITCH_MODEL_UNAVAILABLE_ERROR = 'V2SwitchModelUnavailableError';
-
-function isSwitchModelUnavailableError(err: unknown): err is Error {
-  return err instanceof Error && err.name === V2_SWITCH_MODEL_UNAVAILABLE_ERROR;
-}
 
 function getProcessFallbacksInProgress(): Set<string> {
   const globalWithStore = globalThis as typeof globalThis & {
@@ -745,6 +748,101 @@ export class ForegroundFallbackManager {
     }
   }
 
+  async handleV2Retry(
+    event: {
+      sessionID: string;
+      agent?: string;
+      model: { providerID: string; id: string };
+      error: unknown;
+      decision?: { retry: boolean; delay?: number };
+    },
+    switchModel: (
+      sessionID: string,
+      model: { providerID: string; id: string },
+    ) => Promise<unknown>,
+  ): Promise<void> {
+    let picked: string | undefined;
+    let switchRequest: Promise<unknown> | undefined;
+    const from = `${event.model.providerID}/${event.model.id}`;
+    try {
+      const { sessionID } = event;
+      if (!this.enabled || this.disposed || this.inProgress.has(sessionID))
+        return;
+      if (!isFailoverError(event.error)) return;
+      if (this.initialRetryDelayMs > 0) {
+        log('[foreground-fallback] retry hook skipped initial delay', {
+          sessionID,
+        });
+        return;
+      }
+      if (
+        this.sessionTried.get(sessionID)?.has(from) &&
+        this.sessionModel.get(sessionID) !== from
+      )
+        return;
+      if (event.agent) this.registerSessionAgent(sessionID, event.agent);
+      this.sessionModel.set(sessionID, from);
+      const selected = this.selectFallbackModel(sessionID);
+      if (!selected || selected === 'exhausted') return;
+      const { agentName, nextModel, ref } = selected;
+      picked = nextModel;
+      switchRequest = switchModel(sessionID, {
+        providerID: ref.providerID,
+        id: ref.modelID,
+      });
+      await withTimeout(
+        switchRequest,
+        HOST_CALL_TIMEOUT_MS,
+        'foreground retry model switch timed out',
+      );
+      if (this.disposed) return;
+      event.decision = { retry: true, delay: this.retryDelayMs };
+      this.sessionModel.set(sessionID, nextModel);
+      this.onSessionModelChanged?.(sessionID, nextModel);
+      this.showFallbackToast(agentName, nextModel, event.error);
+      log('[foreground-fallback] retry hook switched model in place', {
+        sessionID,
+        from,
+        to: nextModel,
+      });
+    } catch (err) {
+      // Unconfirmed switch: keep the target selectable (a timed-out switch
+      // may still land; the next event's model is the host truth).
+      if (picked) this.sessionTried.get(event.sessionID)?.delete(picked);
+      const pendingSwitch = switchRequest;
+      if (err instanceof OperationTimeoutError && picked && pendingSwitch) {
+        // Late landing: the timeout cannot cancel the host call. If it
+        // settles after we gave up, reconcile only when nothing advanced
+        // the model since — the check and the write run synchronously, so
+        // a hook that already moved on fails closed instead of being
+        // overwritten. No toast here: the next event's success path
+        // notifies; this only repairs state.
+        const target = picked;
+        void pendingSwitch.then(
+          () => {
+            if (
+              this.disposed ||
+              this.sessionModel.get(event.sessionID) !== from
+            )
+              return;
+            this.sessionModel.set(event.sessionID, target);
+            this.onSessionModelChanged?.(event.sessionID, target);
+            log('[foreground-fallback] retry hook reconciled a late switch', {
+              sessionID: event.sessionID,
+              from,
+              to: target,
+            });
+          },
+          () => {},
+        );
+      }
+      log(
+        '[foreground-fallback] retry hook switch failed; host decision unchanged',
+        { sessionID: event?.sessionID, error: stringifyError(err) },
+      );
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Retry budget
   // ---------------------------------------------------------------------------
@@ -871,15 +969,12 @@ export class ForegroundFallbackManager {
    * without a replacement model only races owners that manage their own
    * lifecycle (e.g. CouncilManager for councillor) and produces noise.
    */
-  /** Promote a foreground task() waiter to background BEFORE the abort
-   *  below settles the child's job as "cancelled": the host resolves the
-   *  parent's wait via backgroundResult, so the waiting tool returns
-   *  "Background task started", its after-hook attributes the child, and
-   *  the fallback replay runs on a tracked session instead of orphaning
-   *  a headless run. Fail-soft by design: unknown host endpoint, missing
-   *  experimental flag, or transport failure degrade to the previous
-   *  behavior ("Task cancelled" + untracked replay). Order-critical:
-   *  must precede the abort. */
+  /** Promote a foreground task() waiter through the v1 SDK before abort
+   *  settles the child's job as "cancelled". The parent's wait then resolves
+   *  via backgroundResult and the fallback replay stays tracked. On v2,
+   *  no supported transport exists; never request an unknown loopback URL.
+   *  Missing transport or promotion failure degrades to the previous behavior
+   *  ("Task cancelled" + untracked replay). Must precede the abort. */
   private async promoteForegroundWaiter(sessionID: string): Promise<void> {
     const parentSessionID = this.sessionParent.get(sessionID);
     if (!parentSessionID) return;
@@ -893,43 +988,36 @@ export class ForegroundFallbackManager {
         };
       };
       const post = client._client?.post;
-      const request: Promise<unknown> =
-        typeof post === 'function'
-          ? post.call(client._client, {
-              url: '/experimental/session/{sessionID}/background',
-              path: { sessionID: parentSessionID },
-            })
-          : // v2 plugin inputs carry no _client: hit the server URL
-            // directly. Same host, same endpoint, same fail-soft envelope.
-            fetch(
-              new URL(
-                `/experimental/session/${encodeURIComponent(parentSessionID)}/background`,
-                this.input.serverUrl,
-              ),
-              { method: 'POST' },
-            );
-      let timeout: ReturnType<typeof setTimeout> | undefined;
-      try {
-        await Promise.race([
-          request,
-          new Promise((_, reject) => {
-            timeout = setTimeout(
-              () => reject(new Error('foreground waiter promotion timed out')),
-              PROMOTE_WAITER_TIMEOUT_MS,
-            );
-          }),
-        ]);
-      } finally {
-        clearTimeout(timeout);
+      if (typeof post !== 'function') {
+        log(
+          '[foreground-fallback] foreground waiter promotion unavailable on this host; continuing fallback',
+          { sessionID, parentSessionID, transport: 'none' },
+        );
+        return;
       }
+      const result = await withTimeout(
+        post.call(client._client, {
+          url: '/experimental/session/{sessionID}/background',
+          path: { sessionID: parentSessionID },
+        }),
+        HOST_CALL_TIMEOUT_MS,
+        'foreground waiter promotion timed out',
+      );
+      const err = responseError(result);
+      if (err !== undefined) throw new Error(stringifyError(err));
       log(
         '[foreground-fallback] promoted foreground task waiter to background',
-        { sessionID, parentSessionID },
+        { sessionID, parentSessionID, transport: 'sdk' },
       );
-    } catch {
+    } catch (err) {
       log(
         '[foreground-fallback] foreground waiter promotion failed; continuing fallback',
-        { sessionID },
+        {
+          sessionID,
+          parentSessionID,
+          transport: 'sdk',
+          error: stringifyError(err),
+        },
       );
     }
   }
@@ -981,6 +1069,140 @@ export class ForegroundFallbackManager {
     return false;
   }
 
+  private selectFallbackModel(sessionID: string) {
+    const observedModel = this.sessionModel.get(sessionID);
+    let currentModel = observedModel;
+    const agentName = this.sessionAgent.get(sessionID);
+    const chain = this.resolveChain(agentName, currentModel);
+    // Callers pre-check via hasFallbackChain; keep as defensive guard only.
+    if (!chain.length) return;
+
+    // When the agent is known but no model was captured (common for
+    // subagent error events that fire before message.updated), infer
+    // the current model as the chain's first entry. Without this, the
+    // fallback would incorrectly re-select the primary model as the
+    // "next" fallback target.
+    if (!currentModel && agentName && chain.length > 0) {
+      currentModel = chain[0];
+    }
+
+    if (!this.sessionTried.has(sessionID)) {
+      this.sessionTried.set(sessionID, new Set());
+    }
+    // biome-ignore lint/style/noNonNullAssertion: We just set this above
+    let tried = this.sessionTried.get(sessionID)!;
+
+    // A new user turn always re-sends the agent's configured primary:
+    // promptAsync's `model` is a per-message override, so a fallback never
+    // persists past the message it was applied to. Landing here on chain[0]
+    // with a tried set that already walked past it therefore means the
+    // previous descent has ended and its state is stale. Without this the
+    // next descent resumes one link deeper every turn (link 2, then 3, then
+    // 4...) until the chain is spent and the session aborts, instead of
+    // re-walking from link 2 each turn.
+    //
+    // This does not weaken the backward-fallback guard below: currentModel
+    // is re-added immediately after, so chain[0] still can never be picked.
+    // Only an OBSERVED chain[0] counts. execFallback infers
+    // `currentModel = chain[0]` above when no model was ever captured for
+    // this session, which is the opposite situation — resetting there would
+    // re-pick chain[1] on every error instead of descending.
+    // size > 1 means a previous descent actually selected a fallback
+    // (tried.add(nextModel) below), so there is stale state to clear. A
+    // single-entry chain never gets there and must stay terminal after its
+    // one abort rather than re-aborting on every error.
+    if (
+      observedModel !== undefined &&
+      observedModel === chain[0] &&
+      tried.size > 1
+    ) {
+      tried = new Set();
+      this.sessionTried.set(sessionID, tried);
+      // A descent that ended in a stage-2 abort is never followed by a
+      // successful assistant message, so the message.updated recovery path
+      // cannot clear chainExhaustion and fallback would stay disabled for
+      // the rest of the session. A fresh descent earns a fresh chance.
+      this.chainExhaustion.delete(sessionID);
+    }
+
+    // After the chain has been exhausted twice (reset retry failed and we
+    // aborted), do not intervene again for this session: re-entering would
+    // keep aborting in a loop. Surface errors to the user instead.
+    if (this.chainExhaustion.get(sessionID) === 2) return;
+    if (currentModel) tried.add(currentModel);
+    // ponytail: seed chain entries at or before the current model's index
+    // to prevent backward fallback onto models the session already left.
+    if (currentModel) {
+      const idx = chain.indexOf(currentModel);
+      for (let i = 0; i < idx; i++) tried.add(chain[i]);
+    }
+
+    let nextModel = chain.find((m) => !tried.has(m));
+    if (!nextModel) {
+      if (chain.length > 1) {
+        // Chain exhausted but we have fallbacks: on the first exhaustion
+        // reset the tried set and stick to the deepest fallback model so
+        // we stop re-trying the dead primary model on every subsequent
+        // message. If the sticky fallback itself fails afterwards (second
+        // exhaustion), abort once and stop intervening — otherwise the
+        // reset re-prompt would loop forever on a fully dead chain.
+        const primary = chain[0];
+        const stickyFallback = chain[chain.length - 1];
+        if ((this.chainExhaustion.get(sessionID) ?? 0) >= 1) {
+          this.chainExhaustion.set(sessionID, 2);
+          log('[foreground-fallback] chain exhausted after re-fallback', {
+            sessionID,
+            agentName,
+            currentModel,
+            tried: [...tried],
+          });
+          return 'exhausted' as const;
+        }
+        this.chainExhaustion.set(sessionID, 1);
+        log('[foreground-fallback] resetting tried set for re-fallback', {
+          sessionID,
+          agentName,
+          currentModel,
+          prevTried: [...tried],
+          nextModel: stickyFallback,
+        });
+        tried = new Set();
+        if (primary) tried.add(primary);
+        if (currentModel && currentModel !== primary) tried.add(currentModel);
+        this.sessionTried.set(sessionID, tried);
+        nextModel = stickyFallback;
+      } else {
+        this.chainExhaustion.set(sessionID, 2);
+        log('[foreground-fallback] fallback chain exhausted', {
+          sessionID,
+          agentName,
+          tried: [...tried],
+        });
+        return 'exhausted' as const;
+      }
+    }
+    tried.add(nextModel);
+    // Reset retry count on model switch - the new model starts fresh.
+    this.sessionRetries.delete(sessionID);
+    this.lastFallbackTime.delete(sessionID);
+    // Cancel any pending initial delay on model switch
+    const pendingDelay = this.pendingInitialDelay.get(sessionID);
+    if (pendingDelay) {
+      clearTimeout(pendingDelay);
+      this.pendingInitialDelay.delete(sessionID);
+    }
+
+    const ref = parseModelReference(nextModel);
+    if (!ref) {
+      log('[foreground-fallback] invalid model format', {
+        sessionID,
+        nextModel,
+      });
+      return;
+    }
+    return { agentName, currentModel, nextModel, ref };
+  }
+
   private async execFallback(
     sessionID: string,
     error?: unknown,
@@ -991,141 +1213,13 @@ export class ForegroundFallbackManager {
     if (this.abandonedByDispose(sessionID)) return;
     const session = getClient(this.input).session;
     try {
-      const observedModel = this.sessionModel.get(sessionID);
-      let currentModel = observedModel;
-      const agentName = this.sessionAgent.get(sessionID);
-      const chain = this.resolveChain(agentName, currentModel);
-      // Callers pre-check via hasFallbackChain; keep as defensive guard only.
-      if (!chain.length) return;
-
-      // When the agent is known but no model was captured (common for
-      // subagent error events that fire before message.updated), infer
-      // the current model as the chain's first entry. Without this, the
-      // fallback would incorrectly re-select the primary model as the
-      // "next" fallback target.
-      if (!currentModel && agentName && chain.length > 0) {
-        currentModel = chain[0];
-      }
-
-      if (!this.sessionTried.has(sessionID)) {
-        this.sessionTried.set(sessionID, new Set());
-      }
-      // biome-ignore lint/style/noNonNullAssertion: We just set this above
-      let tried = this.sessionTried.get(sessionID)!;
-
-      // A new user turn always re-sends the agent's configured primary:
-      // promptAsync's `model` is a per-message override, so a fallback never
-      // persists past the message it was applied to. Landing here on chain[0]
-      // with a tried set that already walked past it therefore means the
-      // previous descent has ended and its state is stale. Without this the
-      // next descent resumes one link deeper every turn (link 2, then 3, then
-      // 4...) until the chain is spent and the session aborts, instead of
-      // re-walking from link 2 each turn.
-      //
-      // This does not weaken the backward-fallback guard below: currentModel
-      // is re-added immediately after, so chain[0] still can never be picked.
-      // Only an OBSERVED chain[0] counts. execFallback infers
-      // `currentModel = chain[0]` above when no model was ever captured for
-      // this session, which is the opposite situation — resetting there would
-      // re-pick chain[1] on every error instead of descending.
-      // size > 1 means a previous descent actually selected a fallback
-      // (tried.add(nextModel) below), so there is stale state to clear. A
-      // single-entry chain never gets there and must stay terminal after its
-      // one abort rather than re-aborting on every error.
-      if (
-        observedModel !== undefined &&
-        observedModel === chain[0] &&
-        tried.size > 1
-      ) {
-        tried = new Set();
-        this.sessionTried.set(sessionID, tried);
-        // A descent that ended in a stage-2 abort is never followed by a
-        // successful assistant message, so the message.updated recovery path
-        // cannot clear chainExhaustion and fallback would stay disabled for
-        // the rest of the session. A fresh descent earns a fresh chance.
-        this.chainExhaustion.delete(sessionID);
-      }
-
-      // After the chain has been exhausted twice (reset retry failed and we
-      // aborted), do not intervene again for this session: re-entering would
-      // keep aborting in a loop. Surface errors to the user instead.
-      if (this.chainExhaustion.get(sessionID) === 2) return;
-      if (currentModel) tried.add(currentModel);
-      // ponytail: seed chain entries at or before the current model's index
-      // to prevent backward fallback onto models the session already left.
-      if (currentModel) {
-        const idx = chain.indexOf(currentModel);
-        for (let i = 0; i < idx; i++) tried.add(chain[i]);
-      }
-
-      let nextModel = chain.find((m) => !tried.has(m));
-      if (!nextModel) {
-        if (chain.length > 1) {
-          // Chain exhausted but we have fallbacks: on the first exhaustion
-          // reset the tried set and stick to the deepest fallback model so
-          // we stop re-trying the dead primary model on every subsequent
-          // message. If the sticky fallback itself fails afterwards (second
-          // exhaustion), abort once and stop intervening — otherwise the
-          // reset re-prompt would loop forever on a fully dead chain.
-          const primary = chain[0];
-          const stickyFallback = chain[chain.length - 1];
-          if ((this.chainExhaustion.get(sessionID) ?? 0) >= 1) {
-            this.chainExhaustion.set(sessionID, 2);
-            log(
-              '[foreground-fallback] chain exhausted after re-fallback, aborting',
-              {
-                sessionID,
-                agentName,
-                currentModel,
-                tried: [...tried],
-              },
-            );
-            await abortSessionWithTimeout(getClient(this.input), sessionID);
-            return;
-          }
-          this.chainExhaustion.set(sessionID, 1);
-          log('[foreground-fallback] resetting tried set for re-fallback', {
-            sessionID,
-            agentName,
-            currentModel,
-            prevTried: [...tried],
-            nextModel: stickyFallback,
-          });
-          tried = new Set();
-          if (primary) tried.add(primary);
-          if (currentModel && currentModel !== primary) tried.add(currentModel);
-          this.sessionTried.set(sessionID, tried);
-          nextModel = stickyFallback;
-        } else {
-          this.chainExhaustion.set(sessionID, 2);
-          log('[foreground-fallback] fallback chain exhausted, aborting', {
-            sessionID,
-            agentName,
-            tried: [...tried],
-          });
-          await abortSessionWithTimeout(getClient(this.input), sessionID);
-          return;
-        }
-      }
-      tried.add(nextModel);
-      // Reset retry count on model switch - the new model starts fresh.
-      this.sessionRetries.delete(sessionID);
-      this.lastFallbackTime.delete(sessionID);
-      // Cancel any pending initial delay on model switch
-      const pendingDelay = this.pendingInitialDelay.get(sessionID);
-      if (pendingDelay) {
-        clearTimeout(pendingDelay);
-        this.pendingInitialDelay.delete(sessionID);
-      }
-
-      const ref = parseModelReference(nextModel);
-      if (!ref) {
-        log('[foreground-fallback] invalid model format', {
-          sessionID,
-          nextModel,
-        });
+      const selection = this.selectFallbackModel(sessionID);
+      if (!selection) return;
+      if (selection === 'exhausted') {
+        await abortSessionWithTimeout(getClient(this.input), sessionID);
         return;
       }
+      const { agentName, currentModel, nextModel, ref } = selection;
 
       // Retrieve the last user message to re-submit with the fallback model.
       // Fence captured BEFORE any await in the preparation: a board
@@ -1277,15 +1371,17 @@ export class ForegroundFallbackManager {
       try {
         promptResult = await promptAsync(promptBody);
       } catch (promptErr) {
-        if (isSwitchModelUnavailableError(promptErr)) {
-          // Explicit typed refusal: the host cannot switch models at
-          // all, so aborting and retrying cannot help (same missing
-          // capability on every attempt). Nothing was admitted.
+        if (isV2Host) {
+          // v2 steer delivery does not reject with BusyError: any rejected
+          // replay is final, not a signal to retry. An abort cannot make
+          // the admission succeed and may kill a promoted background job.
+          // Preserve the cause rather than misreporting it as busy.
           withdrawHandoff();
           throw promptErr;
         }
         log('[foreground-fallback] promptAsync on busy session, aborting', {
           sessionID,
+          error: stringifyError(promptErr),
         });
         await this.promoteForegroundWaiter(sessionID);
         // Same stale-generation fence as the failover abort above.
@@ -1372,7 +1468,7 @@ export class ForegroundFallbackManager {
     } catch (err) {
       log('[foreground-fallback] fallback attempt failed', {
         sessionID,
-        error: err instanceof Error ? err.message : String(err),
+        error: stringifyError(err),
       });
     }
   }

@@ -28,6 +28,7 @@ import {
   CHAT_INITIATOR_HEADER_NAME,
   isCopilotProvider,
 } from '../hooks/chat-headers';
+import type { ForegroundFallbackManager } from '../hooks/foreground-fallback';
 import { PHASE_REMINDER_METADATA_KEY } from '../hooks/phase-reminder';
 import { BACKGROUND_JOB_BOARD_METADATA_KEY } from '../hooks/task-session-manager/board-injection';
 import { OhMyOpenCodeLite } from '../index';
@@ -38,7 +39,7 @@ import {
 } from '../utils/background-job-persistence';
 import { INTERNAL_INITIATOR_METADATA_KEY } from '../utils/internal-initiator';
 import { initLogger, log } from '../utils/logger';
-import { adaptTool, applyAgentToDraft } from './adapters';
+import { adaptTool, applyAgentToDraft, v1PermKeyToV2 } from './adapters';
 import {
   buildPluginInput,
   resetClientShimGenerationWarnings,
@@ -354,8 +355,8 @@ export function createSessionContextHandler(
     if (deps.messagesTransform && Array.isArray(event.messages)) {
       // Transcript identity enrichment (v2-only): live v2 hosts carry
       // only {id, time, text, type} on transcript user messages, but the
-      // bridged v1 injection gates (phase-reminder, background-job-board,
-      // post-file-tool-nudge) key on user-message info.sessionID /
+      // bridged v1 injection gates (phase-reminder, background-job-board)
+      // key on user-message info.sessionID /
       // info.agent — without this stamp every injection skips on v2.
       // Metadata-only (envelope fields; parts/content bytes untouched)
       // and strictly absence-gated: host-provided values always win.
@@ -593,8 +594,8 @@ export function createChatHeadersBridge(
 
 /**
  * Metadata keys whose tagged synthetic parts the compaction bridge
- * strips: the plugin's content injections (phase reminders +
- * post-file-tool nudges share PHASE_REMINDER_METADATA_KEY, background
+ * strips: the plugin's content injections (phase reminders use
+ * PHASE_REMINDER_METADATA_KEY, background
  * job boards carry BACKGROUND_JOB_BOARD_METADATA_KEY). Imported from
  * their owning modules so the strip set cannot drift from the injection
  * set. Untagged synthetic parts (e.g. command-marker expansions) are
@@ -654,25 +655,15 @@ export function createSessionCompactionBridge(
 }
 
 /** Wildcard characters the OpenCode-core permission evaluator treats
- * as pattern syntax. Because OpenCode-core matching semantics
- * (wildcards, paths, precedence) are in flux (PRs
- * #48194/#46495/#46871), plugin-emitted session rules must be
- * exact-match strings ONLY — this predicate is the single gate every
- * emitted action/resource passes through. */
+ * as pattern syntax. User-declared wildcard PATTERNS (nested
+ * `{tool: {'rm -rf *': ...}}` entries) are never emitted — pattern
+ * matching semantics are host-side detail this bridge must not rely
+ * on. The one sanctioned wildcard is the whole-tool `'*'` RESOURCE
+ * emitted below: it is the host's own canonical form for a
+ * whole-tool effect (packages/core/src/tool.ts `whollyDisabled` and
+ * the Agent default ruleset both key on it). */
 function containsWildcard(value: string): boolean {
   return value.includes('*') || value.includes('?');
-}
-
-/** Exact v2 action names for a v1 permission tool key — the action half
- * of `v1PermKeyToV2` in adapters.ts, mirrored here because that helper
- * always pairs the action with a `'*'` resource this bridge must never
- * emit. Keys containing wildcards yield no actions: an exact-match rule
- * cannot express them. */
-function exactActionsForV1Key(key: string): string[] {
-  if (containsWildcard(key)) return [];
-  if (key === 'task') return ['subagent'];
-  if (key === 'bash') return ['execute', 'bash'];
-  return [key];
 }
 
 /**
@@ -681,20 +672,22 @@ function exactActionsForV1Key(key: string): string[] {
  * consumes for static agent registration).
  *
  * Entries that can be expressed WITHOUT wildcards survive:
- * - the string shorthand applies to every action and would require a
- *   `'*'` resource on both axes — skipped;
- * - the `'*'` catch-all key and wildcard-suffixed keys (e.g. MCP-derived
- *   `github_*`) are skipped by the action gate;
+ * - the string shorthand and the `'*'` catch-all key apply to every
+ *   action and are skipped (the static agent rules carry them);
+ * - wildcard-suffixed keys (e.g. MCP-derived `github_*`) are skipped by
+ *   the wildcard gate;
  * - nested `{tool: {pattern: effect}}` entries emit
  *   `{action, resource: pattern, effect}` when `pattern` is
  *   wildcard-free (e.g. `skill: {codemap: 'allow'}`,
  *   `bash: {'git push': 'ask'}`);
  * - whole-tool string effects (e.g. `read: 'allow'`, `edit: 'deny'`)
- *   emit an action-scoped rule whose resource IS the declared v1 tool
- *   key. A whole-tool effect semantically covers every resource, which
- *   only a `'*'` resource could express — the tool key is the one exact
- *   resource the declaration itself names, so the emitted rule's scope
- *   is a strict subset of the declaration (never a widening).
+ *   emit `{action, resource: '*', effect}` — the host-canonical form of
+ *   the declaration's true scope, identical in shape to the static
+ *   agent registration (`adaptPermissions`) and the Agent default
+ *   ruleset. On the literal tool-key resource these denies never fired:
+ *   `whollyDisabled` requires the last action-match to carry
+ *   `resource: '*'` before it strips a tool, and the evaluator matches
+ *   the rule resource against the real call resource.
  *
  * Why whole-tool derivation matters: v2 children inherit their parent's
  * session-scoped rules, and the host merges session rules AFTER the
@@ -716,15 +709,16 @@ export function deriveExactPermissionRules(perm: unknown): V2PermissionRule[] {
   const rules: V2PermissionRule[] = [];
   if (!perm || typeof perm !== 'object' || Array.isArray(perm)) return rules;
   for (const [tool, value] of Object.entries(perm as Record<string, unknown>)) {
-    const actions = exactActionsForV1Key(tool);
-    if (actions.length === 0) continue;
+    if (containsWildcard(tool)) continue;
+    const actions = v1PermKeyToV2(tool).map((rule) => rule.action);
     if (typeof value === 'string') {
-      // Whole-tool effect: emit one action-scoped rule per v2 action,
-      // with the declared tool key as the exact resource (subset of the
-      // declared scope — see the doc note above).
+      // Whole-tool effect: one rule per v2 action with the host-canonical
+      // `'*'` resource — the declaration's TRUE scope (the literal tool-key
+      // resource never matched a real call resource, so denies neither
+      // stripped tools from the schema nor gated execution; issue #1244).
       if (value !== 'allow' && value !== 'deny' && value !== 'ask') continue;
       for (const action of actions) {
-        rules.push({ action, resource: tool, effect: value });
+        rules.push({ action, resource: '*', effect: value });
       }
       continue;
     }
@@ -1252,8 +1246,8 @@ export function createToolExecuteBridges(
     // content as a successful output.
     const errored = e.status === 'error';
     // Map v2 Tool.Result.content (string | Content[]) -> v1 output.output
-    // string; the v1 after-hooks (postFileToolNudge, jsonErrorRecovery,
-    // taskSessionManagerAfter) read output.output to decide nudges.
+    // string; the v1 after-hooks (jsonErrorRecovery, taskSessionManagerAfter)
+    // read output.output to decide recovery and task state.
     const result = e.result as
       | {
           content?: unknown;
@@ -1748,6 +1742,34 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
       );
       disposers.push(() => compactionReg.dispose());
       log('[v2] compaction bridge registered (session.compaction)');
+
+      const retryHook = v1Hooks['v2.session.retry'] as
+        | ForegroundFallbackManager['handleV2Retry']
+        | undefined;
+      const switchModel = ctx.session.switchModel;
+      // Without switchModel the retry hook must not register: it would mask
+      // the deferred fallback path on hosts that can't switch in place.
+      if (
+        typeof retryHook === 'function' &&
+        typeof switchModel === 'function'
+      ) {
+        try {
+          const reg = await (
+            ctx.session.hook as unknown as (
+              name: 'retry',
+              cb: (event: never) => Promise<void>,
+            ) => ReturnType<V2Context['session']['hook']>
+          )('retry', (event) =>
+            retryHook(event, (id, model) =>
+              switchModel.call(ctx.session, { sessionID: id, model }),
+            ),
+          );
+          disposers.push(() => reg.dispose());
+          log('[v2] retry hook registered');
+        } catch (err) {
+          log('[v2] retry hook registration failed', String(err));
+        }
+      }
 
       // ── Tool execute hooks ──
       try {

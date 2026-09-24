@@ -1073,6 +1073,24 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "ShoelaceMan",
+      "name": "Trent Arcuri",
+      "avatar_url": "https://avatars.githubusercontent.com/u/9676844?v=4",
+      "profile": "https://github.com/ShoelaceMan",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "expnn",
+      "name": "expnn",
+      "avatar_url": "https://avatars.githubusercontent.com/u/18525479?v=4",
+      "profile": "https://github.com/expnn",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "commitConvention": "angular"

@@ -148,14 +148,30 @@ describe('multiplexer factory', () => {
     const { getMultiplexer } = await importFreshFactory('cmux-explicit');
     const multiplexer = getMultiplexer({
       ...BASE_CONFIG,
-      type: 'cmux',
+      type: 'cmux-tui',
       layout: 'tiled',
     });
-    expect(multiplexer?.type).toBe('cmux');
-    // The configured layout must reach the adapter: cmux picks its split
-    // direction at spawn time, so the first pane needs the real layout.
-    // @ts-expect-error - accessing private for test
-    expect(multiplexer?.layout).toBe('tiled');
+    expect(multiplexer?.type).toBe('cmux-tui');
+    // cmux has no layout expression (its child view is a sibling tab, not a
+    // split), so the configured layout must not be retained as adapter state.
+    expect(
+      (multiplexer as unknown as { layout?: string }).layout,
+    ).toBeUndefined();
+  });
+
+  test('passes cmux_tui_binary to an explicitly configured cmux adapter', async () => {
+    const { getMultiplexer } = await importFreshFactory('cmux-binary-explicit');
+    const multiplexer = getMultiplexer({
+      ...BASE_CONFIG,
+      type: 'cmux-tui',
+      cmux_tui_binary: '/opt/cmux-tui/bin/cmux',
+    });
+
+    expect(multiplexer?.type).toBe('cmux-tui');
+    expect(
+      (multiplexer as unknown as { client?: { binary?: string | null } }).client
+        ?.binary,
+    ).toBe('/opt/cmux-tui/bin/cmux');
   });
 
   test('auto-detects cmux from CMUX_TUI_SOCKET alone', async () => {
@@ -168,9 +184,27 @@ describe('multiplexer factory', () => {
       type: 'auto',
       layout: 'even-vertical',
     });
-    expect(multiplexer?.type).toBe('cmux');
-    // @ts-expect-error - accessing private for test
-    expect(multiplexer?.layout).toBe('even-vertical');
+    expect(multiplexer?.type).toBe('cmux-tui');
+    expect(
+      (multiplexer as unknown as { layout?: string }).layout,
+    ).toBeUndefined();
+  });
+
+  test('passes cmux_tui_binary to an auto-detected cmux adapter', async () => {
+    process.env.CMUX_TUI_SOCKET = '/tmp/cmux-tui.sock';
+
+    const { getMultiplexer } = await importFreshFactory('auto-cmux-binary');
+
+    const multiplexer = getMultiplexer({
+      ...BASE_CONFIG,
+      type: 'auto',
+      cmux_tui_binary: '/opt/cmux-tui/bin/cmux',
+    });
+    expect(multiplexer?.type).toBe('cmux-tui');
+    expect(
+      (multiplexer as unknown as { client?: { binary?: string | null } }).client
+        ?.binary,
+    ).toBe('/opt/cmux-tui/bin/cmux');
   });
 
   test('auto-detects cmux from the legacy CMUX_MUX_SOCKET', async () => {
@@ -183,9 +217,10 @@ describe('multiplexer factory', () => {
       type: 'auto',
       layout: 'even-horizontal',
     });
-    expect(multiplexer?.type).toBe('cmux');
-    // @ts-expect-error - accessing private for test
-    expect(multiplexer?.layout).toBe('even-horizontal');
+    expect(multiplexer?.type).toBe('cmux-tui');
+    expect(
+      (multiplexer as unknown as { layout?: string }).layout,
+    ).toBeUndefined();
   });
 
   test('auto does not detect cmux from the removed CMUX_SOCKET_PATH', async () => {

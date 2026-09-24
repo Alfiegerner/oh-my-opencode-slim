@@ -16,6 +16,7 @@ import type {
   ClientPorts,
   Clock,
   ClockTimerHandle,
+  SessionListEntry,
   SessionListRead,
   SessionListReader,
   SessionStatusRead,
@@ -104,9 +105,14 @@ class FakeStatusReader implements SessionStatusReader {
 
 class FakeSessionListReader implements SessionListReader {
   readonly calls: Array<{ directory: string; parentID: string }> = [];
-  sessionIds: string[] = [];
+  sessions: SessionListEntry[] = [];
   error?: string;
   listBarrier: Promise<void> | null = null;
+
+  /** Convenience for the common case: child ids without an agent. */
+  setSessionIds(...sessionIds: string[]): void {
+    this.sessions = sessionIds.map((sessionId) => ({ sessionId }));
+  }
 
   async listSessions(
     directory: string,
@@ -114,7 +120,10 @@ class FakeSessionListReader implements SessionListReader {
   ): Promise<SessionListRead> {
     this.calls.push({ directory, parentID });
     if (this.listBarrier) await this.listBarrier;
-    return { sessionIds: [...this.sessionIds], error: this.error };
+    return {
+      sessions: this.sessions.map((entry) => ({ ...entry })),
+      error: this.error,
+    };
   }
 }
 
@@ -124,6 +133,7 @@ interface SpawnCall {
   serverUrl: string;
   directory: string;
   parentSessionId?: string;
+  subagentType?: string;
 }
 
 class FakeAdapter implements Multiplexer {
@@ -157,7 +167,7 @@ class FakeAdapter implements Multiplexer {
     description: string,
     serverUrl: string,
     directory: string,
-    options?: { parentSessionId?: string },
+    options?: { parentSessionId?: string; subagentType?: string },
   ): Promise<PaneResult> {
     this.spawnCalls.push({
       sessionId,
@@ -165,6 +175,7 @@ class FakeAdapter implements Multiplexer {
       serverUrl,
       directory,
       parentSessionId: options?.parentSessionId,
+      subagentType: options?.subagentType,
     });
     if (this.spawnBarrier) await this.spawnBarrier;
     if (this.spawnError) throw this.spawnError;
@@ -393,6 +404,27 @@ describe('event filtering and readiness (2.2)', () => {
     expect(h.adapter.layoutCalls).toEqual([
       { layout: 'main-vertical', mainPaneSize: 60 },
     ]);
+  });
+
+  test('threads the created event subagent type into the spawn options (3.3)', async () => {
+    const h = createHarness();
+    h.reader.statuses.set(CHILD, 'busy');
+
+    await h.lifecycle.handleEvent(createdEvent({ subagentType: 'oracle' }));
+
+    expect(h.adapter.spawnCalls).toHaveLength(1);
+    expect(h.adapter.spawnCalls[0]?.subagentType).toBe('oracle');
+    expect(h.lifecycle.getPane(CHILD)?.subagentType).toBe('oracle');
+  });
+
+  test('spawns without a subagent type when the event carries none', async () => {
+    const h = createHarness();
+    h.reader.statuses.set(CHILD, 'busy');
+
+    await h.lifecycle.handleEvent(createdEvent());
+
+    expect(h.adapter.spawnCalls[0]?.subagentType).toBeUndefined();
+    expect(h.lifecycle.getPane(CHILD)?.subagentType).toBeUndefined();
   });
 
   test('falls back to the unknown anchor without blocking creation', async () => {
@@ -747,6 +779,82 @@ describe('rebuild and reconnect backfill (2.4)', () => {
     });
   });
 
+  test('FR-11 rebuild reproduces the first creation subagent type (3.7)', async () => {
+    const h = createHarness();
+    h.reader.statuses.set(CHILD, 'busy');
+    await h.lifecycle.handleEvent(createdEvent({ subagentType: 'oracle' }));
+    expect(h.adapter.spawnCalls[0]?.subagentType).toBe('oracle');
+
+    // Stable idle closes the pane, keeping the child watched for rebuild.
+    h.reader.statuses.set(CHILD, 'idle');
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toEqual(['pane-1']);
+
+    // The rebuild has no created event: the watch entry must carry the type.
+    h.adapter.spawnResult = { success: true, paneId: 'pane-2' };
+    h.reader.statuses.set(CHILD, 'busy');
+    await h.lifecycle.handleEvent(lifecycleEvent('status', { status: 'busy' }));
+
+    expect(h.adapter.spawnCalls).toHaveLength(2);
+    expect(h.adapter.spawnCalls[1]?.subagentType).toBe('oracle');
+    // Every input the display name derives from is byte-identical to the
+    // first spawn (same session id, same type, same encoded description), so
+    // an adapter that names from these options rebuilds the same name.
+    const [first, rebuilt] = h.adapter.spawnCalls;
+    expect(rebuilt).toMatchObject({
+      sessionId: first?.sessionId,
+      subagentType: first?.subagentType,
+      description: first?.description,
+    });
+  });
+
+  test('FR-11 rebuild keeps the subagent type from a backfilled child', async () => {
+    const h = createHarness();
+    h.list.sessions = [{ sessionId: CHILD, subagentType: 'explorer' }];
+    h.reader.statuses.set(CHILD, 'busy');
+    await h.lifecycle.onReconnect();
+    expect(h.adapter.spawnCalls[0]?.subagentType).toBe('explorer');
+
+    h.reader.statuses.set(CHILD, 'idle');
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+    h.clock.advance(STABLE_IDLE_MS);
+    await flushAsync();
+    expect(h.adapter.closeCalls).toEqual(['pane-1']);
+
+    h.adapter.spawnResult = { success: true, paneId: 'pane-2' };
+    h.reader.statuses.set(CHILD, 'busy');
+    await h.lifecycle.handleEvent(lifecycleEvent('status', { status: 'busy' }));
+
+    expect(h.adapter.spawnCalls).toHaveLength(2);
+    expect(h.adapter.spawnCalls[1]?.subagentType).toBe('explorer');
+  });
+
+  test('a busy edge during an in-flight close rebuilds with the same type', async () => {
+    const h = createHarness();
+    h.reader.statuses.set(CHILD, 'busy');
+    await h.lifecycle.handleEvent(createdEvent({ subagentType: 'fixer' }));
+
+    h.reader.statuses.set(CHILD, 'idle');
+    await h.lifecycle.handleEvent(lifecycleEvent('idle'));
+
+    const deferred = createDeferred();
+    h.adapter.closeBarrier = deferred.promise;
+    h.clock.advance(STABLE_IDLE_MS); // the close starts and blocks
+    await flushAsync();
+
+    h.reader.statuses.set(CHILD, 'busy');
+    await h.lifecycle.handleEvent(lifecycleEvent('status', { status: 'busy' }));
+
+    deferred.resolve();
+    h.adapter.closeBarrier = null;
+    await flushAsync();
+
+    expect(h.adapter.spawnCalls).toHaveLength(2);
+    expect(h.adapter.spawnCalls[1]?.subagentType).toBe('fixer');
+  });
+
   test('does not rebuild when the parent is no longer the displayed session', async () => {
     const h = createHarness();
     await activatePane(h);
@@ -796,7 +904,7 @@ describe('rebuild and reconnect backfill (2.4)', () => {
 
   test('backfills a child created while the event stream was down', async () => {
     const h = createHarness();
-    h.list.sessionIds = [CHILD];
+    h.list.setSessionIds(CHILD);
     h.reader.statuses.set(CHILD, 'busy');
 
     await h.lifecycle.onReconnect();
@@ -810,10 +918,32 @@ describe('rebuild and reconnect backfill (2.4)', () => {
     expect(h.lifecycle.getPane(CHILD)?.paneId).toBe('pane-1');
   });
 
+  test('backfill preserves the agent field from the server list (3.4)', async () => {
+    const h = createHarness();
+    h.list.sessions = [{ sessionId: CHILD, subagentType: 'explorer' }];
+    h.reader.statuses.set(CHILD, 'busy');
+
+    await h.lifecycle.onReconnect();
+
+    expect(h.adapter.spawnCalls).toHaveLength(1);
+    expect(h.adapter.spawnCalls[0]?.subagentType).toBe('explorer');
+    expect(h.lifecycle.getPane(CHILD)?.subagentType).toBe('explorer');
+  });
+
+  test('backfills without a subagent type when the list omits the agent', async () => {
+    const h = createHarness();
+    h.list.setSessionIds(CHILD);
+    h.reader.statuses.set(CHILD, 'busy');
+
+    await h.lifecycle.onReconnect();
+
+    expect(h.adapter.spawnCalls[0]?.subagentType).toBeUndefined();
+  });
+
   test('closes a local pane whose child no longer exists on the server', async () => {
     const h = createHarness();
     await activatePane(h);
-    h.list.sessionIds = [];
+    h.list.setSessionIds();
 
     await h.lifecycle.onReconnect();
 
@@ -835,7 +965,7 @@ describe('rebuild and reconnect backfill (2.4)', () => {
 
     // The user switches back; the server list only knows PARENT's child.
     h.lifecycle.setDisplayedSession(PARENT);
-    h.list.sessionIds = [CHILD];
+    h.list.setSessionIds(CHILD);
     await h.lifecycle.onReconnect();
 
     // The other conversation's pane is still live: it must not be closed as
@@ -848,7 +978,7 @@ describe('rebuild and reconnect backfill (2.4)', () => {
     const h = createHarness();
     const deferred = createDeferred();
     h.list.listBarrier = deferred.promise;
-    h.list.sessionIds = [CHILD];
+    h.list.setSessionIds(CHILD);
     h.reader.statuses.set(CHILD, 'busy');
 
     const reconnect = h.lifecycle.onReconnect();
@@ -872,7 +1002,7 @@ describe('rebuild and reconnect backfill (2.4)', () => {
 
     // Another conversation is displayed while its reconcile runs.
     h.lifecycle.setDisplayedSession('parent-2');
-    h.list.sessionIds = [];
+    h.list.setSessionIds();
     await h.lifecycle.onReconnect();
 
     // Back on PARENT, a busy edge must still rebuild the watched child.
@@ -963,7 +1093,7 @@ describe('rebuild and reconnect backfill (2.4)', () => {
     expect(h.lifecycle.getPane(CHILD)).toBeUndefined(); // now watched
 
     h.reader.statuses.set(CHILD, 'retry');
-    h.list.sessionIds = [CHILD];
+    h.list.setSessionIds(CHILD);
     await h.lifecycle.onReconnect();
 
     expect(h.adapter.spawnCalls).toHaveLength(2);
@@ -1036,7 +1166,7 @@ describe('rebuild and reconnect backfill (2.4)', () => {
   test('skips already-held children and records backfill-skipped', async () => {
     const h = createHarness();
     await activatePane(h);
-    h.list.sessionIds = [CHILD];
+    h.list.setSessionIds(CHILD);
 
     await h.lifecycle.onReconnect();
 
@@ -1071,7 +1201,7 @@ describe('rebuild and reconnect backfill (2.4)', () => {
     expect(h.lifecycle.getPane(CHILD)).toBeUndefined();
 
     // The busy event was lost during the outage; the live status map has it.
-    h.list.sessionIds = [CHILD];
+    h.list.setSessionIds(CHILD);
     h.reader.statuses.set(CHILD, 'busy');
     h.adapter.spawnResult = { success: true, paneId: 'pane-2' };
 
@@ -1089,7 +1219,7 @@ describe('rebuild and reconnect backfill (2.4)', () => {
     h.clock.advance(STABLE_IDLE_MS);
     await flushAsync();
 
-    h.list.sessionIds = []; // deleted during the outage
+    h.list.setSessionIds(); // deleted during the outage
     h.reader.statuses.set(CHILD, 'busy');
     await h.lifecycle.onReconnect();
 
@@ -1108,7 +1238,7 @@ describe('rebuild and reconnect backfill (2.4)', () => {
     await flushAsync();
     expect(h.adapter.spawnCalls).toHaveLength(1);
 
-    h.list.sessionIds = [CHILD];
+    h.list.setSessionIds(CHILD);
     await h.lifecycle.onReconnect();
 
     expect(h.adapter.spawnCalls).toHaveLength(1);
@@ -1154,5 +1284,22 @@ describe('pane title metadata (FR-8)', () => {
     await h.lifecycle.handleEvent(createdEvent());
 
     expect(h.adapter.spawnCalls[0]?.description).toBe(CHILD);
+  });
+
+  test('the subagent type never alters the encoded description (3.8)', async () => {
+    // The four non-cmux adapters must keep receiving the byte-identical
+    // `omosc:<pid>:<session>` encoding; the subagent type travels only
+    // through the spawn options, for adapters that build display names.
+    const h = createHarness({
+      ports: {
+        resolvePaneTitle: (childSessionId) => `omosc:4242:${childSessionId}`,
+      },
+    });
+    h.reader.statuses.set(CHILD, 'busy');
+
+    await h.lifecycle.handleEvent(createdEvent({ subagentType: 'oracle' }));
+
+    expect(h.adapter.spawnCalls[0]?.description).toBe(`omosc:4242:${CHILD}`);
+    expect(h.adapter.spawnCalls[0]?.subagentType).toBe('oracle');
   });
 });

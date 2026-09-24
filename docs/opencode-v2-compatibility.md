@@ -10,9 +10,11 @@ requires OpenCode v2.0.7+ on v2 hosts; older v2 hosts are unsupported.
 The adapter targets the v2 plugin API surface (see
 [The v2 plugin API surface](#the-v2-plugin-api-surface-this-adapter-uses)),
 and the compile-time mirror guard below is pinned to `@opencode/plugin`
-2.0.12 (revalidated: `bun run typecheck` passes against 2.0.12 with no
-official-surface drift from the audited 2.0.7 pin; live host verification
-remains the v2.0.7 baseline above).
+2.0.15 (revalidated: `bun run typecheck` passes against 2.0.15 with no
+official session-hook surface drift from the 2.0.12 pin. Transitive
+`@opencode/schema` 2.0.15 adds `session.metadata.updated`; the event
+adapter ignores unknown event types, so no new mapping is required.
+Live host verification remains the v2.0.7 baseline above).
 
 ## How it works
 
@@ -99,7 +101,7 @@ orchestrator-wake children-driven degraded mode are exercised end-to-end
 on the stable host — live mock-driven re-verification on 2026-09-09
 included a queued wake firing after 60 s of parent idle with a stalled
 background child). v2 conformance is compile-time-pinned by the
-mirror-conformance guard against the `@opencode/plugin` 2.0.12
+mirror-conformance guard against the `@opencode/plugin` 2.0.15
 devDependency and exercised by the mock-driven bridge tests. Every v2
 API the adapter touches is
 capability-probed at runtime (`typeof ctx.mcp?.transform === 'function'`,
@@ -342,7 +344,7 @@ the default budget).
 | Foreground model fallback (rate-limit failover) | ✅ | ✅ shim translates re-prompt into `session.switchModel` + `delivery:"steer"` prompt | — |
 | `/preset` (interactive switcher) | ✅ | ✅ TUI plugin entry (`./tui` → `dist/tui2.js`): sidebar + `/preset` dialog or `/preset <name>` fast path | The layer registers from an `append: "app"` slot render because the host's `keymap.layer` is provider-scoped (calling it from plugin `setup` throws `Keymap.Provider is missing`); the command carries an `id` and `slash.arguments`; host needs `ui.slot` + `keymap.layer`; the interactive picker needs `ui.dialog.select` while `/preset <name>` works without it; feedback uses `ui.toast.show`; config-file `preset` still applies at load |
 | TUI default agent | ✅ orchestrator | ✅ orchestrator — `draft.default("orchestrator")`; the v2 TUI honors `default_agent` and hoists the default to the head of the agent list | — |
-| Multiplexer (tmux/zellij/herdr/cmux panes) | ✅ | ❌ host-gated off (`hostFlavor: 'v2'` → `shouldEnableMultiplexer` returns false and the session manager is forced to `type: "none"`) | by design — v2 renders subagents natively |
+| Multiplexer (tmux/zellij/herdr/cmux-tui panes) | ✅ | ❌ host-gated off (`hostFlavor: 'v2'` → `shouldEnableMultiplexer` returns false and the session manager is forced to `type: "none"`) | by design — v2 renders subagents natively |
 | Orchestrator-wake scheduler | ✅ todo-gated (host `todo`/`children`/`status` APIs) | ✅ children-driven degraded mode (`backgroundJobs.orchestratorWake.mode`) | v2 wake enumerates children via `session.list({parentID})` with an event-tracked fallback, gates on children without a terminal `outcome` (staleness-bounded), and delivers with `queue`; v2's native subagent completion nudges still cover the happy path — the port adds a periodic watchdog for stuck children and unreconciled jobs |
 | `chat.headers` (Copilot `x-initiator` routing) | ✅ | ✅ via `session.hook("model.request")` | transport-level only; auxiliary kinds are covered by v2's built-in Copilot provider hook |
 | Companion app | ✅ | ⚠️ unverified | independent desktop app; test separately against v2 |
@@ -390,7 +392,7 @@ currently break this plugin:
 - **Transcript user messages carry no identity.** Context-hook
   transcript user messages on live v2 hosts carry `{id, time, text,
   type}` only — no `agent`, no `sessionID`. The v1 injection gates
-  (phase-reminder, background-job-board, post-file-tool-nudge) key on
+  (phase-reminder, background-job-board) key on
   user-message `info.agent`/`info.sessionID`, so every injection would
   skip. The v2 context bridge stamps the context event's `sessionID` and
   the session's known agent (from the event, falling back to the
@@ -420,7 +422,11 @@ currently break this plugin:
   mutates only system/messages, and cache hints ride
   `ContentPart.cache`. Adoption status: the **compaction hook is
   adopted** — the plugin strips its tagged synthetic parts from the
-  compaction input; **child-session permission rules are applied** —
+  compaction input (phase reminders and job boards). On v1, the
+  `experimental.session.compacting` hook instead marks the next message
+  transform for that session; it strips only phase reminders after the
+  transform, leaving the job board untouched. The v2 adapter does not forward
+  this v1 hook; **child-session permission rules are applied** —
   plugin-managed child sessions receive exact-match task-policy rules
   once at creation via `ctx.session.update({sessionID, permissions})`
   (`createPermissionRulesBridge` in `src/v2/setup.ts`; exact-match

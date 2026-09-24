@@ -2,18 +2,26 @@
  * FR-8 crash-leftover sweep (task 3.8).
  *
  * After a client crashes, its panes survive. This module scans the client's
- * own multiplexer for panes whose title carries our metadata
- * (`omosc:<pid>:<childSessionId>`), and best-effort closes the ones where
- * BOTH hold:
+ * own multiplexer for leftovers whose metadata carries
+ * `omosc:<pid>:<childSessionId>`, and best-effort closes the ones where BOTH
+ * hold:
  *
  * - the encoded owner pid is dead, and
  * - the child session is gone from the server (positive evidence only).
+ *
+ * Candidate discovery is adapter-owned (task 4.4): tmux/zellij/herdr/kitty
+ * scan pane titles, while cmux enumerates terminals and reads back each
+ * launch argv for the `# omosc:` data marker. Both paths hand the core the
+ * same candidate shape — an opaque adapter handle plus the extracted strict
+ * `omosc:<pid>:<childSessionId>` token — so the decision logic below stays
+ * adapter-agnostic; `closePane` is likewise the adapter's own close primitive
+ * (cmux: `terminal close`, which also ends the process).
  *
  * Safety rules:
  * - a live owner is never touched (its panes are still managed);
  * - a child session that still exists is never touched (the pane may still be
  *   the only view of a running child);
- * - a title that does not strictly parse as our encoding is user data and is
+ * - metadata that does not strictly parse as our encoding is user data and is
  *   skipped (NFR-5);
  * - every failure (scan, liveness probe, terminal probe, close) fails soft
  *   and never aborts the remaining panes.
@@ -25,7 +33,14 @@
 import { type DiagnosticLogger, PLUGIN_LOG_SINK } from './diagnostics';
 import { parsePaneTitle } from './pane-title';
 
-/** One pane as reported by a sweep-capable adapter. */
+/**
+ * One leftover candidate as reported by a sweep-capable adapter.
+ *
+ * `paneId` is the adapter-local opaque close handle (cmux: terminal id) and
+ * `title` is the extracted `omosc:<pid>:<childSessionId>` token — from a pane
+ * title or from a launch-argv data marker, depending on the adapter. The core
+ * never interprets `paneId`; only the adapter's own `closePane` does.
+ */
 export interface SweepPane {
   paneId: string;
   title?: string | null;
@@ -35,6 +50,12 @@ export interface SweepPane {
  * Structural adapter capability the sweep needs. Adapters implement it as an
  * optional extension of `Multiplexer`; the wiring narrows instances at
  * runtime, so the shared `Multiplexer` interface stays untouched.
+ *
+ * Discovery is adapter-owned: the title-scanning adapters return pane titles,
+ * cmux returns terminal handles whose `title` was extracted from the launch
+ * argv marker. Candidates without a strictly parseable token never reach a
+ * close command. `listPanesWithTitles` must reject when the scan itself fails
+ * (as opposed to a clean scan with zero candidates), so callers can retry.
  */
 export interface SweepAdapter {
   listPanesWithTitles(): Promise<SweepPane[]>;
@@ -64,6 +85,12 @@ export interface SweepStats {
   skippedActiveSession: number;
   skippedUnparsable: number;
   closeFailures: number;
+  /**
+   * True when candidate discovery itself failed (the adapter's scan threw or
+   * returned a non-list). The pass stays fail-soft; callers can use this to
+   * tell a failed scan from a clean empty pass and retry later.
+   */
+  scanFailed: boolean;
 }
 
 export const SWEEP_EVENT = 'multiplexer.sweep';
@@ -84,19 +111,24 @@ export async function sweepLeftoverPanes(
     skippedActiveSession: 0,
     skippedUnparsable: 0,
     closeFailures: 0,
+    scanFailed: false,
   };
 
   let panes: SweepPane[];
   try {
     panes = await ports.adapter.listPanesWithTitles();
   } catch {
+    stats.scanFailed = true;
     logger.log('[multiplexer] sweep: pane scan failed', {
       event: SWEEP_EVENT,
       outcome: 'scan-failed',
     });
     return stats;
   }
-  if (!Array.isArray(panes)) return stats;
+  if (!Array.isArray(panes)) {
+    stats.scanFailed = true;
+    return stats;
+  }
 
   for (const pane of panes) {
     stats.scanned += 1;

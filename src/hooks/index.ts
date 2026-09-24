@@ -22,7 +22,6 @@ export {
   stoppedJobRecoveryReason,
 } from './orchestrator-wake';
 export { createPhaseReminderHook } from './phase-reminder';
-export { createPostFileToolNudgeHook } from './post-file-tool-nudge';
 export { createReflectCommandHook } from './reflect';
 export { createSearchPathGuardHook } from './search-path-guard';
 export { SessionLifecycle } from './session-lifecycle';

@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 /**
  * Internal-initiator admission tracking on v2 hosts.
  *
@@ -35,7 +37,6 @@ const MAX_TRACKED_ADMISSIONS = 4096;
  * admitted id). Clearing would only add a churn path keyed on events no
  * consumer here otherwise needs. */
 const admissions = new Map<string, true>();
-let syntheticIDSequence = 0;
 
 function key(sessionID: string, messageID: string): string {
   return `${sessionID}:${messageID}`;
@@ -71,15 +72,14 @@ export function isInternalAdmission(
 
 /** Client-chosen message id for internal synthetic admissions. v2
  * `SessionMessage.ID` must start with `msg_`; the synthetic endpoint honors
- * `input.id` and the id survives onto the LLM context message, which is
- * what lets the shim record the admission here before the context event
- * carries it. Unique per process (the tracker is in-memory). */
+ * `input.id` and preserves it on the LLM context message for admission tracking.
+ * The host's session_message.id is a global primary key: a collision across
+ * sessions raises SyntheticConflictError, while one within the same session
+ * silently drops the new admission. IDs must survive process restarts. */
 export function createInternalSyntheticMessageID(): string {
-  syntheticIDSequence += 1;
-  return `msg_omos_${syntheticIDSequence.toString(36)}`;
+  return `msg_omos_${randomUUID()}`;
 }
 
 export function __resetInternalAdmissionsForTesting(): void {
   admissions.clear();
-  syntheticIDSequence = 0;
 }

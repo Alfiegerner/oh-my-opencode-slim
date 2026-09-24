@@ -214,7 +214,7 @@ describe('MultiplexerConfigSchema', () => {
       'zellij',
       'herdr',
       'kitty',
-      'cmux',
+      'cmux-tui',
       'none',
     ] as const) {
       expect(MultiplexerConfigSchema.parse({ type }).type).toBe(type);

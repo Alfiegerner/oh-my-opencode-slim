@@ -46,9 +46,11 @@ export function getMultiplexer(config: MultiplexerConfig): Multiplexer | null {
       multiplexer = new HerdrMultiplexer(config.layout, config.main_pane_size);
       actualType = 'herdr';
       break;
-    case 'cmux':
-      multiplexer = new CmuxMultiplexer(config.layout, config.main_pane_size);
-      actualType = 'cmux';
+    case 'cmux-tui':
+      multiplexer = new CmuxMultiplexer(config.layout, config.main_pane_size, {
+        binary: config.cmux_tui_binary,
+      });
+      actualType = 'cmux-tui';
       break;
     case 'kitty':
       multiplexer = new KittyMultiplexer(config.layout, config.main_pane_size);
@@ -60,8 +62,12 @@ export function getMultiplexer(config: MultiplexerConfig): Multiplexer | null {
       if (process.env.CMUX_TUI_SOCKET || process.env.CMUX_MUX_SOCKET) {
         // New-generation cmux TUI; CMUX_TUI_SOCKET takes precedence over the
         // legacy CMUX_MUX_SOCKET alias.
-        multiplexer = new CmuxMultiplexer(config.layout, config.main_pane_size);
-        actualType = 'cmux';
+        multiplexer = new CmuxMultiplexer(
+          config.layout,
+          config.main_pane_size,
+          { binary: config.cmux_tui_binary },
+        );
+        actualType = 'cmux-tui';
       } else if (process.env.TMUX_PANE) {
         multiplexer = new TmuxMultiplexer(config.layout, config.main_pane_size);
         actualType = 'tmux';

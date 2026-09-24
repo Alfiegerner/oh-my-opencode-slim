@@ -34,10 +34,21 @@ export interface SessionStatusReader {
   readStatus(directory: string): Promise<SessionStatusRead>;
 }
 
+/** One child session as reported by the server session list. */
+export interface SessionListEntry {
+  sessionId: string;
+  /**
+   * The child session's `agent` field, when the host exposes it. Preserved so
+   * the FR-7 backfill can pass the subagent type to the adapter exactly like
+   * the created-event path does.
+   */
+  subagentType?: string;
+}
+
 /** Result of one session-list read. */
 export interface SessionListRead {
-  /** Child session ids whose `parentID` equals the requested parent. */
-  sessionIds: readonly string[];
+  /** Child sessions whose `parentID` equals the requested parent. */
+  sessions: readonly SessionListEntry[];
   /** Set when the read failed. */
   error?: string;
 }

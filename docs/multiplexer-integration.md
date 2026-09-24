@@ -1,7 +1,8 @@
 # Multiplexer Integration Guide
 
-Use tmux, Zellij, Herdr, cmux, or kitty to watch subagents work in live panes
-next to the TUI client that displays their parent session.
+Use tmux, Zellij, Herdr, cmux-tui, or kitty to watch subagents work in live
+views (split panes, or for cmux-tui sibling tabs) anchored to the TUI client
+that displays their parent session.
 
 > **Execution model:** panes are opened by the **TUI client** (`opencode attach`,
 > or the TUI process of `opencode --port`), never by the OpenCode server. Each
@@ -43,8 +44,9 @@ How it works:
    closes, or positions a pane, and never reads multiplexer environment
    variables.
 2. Every **TUI client** that displays the parent session subscribes to the
-   host session events and, for each eligible child session, splits **the pane
-   it is itself running in**.
+   host session events and, for each eligible child session, creates a view in
+   **the pane it is itself running in** — a split pane (tmux / Zellij / Herdr /
+   kitty), or a sibling tab appended to that pane (cmux-tui).
 3. The pane runs a pure view command:
 
    ```text
@@ -126,7 +128,7 @@ only enables panes when the configured adapter matches what it detects.
 **Single machine (embedded TUI with a listener):**
 
 ```bash
-tmux            # or zellij / herdr / kitty / cmux
+tmux            # or zellij / herdr / kitty / cmux-tui
 opencode --port 4096
 ```
 
@@ -161,14 +163,41 @@ integration can be installed separately:
 herdr integration install opencode
 ```
 
-**cmux** — requires the **new-generation TUI** (the cross-platform Rust
-`cmux.protocol/2` build; `cmux-tui-v0.13.3+` is the practical floor). Detected
-via `CMUX_TUI_SOCKET` (preferred) or legacy `CMUX_MUX_SOCKET`; the anchor is
-resolved from `CMUX_TUI_TERMINAL_ID`. The old-generation macOS app (0.64.x,
-surface model) is **not supported**. Availability is a protocol read
-self-check, not `--version` (the binary reports a crate version unrelated to
-the npm distribution), so never assume that a `cmux` on `PATH` is the TUI — an
-explicit binary path wins when the two coexist.
+**cmux-tui** — the `cmux-tui` value of `multiplexer.type` selects the
+cross-platform Rust TUI (`cmux.protocol/2`; `cmux-tui-v0.13.3+` is the
+practical floor). Detected via `CMUX_TUI_SOCKET` (preferred) or legacy
+`CMUX_MUX_SOCKET`; the anchor is resolved from `CMUX_TUI_TERMINAL_ID`.
+Availability is a protocol read self-check, not `--version` — the binary
+reports its crate version (`0.1.0`), which has nothing to do with the npm
+distribution's version.
+
+> **cmux-tui is not the macOS app.** `cmux` on macOS is a **different product
+> that only shares the name**. It speaks the 0.64.x surface model
+> (`CMUX_SOCKET_PATH`, `CMUX_SURFACE_ID`, `CMUX_PANEL_ID`,
+> `CMUX_REMOTE_TRANSPORT`, `CMUX_BUNDLED_CLI_PATH`, …), none of which this
+> adapter reads, and it ships **its own bundled CLI** — normally installed as
+> `~/.cmux/bin/cmux`, where it shadows cmux-tui on `PATH` and where `cmux ssh`
+> will overwrite it (deleting a cmux-tui binary that lived there). Neither the
+> app nor its bundled CLI is supported. The plugin resolves the binary from
+> `multiplexer.cmux_tui_binary` when set, then `which cmux-tui`, then
+> `which cmux` (this last fallback is how the app's bundled CLI can be picked
+> up; the probe logs `[cmux-tui] findBinary: found <path>`). Set the config
+> key, or make sure the real cmux-tui comes first on `PATH`.
+
+Child views are **sibling tabs appended inside the parent pane**, created
+already named with the human-readable `parent_name/child_name` form
+(`pane <parent pane> run --on-exit keep --name <parent_name/child_name> --
+<attach argv>`). `parent_name` is the parent tab's `name`, or `Agent<plugin
+pid>` when it is empty; `child_name` is `<subagent_type>:<up to 5 characters of
+the child session id>` (`subagent` when the type is unavailable; for example
+`Agent770446/oracle:GdEx6`). New tabs are
+appended at the end (no reordering), and the pane's previously active tab is
+restored after creation (falling back to the parent tab when it cannot be
+determined). Closing uses `terminal close`, which removes every view of the
+terminal **and ends its process** — unlike `tab close` / `pane close`, which
+leave a zero-view process alive. cmux-tui has **no layout expression**:
+`multiplexer.layout` and `multiplexer.main_pane_size` are ignored (no command
+is issued).
 
 **Kitty** — requires `allow_remote_control` **and** `listen_on` in
 `kitty.conf`:
@@ -186,7 +215,8 @@ created, and verify with `kitten @ ls` from a normal shell.
 ### 4. Trigger delegated work
 
 Ask OpenCode to do something that launches subagents. New panes appear next to
-the pane that displays the parent session.
+the pane that displays the parent session (for cmux-tui, a new tab appears
+inside that pane).
 
 ## Configuration
 
@@ -202,9 +232,10 @@ the pane that displays the parent session.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `type` | string | `"none"` | `"auto"`, `"tmux"`, `"zellij"`, `"herdr"`, `"cmux"`, `"kitty"`, or `"none"` |
-| `layout` | string | `"main-vertical"` | Layout preset: `main-vertical`, `main-horizontal`, `tiled`, `even-horizontal`, `even-vertical`. Each adapter maps it to its nearest native expression (see [Layouts](#layouts)) |
-| `main_pane_size` | number | `60` | Main pane size percentage (`20`–`80`). Applied by tmux for the `main-*` layouts; ignored by Zellij, Herdr, kitty, and cmux |
+| `type` | string | `"none"` | `"auto"`, `"tmux"`, `"zellij"`, `"herdr"`, `"cmux-tui"`, `"kitty"`, or `"none"` |
+| `layout` | string | `"main-vertical"` | Layout preset: `main-vertical`, `main-horizontal`, `tiled`, `even-horizontal`, `even-vertical`. Each adapter maps it to its nearest native expression; cmux-tui has no layout expression and ignores it (see [Layouts](#layouts)) |
+| `main_pane_size` | number | `60` | Main pane size percentage (`20`–`80`). Applied by tmux for the `main-*` layouts; ignored by Zellij, Herdr, kitty, and cmux-tui |
+| `cmux_tui_binary` | string | omitted | Explicit path to the cmux-tui binary. When omitted, the client resolves `cmux-tui` first, then `cmux`, on `PATH` |
 
 All `multiplexer.*` values are read by the client only. An invalid value
 disables pane management (fail-closed) with a once-per-process diagnostic.
@@ -242,15 +273,17 @@ is no longer converted automatically. Replace it with `multiplexer.*`:
 
 The five standard layouts and their fixed mapping per adapter. Where an adapter
 has no exact equivalent, it uses the nearest native expression (marked
-*approximate*); `main_pane_size` is tmux-only.
+*approximate*); `main_pane_size` is tmux-only, and cmux-tui ignores both
+settings entirely (its child views are tabs inside the parent pane, not panes in
+a layout).
 
-| Layout | tmux | Zellij | Herdr | kitty | cmux |
+| Layout | tmux | Zellij | Herdr | kitty | cmux-tui |
 |--------|------|--------|-------|-------|------|
-| `main-vertical` | `-h` split, then `select-layout main-vertical` (+ `main-pane-width`) | `new-pane --direction right` | `pane split --direction right`; *approximate* agent column (below) | `tall` layout | `pane split --right` |
-| `main-horizontal` | `-v` split, then `select-layout main-horizontal` (+ `main-pane-height`) | `new-pane --direction down` | `pane split --direction down` | `fat` layout | `pane split --down` |
-| `even-horizontal` | `-h` split, then `select-layout even-horizontal` | no direction (Zellij's native placement) | `pane split --direction right` | `horizontal` layout | `pane split --right` |
-| `even-vertical` | `-v` split, then `select-layout even-vertical` | no direction (native placement) | `pane split --direction down` | `vertical` layout | `pane split --down` |
-| `tiled` | `-h` split, then `select-layout tiled` | no direction (native placement) | `pane split --direction right` | `grid` layout | `pane split --right` |
+| `main-vertical` | `-h` split, then `select-layout main-vertical` (+ `main-pane-width`) | `new-pane --direction right` | `pane split --direction right`; *approximate* agent column (below) | `tall` layout | ignored (no layout expression) |
+| `main-horizontal` | `-v` split, then `select-layout main-horizontal` (+ `main-pane-height`) | `new-pane --direction down` | `pane split --direction down` | `fat` layout | ignored (no layout expression) |
+| `even-horizontal` | `-h` split, then `select-layout even-horizontal` | no direction (Zellij's native placement) | `pane split --direction right` | `horizontal` layout | ignored (no layout expression) |
+| `even-vertical` | `-v` split, then `select-layout even-vertical` | no direction (native placement) | `pane split --direction down` | `vertical` layout | ignored (no layout expression) |
+| `tiled` | `-h` split, then `select-layout tiled` | no direction (native placement) | `pane split --direction right` | `grid` layout | ignored (no layout expression) |
 
 Adapter notes:
 
@@ -272,8 +305,9 @@ Adapter notes:
   the new window is placed next to the parent with `--next-to=id:<id>` (`id:`
   is the window search field; `window_id:` is tab-level and must not be used
   there). A layout that is already applied is not re-applied.
-- **cmux** — only right/down splits exist, so each layout picks the nearest
-  direction and there is no rebalancing.
+- **cmux-tui** — no layout expression: child views are tabs inside the parent
+  pane, so `multiplexer.layout` and `multiplexer.main_pane_size` are ignored
+  and no layout command is issued.
 
 ## Per-client view semantics
 
@@ -281,8 +315,9 @@ A pane is a **view**, and views belong to the viewer:
 
 - Every TUI client that displays the parent session manages **its own** panes.
   Two clients displaying the same parent session and the same child each get
-  their own pane, anchored next to their own parent pane. This is expected, not
-  a leak: anchors, control planes, and pane ids are all client-local.
+  their own pane, anchored to their own parent pane (next to it, or inside it
+  as a tab for cmux-tui). This is expected, not a leak: anchors, control planes,
+  and view handles are all client-local.
 - There are **no cross-process files and no coordination** between clients. A
   client never writes where it is, and never touches another client's panes.
 - A single client maintains **at most one pane per child session** (in-process
@@ -318,8 +353,9 @@ a structured, distinguishable reason:
 | `backfill-skipped` | Reconnect compensation found this client already holds that child's pane |
 
 Every successful creation logs the full identity: child session, parent
-session, adapter, pane id, and the anchored target that was split. Admission
-and host diagnostics are emitted at most once per cause per process.
+session, adapter, view handle (for cmux-tui the terminal id), and the anchored
+target the view was created in. Admission and host diagnostics are emitted at
+most once per cause per process.
 
 **Log paths:**
 
@@ -329,14 +365,45 @@ and host diagnostics are emitted at most once per cause per process.
 
 ## Known Limitations
 
-- **Crash-leftover panes are best-effort.** Created panes are titled
-  `omosc:<owner pid>:<child session id>`, and on startup/reconnect the client
-  scans its own multiplexer for panes whose owner process is dead **and** whose
-  child session is gone, closing them. However, once `opencode attach` starts
-  inside the pane, the host may rewrite the pane title (for example to
+- **Crash-leftover views are best-effort.** Views carry adapter-specific
+  metadata encoding the owner pid and child session id. tmux / Zellij / Herdr /
+  kitty write it into the pane title (`omosc:<owner pid>:<child session id>`);
+  cmux-tui embeds a `# omosc:<owner pid>:<child session id>` data marker in the
+  spawned process's argv instead (its tab name is the human-readable
+  `parent_name/child_name` name). On startup/reconnect the client scans its own
+  multiplexer for views whose owner process is dead **and** whose child session
+  is gone, closing them. For the title-based adapters, once `opencode attach`
+  starts inside the pane the host may rewrite the pane title (for example to
   `OC | <title>`), so the sweep often cannot recognize a crashed client's
-  leftover pane — it is then left for you to close manually. Cross-multiplexer
-  leftovers are always manual.
+  leftover pane — it is then left for you to close manually. For cmux-tui the
+  sweep discovers candidates from `terminal list` and reads each terminal's
+  argv with `terminal <sel> process show`, so user terminals are never touched.
+  Exited terminals still appear in `terminal list` and still return their
+  argv, so leftover tabs whose process already exited are cleaned up as well.
+  Two classes are still left for you to close manually: views spawned under a
+  `cmd.exe` shell, where the data marker cannot be written as a comment and is
+  omitted (so the sweep cannot identify them), and legacy cmux-tui leftovers
+  from the previous implementation. Cross-multiplexer leftovers are always
+  manual.
+- **cmux-tui child views occupy the parent pane's tab bar.** Each subagent gets
+  a tab in the parent pane, appended at the end and never reordered; tabs are
+  reclaimed when the child is deleted or closes on stable idle. This is the
+  visible cost of the causally correct placement: a sibling tab cannot be
+  misread as a child of another tab.
+- **Closing a cmux-tui child tab can collapse the pane.** If the parent tab has
+  already been closed and the child tab is the pane's last tab, closing the
+  child removes the pane itself (cmux-tui's own lifecycle rule). This only
+  happens after you have removed the parent view.
+- **Closing the currently active view changes the active view.** The close path
+  never touches the user's focus, with one unavoidable exception: when the view
+  being closed is itself the active one, the active view necessarily changes
+  (there is no close primitive that removes a view without that side effect).
+  cmux-tui shows this whenever a child tab is the parent pane's active tab; this
+  is accepted, not a defect.
+- **Legacy cmux-tui leftovers need manual cleanup.** The previous cmux-tui
+  implementation wrote `omosc:<pid>:<session>` into the pane name; the new
+  sweep identifies cmux-tui views only by the argv data marker, so those legacy
+  panes cannot be recognized and must be closed by hand.
 - **Stable idle is a debounce, not task-level completion.** A pane closes when
   the child stays idle past the debounce window (default 5 s) and a final
   re-check finds it not busy: an absent `/session/status` entry counts as
@@ -381,12 +448,14 @@ removed or changed behavior, with migration guidance:
 | 1 | `multiplexer.zellij_pane_mode` + agent-tab | Default `agent-tab` opened panes in a dedicated `opencode-agents` tab (with focus save/restore, first-pane reuse, `new-tab` / `go-to-tab-by-id`); `current-tab` opted into the parent tab | Key is unsupported and ignored; Zellij panes **always** open in the tab containing the parent pane (no tab creation, no tab switching, no focus save/restore) | Delete `zellij_pane_mode` from config. Leaving it is harmless: panes keep working and one deprecation warning is logged |
 | 2 | tmux pane location registry | The TUI wrote `…/opencode/storage/oh-my-opencode-slim/tmux-panes/<hash>.json` (session → `TMUX_PANE`, owner pid, 30 s TTL); the server read it and otherwise fell back to the **server's own** `TMUX_PANE` | No cross-process files at runtime. Each client anchors on its own `TMUX_PANE`, re-resolved at spawn time, and addresses its own tmux server via `-S <socket>` from `TMUX` | None. Stale `tmux-panes/*.json` files can be deleted; nothing reads them |
 | 3 | Deferred close for background jobs | On idle, the server checked the in-memory background job board; if a job was running the close was skipped and retried when the job finished (no debounce) | Client-side **stable-idle debounce** (default 5 s) plus a final idle re-check; busy within the window cancels the close; deletion closes immediately | None. If a child idles between turns, expect a close/rebuild flap (accepted; see [Known Limitations](#known-limitations)) |
-| 4 | cmux adapter | Old-generation macOS app (0.64.x, surface model): `CMUX_SOCKET_PATH` / workspace / surface ids, readiness polling, deferred spawn retries, orphan cooldowns, finite close budgets, hot-reload takeover, and vertical `equalize` rebalancing | Rewritten for the new-generation TUI (`cmux.protocol/2`): `CMUX_TUI_SOCKET` (or legacy `CMUX_MUX_SOCKET`), two-hop anchor (`CMUX_TUI_TERMINAL_ID` → terminal → tab → pane), `pane split --right/--down`, `pane run --on-exit keep -- <argv>`, `pane close`; availability by protocol read self-check, never `--version`; no cooldowns, budgets, deferred spawns, registries, or `equalize` | Install the new-generation cmux TUI (`cmux-tui-v0.13.3+`). The old macOS app is out of scope; macOS and Linux use the same binary and interface |
-| 5 | Layout scope | Layouts/rebalancing could act broadly (server-side scope, kitty's global active-tab change, cmux `equalize` affecting unrelated vertical subtrees) | Layout and close only ever touch panes this client created: tmux rebalances only anchors it split into, kitty applies its layout to the parent window's tab, cmux performs no rebalancing at all | None. Layout behavior is now strictly per-client and per-created-pane |
+| 4 | cmux-tui adapter | The macOS app — a different product that only shares the name (0.64.x, surface model): `CMUX_SOCKET_PATH` / workspace / surface ids, readiness polling, deferred spawn retries, orphan cooldowns, finite close budgets, hot-reload takeover, and vertical `equalize` rebalancing | Rewritten for **cmux-tui** (`cmux.protocol/2`): `CMUX_TUI_SOCKET` (or legacy `CMUX_MUX_SOCKET`), two-hop anchor (`CMUX_TUI_TERMINAL_ID` → terminal → tab → pane), a sibling tab appended inside the parent pane (`pane run --on-exit keep --name <parent/child> -- <argv>`), `terminal close`; availability by protocol read self-check, never `--version`; no cooldowns, budgets, deferred spawns, registries, `equalize`, or screen-level splits | Install **cmux-tui** (`cmux-tui-v0.13.3+`). The macOS app and the CLI it bundles are out of scope; macOS and Linux use the same cmux-tui binary and interface |
+| 5 | Layout scope | Layouts/rebalancing could act broadly (server-side scope, kitty's global active-tab change, cmux-tui `equalize` affecting unrelated vertical subtrees) | Layout and close only ever touch panes this client created: tmux rebalances only anchors it split into, kitty applies its layout to the parent window's tab, cmux-tui performs no rebalancing at all | None. Layout behavior is now strictly per-client and per-created-pane |
 | 6 | kitty active-window behavior | `kitten @ launch` opened windows relative to the active window, and the layout change hit the **active tab** | Anchoring is `KITTY_WINDOW_ID`: the new window is placed `--next-to=id:<parent>` and the mapped layout is applied to the **parent window's tab** (`--match=window_id:<id>`); the active tab is never modified | None. `main_pane_size` remains ignored by kitty |
 | 7 | Embedded-mode restriction | Best-effort behavior with the server's environment; no listener required by design | Bare `opencode` (no TCP listener) is **fail-closed**: no pane and exactly one `host-unreachable` diagnostic; the plugin cannot create a listener for the host | Start with `opencode --port <port>`, or use `opencode serve` + `opencode attach <url>` |
 | 8 | Per-client view semantics | One global manager decided pane placement, with a single view per child | Every client that displays the parent opens **its own** pane; the same child can have several panes, one per viewing client, with no coordination | Expect one pane per displaying client. Close extras manually if undesired; dispatch is still once per task |
 | 9 | Server-side pane execution | `src/index.ts` built a multiplexer session manager and routed `session.created/status/idle/deleted` on the server; pane code read multiplexer env from the server process | Pane code lives only in the TUI entry's dependency graph. The server never creates, closes, or positions a pane and never reads multiplexer environment variables (invariant I1) | None. Headless and v2 hosts are unaffected (feature off) |
+| 10 | cmux-tui child view placement | Subagent views were **screen-level split panes** shown side by side with the parent (and titled with the encoded `omosc:<pid>:<session>` name) | Each subagent view is a **sibling tab appended inside the parent pane**, created already named `parent_name/child_name`; the pane's previously active tab is restored after creation; closing uses `terminal close` (ends the process) | None. No config change; `multiplexer.layout` / `multiplexer.main_pane_size` are now ignored for cmux-tui |
+| 11 | `multiplexer.type: "cmux"` value | The type value `"cmux"` selected the cmux-tui adapter | The value is renamed to `"cmux-tui"`; `"cmux"` is no longer a valid type, so the key is dropped, the type falls back to `"none"` (pane management disabled), and a once-per-process diagnostic reports the rename | Rename the value to `"cmux-tui"` |
 
 ## Troubleshooting
 
@@ -405,9 +474,10 @@ removed or changed behavior, with migration guidance:
 
 **Panes open in the wrong place**
 
-- The pane is always split from the pane that displays the parent session at
-  spawn time. Move the parent session to another pane/multiplexer first; a
-  rebuild after the child turns busy follows the new position.
+- The view is always created in the pane that displays the parent session at
+  spawn time: a split for tmux / Zellij / Herdr / kitty, or a tab inside that
+  pane for cmux-tui. Move the parent session to another pane/multiplexer first;
+  a rebuild after the child turns busy follows the new position.
 - Missing anchor (`adapter-not-found`) means no multiplexer command was issued
   at all — the client could not resolve its own anchor from the environment.
 
@@ -422,11 +492,17 @@ removed or changed behavior, with migration guidance:
 - `KITTY_LISTEN_ON` missing → add `listen_on` to `kitty.conf` and restart
   kitty; verify with `kitten @ ls`.
 
-**cmux**
+**cmux-tui**
 
-- `adapter-unavailable` with an old-generation diagnostic → the binary is the
-  0.64.x macOS app, not the TUI. Install the new-generation TUI and/or point
-  the plugin at its binary explicitly.
+- `adapter-unavailable` → the resolved binary is not cmux-tui. The usual cause
+  is the macOS app's bundled CLI shadowing it on `PATH` (the app installs
+  itself as `~/.cmux/bin/cmux`, and `cmux ssh` rewrites that path). Check the
+  path reported by the `findBinary: found` line in the client log to see which
+  binary was picked; the log redactor masks opaque runs of 33+ characters
+  (4 leading + 2 trailing survive), so a deeply nested path prints as
+  `/tmp/…ux` while typical install paths print in full. Then set
+  `multiplexer.cmux_tui_binary` to the real cmux-tui binary or put it first on
+  `PATH` — the explicit key is tried before any `PATH` probe.
 
 **Panes close and reopen**
 
@@ -434,7 +510,12 @@ removed or changed behavior, with migration guidance:
   the accepted stable-idle semantics; see
   [Known Limitations](#known-limitations).
 
-**Leftover panes after a client crash**
+**Leftover views after a client crash**
 
-- The sweep is best-effort and often cannot match a pane whose title was
-  rewritten by `opencode attach`. Close such panes manually.
+- The sweep is best-effort. For tmux / Zellij / Herdr / kitty it often cannot
+  match a pane whose title was rewritten by `opencode attach`. For cmux-tui it
+  identifies views by the `# omosc:...` argv marker; exited terminals keep that
+  argv and `terminal close` still works on them, so a crashed client's leftover
+  tabs are recognized whether or not their process is still running. Only
+  legacy cmux-tui leftovers created by the previous implementation (which wrote
+  `omosc:` into the pane name) are not recognized. Close such views manually.
