@@ -215,6 +215,63 @@ describe('ForegroundFallbackManager v2 retry hook', () => {
       );
     },
   );
+
+  test('a late-landing switch reconciles model state and advances the chain', async () => {
+    // Fake timers drive the 2s host-call timeout so no real wall-clock is
+    // awaited (same jest-compat pattern as the backoff-dispose test).
+    jest.useFakeTimers();
+    try {
+      const onSessionModelChanged = mock(() => {});
+      const mgr = new ForegroundFallbackManager(
+        { orchestrator: ['test/A', 'test/B', 'test/C'] },
+        true,
+        { directory: '/test' } as any,
+        3, // maxRetries
+        undefined, // coordinator
+        onSessionModelChanged,
+      );
+      const event = (id: string) => ({
+        sessionID: 'retry-late-landing',
+        agent: 'orchestrator',
+        model: { providerID: 'test', id },
+        error: { message: 'rate limit' },
+        decision: { retry: false },
+      });
+      let resolveSwitch!: (value: unknown) => void;
+      const pendingSwitch = mock(
+        () =>
+          new Promise<unknown>((resolve) => {
+            resolveSwitch = resolve;
+          }),
+      );
+      const pending = mgr.handleV2Retry(event('A'), pendingSwitch);
+      jest.advanceTimersByTime(2_500);
+      await pending;
+      // Timeout: decision untouched, target kept retryable.
+      expect(pendingSwitch).toHaveBeenCalledWith('retry-late-landing', {
+        providerID: 'test',
+        id: 'B',
+      });
+      expect(onSessionModelChanged).not.toHaveBeenCalled();
+      // The host lands the switch late: state reconciles to B.
+      resolveSwitch(undefined);
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      expect(onSessionModelChanged).toHaveBeenCalledWith(
+        'retry-late-landing',
+        'test/B',
+      );
+      // The next failure on B advances the chain to C instead of
+      // re-switching to B.
+      const nextSwitch = mock(async () => {});
+      await mgr.handleV2Retry(event('B'), nextSwitch);
+      expect(nextSwitch).toHaveBeenCalledWith('retry-late-landing', {
+        providerID: 'test',
+        id: 'C',
+      });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

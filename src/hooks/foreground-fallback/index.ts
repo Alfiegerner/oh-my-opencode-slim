@@ -25,6 +25,7 @@ import { log } from '../../utils/logger';
 import { getClient } from '../../utils/opencode-client';
 import {
   abortSessionWithTimeout,
+  OperationTimeoutError,
   parseModelReference,
   withTimeout,
 } from '../../utils/session';
@@ -771,6 +772,8 @@ export class ForegroundFallbackManager {
     ) => Promise<unknown>,
   ): Promise<void> {
     let picked: string | undefined;
+    let switchRequest: Promise<unknown> | undefined;
+    const from = `${event.model.providerID}/${event.model.id}`;
     try {
       const { sessionID } = event;
       if (!this.enabled || this.disposed || this.inProgress.has(sessionID))
@@ -782,7 +785,6 @@ export class ForegroundFallbackManager {
         });
         return;
       }
-      const from = `${event.model.providerID}/${event.model.id}`;
       if (
         this.sessionTried.get(sessionID)?.has(from) &&
         this.sessionModel.get(sessionID) !== from
@@ -794,11 +796,12 @@ export class ForegroundFallbackManager {
       if (!selected || selected === 'exhausted') return;
       const { agentName, nextModel, ref } = selected;
       picked = nextModel;
+      switchRequest = switchModel(sessionID, {
+        providerID: ref.providerID,
+        id: ref.modelID,
+      });
       await withTimeout(
-        switchModel(sessionID, {
-          providerID: ref.providerID,
-          id: ref.modelID,
-        }),
+        switchRequest,
         HOST_CALL_TIMEOUT_MS,
         'foreground retry model switch timed out',
       );
@@ -816,6 +819,33 @@ export class ForegroundFallbackManager {
       // Unconfirmed switch: keep the target selectable (a timed-out switch
       // may still land; the next event's model is the host truth).
       if (picked) this.sessionTried.get(event.sessionID)?.delete(picked);
+      const pendingSwitch = switchRequest;
+      if (err instanceof OperationTimeoutError && picked && pendingSwitch) {
+        // Late landing: the timeout cannot cancel the host call. If it
+        // settles after we gave up, reconcile only when nothing advanced
+        // the model since — the check and the write run synchronously, so
+        // a hook that already moved on fails closed instead of being
+        // overwritten. No toast here: the next event's success path
+        // notifies; this only repairs state.
+        const target = picked;
+        void pendingSwitch.then(
+          () => {
+            if (
+              this.disposed ||
+              this.sessionModel.get(event.sessionID) !== from
+            )
+              return;
+            this.sessionModel.set(event.sessionID, target);
+            this.onSessionModelChanged?.(event.sessionID, target);
+            log('[foreground-fallback] retry hook reconciled a late switch', {
+              sessionID: event.sessionID,
+              from,
+              to: target,
+            });
+          },
+          () => {},
+        );
+      }
       log(
         '[foreground-fallback] retry hook switch failed; host decision unchanged',
         { sessionID: event?.sessionID, error: stringifyError(err) },
