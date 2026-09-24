@@ -484,11 +484,11 @@ uses the `question` tool as the blocking boundary instead.
 
 ### Background Job Board Injection
 
-By default, each prompt uses the `latest` board strategy. The hook removes prior
-metadata-tagged board messages and injects the current board snapshot, preserving
-the existing strip-and-replace behavior.
+By default, `latest` freezes one board snapshot per eligible turn and replays
+earlier snapshots without a cap; it does not replace prior boards. Snapshots
+disappear on process restart, compaction, revert, or session deletion.
 
-For checkpoint-oriented workflows, opt in to the append-only strategy:
+For long-lived processes, opt in to the bounded, checkpoint-compatible strategy:
 
 ```jsonc
 {

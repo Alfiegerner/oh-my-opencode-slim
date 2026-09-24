@@ -441,7 +441,7 @@ export const BackgroundJobsConfigSchema = z.object({
     .enum(['latest', 'checkpoint-compatible'])
     .default('latest')
     .describe(
-      'Board injection strategy. "latest" replaces prior board messages; "checkpoint-compatible" preserves them and appends only changed board snapshots.',
+      'Board injection strategy. "latest" retains and replays one frozen board snapshot per eligible turn without a snapshot cap; "checkpoint-compatible" appends only changed snapshots with a bounded cache epoch.',
     ),
   maxSessionsPerAgent: z.number().int().min(1).max(10).default(2),
   maxContextLines: z.number().int().min(0).max(500_000).default(50_000),
